@@ -9,8 +9,6 @@ import sys
 for proxy_var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
     os.environ.pop(proxy_var, None)
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '7'  # Adjust as needed
-
 from .handler import AceStepHandler
 from .gradio_ui import create_gradio_interface
 
