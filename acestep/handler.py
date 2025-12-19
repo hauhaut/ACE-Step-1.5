@@ -675,6 +675,10 @@ class AceStepHandler:
             # Load audio file
             audio, sr = torchaudio.load(audio_file)
             
+            logger.info(f"Reference audio shape: {audio.shape}")
+            logger.info(f"Reference audio sample rate: {sr}")
+            logger.info(f"Reference audio duration: {audio.shape[-1] / 48000.0} seconds")
+            
             # Convert to stereo (duplicate channel if mono)
             if audio.shape[0] == 1:
                 audio = torch.cat([audio, audio], dim=0)
@@ -1074,7 +1078,7 @@ class AceStepHandler:
                     expected_latent_length = current_wav.shape[-1] // 1920
                     target_latent = self.silence_latent[0, :expected_latent_length, :]
                 else:
-                    target_latent = self.vae.encode(current_wav)
+                    target_latent = self.vae.encode(current_wav.to(self.device).to(self.dtype)).latent_dist.sample()
                     target_latent = target_latent.squeeze(0).transpose(0, 1)
                 target_latents_list.append(target_latent)
                 latent_lengths.append(target_latent.shape[0])
@@ -1430,7 +1434,7 @@ class AceStepHandler:
                 refer_audio_order_mask.append(batch_idx)
             else:
                 for refer_audio in refer_audios:
-                    refer_audio_latent = self.vae.encode(refer_audio.unsqueeze(0), chunked=False)
+                    refer_audio_latent = self.vae.encode(refer_audio.unsqueeze(0)).latent_dist.sample()
                     refer_audio_latents.append(refer_audio_latent.transpose(1, 2))
                     refer_audio_order_mask.append(batch_idx)
 

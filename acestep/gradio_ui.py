@@ -203,7 +203,8 @@ def create_generation_section(handler) -> dict:
                 init_llm_checkbox = gr.Checkbox(
                     label="Initialize 5Hz LM",
                     value=False,
-                    info="Check to initialize 5Hz LM during service initialization"
+                    info="Check to initialize 5Hz LM during service initialization",
+                    interactive=False
                 )
             
             with gr.Row():
@@ -224,10 +225,17 @@ def create_generation_section(handler) -> dict:
             with gr.Column(scale=2):
                 with gr.Accordion("📝 Required Inputs", open=True):
                     # Task type
+                    # Determine initial task_type choices based on default model
+                    default_model_lower = (default_model or "").lower()
+                    if "turbo" in default_model_lower:
+                        initial_task_choices = ["text2music", "repaint", "cover"]
+                    else:
+                        initial_task_choices = ["text2music", "repaint", "cover", "extract", "lego", "complete"]
+                    
                     with gr.Row():
                         with gr.Column(scale=2):
                             task_type = gr.Dropdown(
-                                choices=["text2music", "repaint", "cover", "extract", "lego", "complete"],
+                                choices=initial_task_choices,
                                 value="text2music",
                                 label="Task Type",
                                 info="Select the task type for generation",
@@ -458,6 +466,14 @@ def create_generation_section(handler) -> dict:
                     label="Audio Format",
                     info="Audio format for saved files"
                 )
+            
+            with gr.Row():
+                output_alignment_preference = gr.Checkbox(
+                    label="Output Attention Focus Score (disabled)",
+                    value=False,
+                    info="Output attention focus score analysis",
+                    interactive=False
+                )
         
         generate_btn = gr.Button("🎵 Generate Music", variant="primary", size="lg", interactive=False)
     
@@ -503,6 +519,7 @@ def create_generation_section(handler) -> dict:
         "cfg_interval_start": cfg_interval_start,
         "cfg_interval_end": cfg_interval_end,
         "audio_format": audio_format,
+        "output_alignment_preference": output_alignment_preference,
         "generate_btn": generate_btn,
     }
 
@@ -536,17 +553,16 @@ def create_results_section(handler) -> dict:
             )
             generation_info = gr.Markdown(label="Generation Details")
 
-        gr.Markdown("### ⚖️ Alignment Preference Analysis")
-
-        with gr.Row():
-            with gr.Column():
-                align_score_1 = gr.Textbox(label="Alignment Score (Sample 1)", interactive=False)
-                align_text_1 = gr.Textbox(label="Lyric Timestamps (Sample 1)", interactive=False, lines=10)
-                align_plot_1 = gr.Plot(label="Alignment Heatmap (Sample 1)")
-            with gr.Column():
-                align_score_2 = gr.Textbox(label="Alignment Score (Sample 2)", interactive=False)
-                align_text_2 = gr.Textbox(label="Lyric Timestamps (Sample 2)", interactive=False, lines=10)
-                align_plot_2 = gr.Plot(label="Alignment Heatmap (Sample 2)")
+        with gr.Accordion("⚖️ Attention Focus Score Analysis", open=False):
+            with gr.Row():
+                with gr.Column():
+                    align_score_1 = gr.Textbox(label="Attention Focus Score (Sample 1)", interactive=False)
+                    align_text_1 = gr.Textbox(label="Lyric Timestamps (Sample 1)", interactive=False, lines=10)
+                    align_plot_1 = gr.Plot(label="Attention Focus Score Heatmap (Sample 1)")
+                with gr.Column():
+                    align_score_2 = gr.Textbox(label="Attention Focus Score (Sample 2)", interactive=False)
+                    align_text_2 = gr.Textbox(label="Lyric Timestamps (Sample 2)", interactive=False, lines=10)
+                    align_plot_2 = gr.Plot(label="Attention Focus Score Heatmap (Sample 2)")
     
     return {
         "status_output": status_output,
@@ -595,22 +611,24 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
         config_path_lower = config_path.lower()
         
         if "turbo" in config_path_lower:
-            # Turbo model: max 8 steps, hide CFG/ADG
+            # Turbo model: max 8 steps, hide CFG/ADG, only show text2music/repaint/cover
             return (
                 gr.update(value=8, maximum=8, minimum=1),  # inference_steps
                 gr.update(visible=False),  # guidance_scale
                 gr.update(visible=False),  # use_adg
                 gr.update(visible=False),  # cfg_interval_start
                 gr.update(visible=False),  # cfg_interval_end
+                gr.update(choices=["text2music", "repaint", "cover"]),  # task_type
             )
         elif "base" in config_path_lower:
-            # Base model: max 100 steps, show CFG/ADG
+            # Base model: max 100 steps, show CFG/ADG, show all task types
             return (
                 gr.update(value=32, maximum=100, minimum=1),  # inference_steps
                 gr.update(visible=True),  # guidance_scale
                 gr.update(visible=True),  # use_adg
                 gr.update(visible=True),  # cfg_interval_start
                 gr.update(visible=True),  # cfg_interval_end
+                gr.update(choices=["text2music", "repaint", "cover", "extract", "lego", "complete"]),  # task_type
             )
         else:
             # Default to turbo settings
@@ -620,6 +638,7 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),
+                gr.update(choices=["text2music", "repaint", "cover"]),  # task_type
             )
     
     generation_section["config_path"].change(
@@ -631,6 +650,7 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
             generation_section["use_adg"],
             generation_section["cfg_interval_start"],
             generation_section["cfg_interval_end"],
+            generation_section["task_type"],
         ]
     )
     
