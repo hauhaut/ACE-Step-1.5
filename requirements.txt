@@ -2,3 +2,5 @@ torch
 transformers
 diffusers
 gradio
+soundfile
+loguru
