@@ -761,4 +761,109 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
         ],
         outputs=[generation_section["text2music_audio_code_string"]]
     )
+    
+    # Update instruction and UI visibility based on task type
+    def update_instruction_ui(
+        task_type_value: str, 
+        track_name_value: Optional[str], 
+        complete_track_classes_value: list, 
+        audio_codes_content: str = ""
+    ) -> tuple:
+        """Update instruction and UI visibility based on task type."""
+        instruction = handler.generate_instruction(
+            task_type=task_type_value,
+            track_name=track_name_value,
+            complete_track_classes=complete_track_classes_value
+        )
+        
+        # Show track_name for lego and extract
+        track_name_visible = task_type_value in ["lego", "extract"]
+        # Show complete_track_classes for complete
+        complete_visible = task_type_value == "complete"
+        # Show audio_cover_strength for cover
+        audio_cover_strength_visible = task_type_value == "cover"
+        # Show audio_code_string for cover
+        audio_code_visible = task_type_value == "cover"
+        # Show repainting controls for repaint and lego
+        repainting_visible = task_type_value in ["repaint", "lego"]
+        # Show use_5hz_lm, lm_temperature for text2music
+        use_5hz_lm_visible = task_type_value == "text2music"
+        # Show text2music_audio_codes if task is text2music OR if it has content
+        # This allows it to stay visible even if user switches task type but has codes
+        has_audio_codes = audio_codes_content and str(audio_codes_content).strip()
+        text2music_audio_codes_visible = task_type_value == "text2music" or has_audio_codes
+        
+        return (
+            instruction,  # instruction_display_gen
+            gr.update(visible=track_name_visible),  # track_name
+            gr.update(visible=complete_visible),  # complete_track_classes
+            gr.update(visible=audio_cover_strength_visible),  # audio_cover_strength
+            gr.update(visible=repainting_visible),  # repainting_group
+            gr.update(visible=audio_code_visible),  # audio_code_string
+            gr.update(visible=use_5hz_lm_visible),  # use_5hz_lm_row
+            gr.update(visible=text2music_audio_codes_visible),  # text2music_audio_codes_group
+        )
+    
+    # Bind update_instruction_ui to task_type, track_name, and complete_track_classes changes
+    generation_section["task_type"].change(
+        fn=update_instruction_ui,
+        inputs=[
+            generation_section["task_type"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
+            generation_section["text2music_audio_code_string"]
+        ],
+        outputs=[
+            generation_section["instruction_display_gen"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
+            generation_section["audio_cover_strength"],
+            generation_section["repainting_group"],
+            generation_section["audio_code_string"],
+            generation_section["use_5hz_lm_row"],
+            generation_section["text2music_audio_codes_group"],
+        ]
+    )
+    
+    # Also update instruction when track_name changes (for lego/extract tasks)
+    generation_section["track_name"].change(
+        fn=update_instruction_ui,
+        inputs=[
+            generation_section["task_type"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
+            generation_section["text2music_audio_code_string"]
+        ],
+        outputs=[
+            generation_section["instruction_display_gen"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
+            generation_section["audio_cover_strength"],
+            generation_section["repainting_group"],
+            generation_section["audio_code_string"],
+            generation_section["use_5hz_lm_row"],
+            generation_section["text2music_audio_codes_group"],
+        ]
+    )
+    
+    # Also update instruction when complete_track_classes changes (for complete task)
+    generation_section["complete_track_classes"].change(
+        fn=update_instruction_ui,
+        inputs=[
+            generation_section["task_type"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
+            generation_section["text2music_audio_code_string"]
+        ],
+        outputs=[
+            generation_section["instruction_display_gen"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
+            generation_section["audio_cover_strength"],
+            generation_section["repainting_group"],
+            generation_section["audio_code_string"],
+            generation_section["use_5hz_lm_row"],
+            generation_section["text2music_audio_codes_group"],
+        ]
+    )
 

@@ -4,7 +4,6 @@ Encapsulates all data processing and business logic as a bridge between model an
 """
 import os
 import math
-import glob
 import tempfile
 import traceback
 import re
@@ -12,10 +11,6 @@ import random
 from typing import Optional, Dict, Any, Tuple, List, Union
 
 import torch
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
-import numpy as np
-import scipy.io.wavfile as wavfile
 import torchaudio
 import soundfile as sf
 import time
@@ -666,6 +661,48 @@ class AceStepHandler:
     
     def is_silence(self, audio):
         return torch.all(audio.abs() < 1e-6)
+
+    def generate_instruction(
+        self,
+        task_type: str,
+        track_name: Optional[str] = None,
+        complete_track_classes: Optional[List[str]] = None
+    ) -> str:
+        TRACK_NAMES = [
+            "woodwinds", "brass", "fx", "synth", "strings", "percussion",
+            "keyboard", "guitar", "bass", "drums", "backing_vocals", "vocals"
+        ]
+        
+        if task_type == "text2music":
+            return "Fill the audio semantic mask based on the given conditions:"
+        elif task_type == "repaint":
+            return "Repaint the mask area based on the given conditions:"
+        elif task_type == "cover":
+            return "Generate audio semantic tokens based on the given conditions:"
+        elif task_type == "extract":
+            if track_name:
+                # Convert to uppercase
+                track_name_upper = track_name.upper()
+                return f"Extract the {track_name_upper} track from the audio:"
+            else:
+                return "Extract the track from the audio:"
+        elif task_type == "lego":
+            if track_name:
+                # Convert to uppercase
+                track_name_upper = track_name.upper()
+                return f"Generate the {track_name_upper} track based on the audio context:"
+            else:
+                return "Generate the track based on the audio context:"
+        elif task_type == "complete":
+            if complete_track_classes and len(complete_track_classes) > 0:
+                # Convert to uppercase and join with " | "
+                track_classes_upper = [t.upper() for t in complete_track_classes]
+                complete_track_classes_str = " | ".join(track_classes_upper)
+                return f"Complete the input track with {complete_track_classes_str}:"
+            else:
+                return "Complete the input track:"
+        else:
+            return "Fill the audio semantic mask based on the given conditions:"
     
     def process_reference_audio(self, audio_file) -> Optional[torch.Tensor]:
         if audio_file is None:
