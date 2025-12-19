@@ -4,3 +4,4 @@ diffusers
 gradio
 soundfile
 loguru
+einops
