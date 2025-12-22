@@ -282,18 +282,18 @@ class AceStepHandler:
             if init_llm:
                 full_lm_model_path = os.path.join(checkpoint_dir, lm_model_path)
                 if os.path.exists(full_lm_model_path):
-                    print("loading 5Hz LM tokenizer...")
+                    logger.info("loading 5Hz LM tokenizer...")
                     start_time = time.time()
                     llm_tokenizer = deepcopy(self.text_tokenizer)
                     max_audio_length = 2**16 - 1
                     semantic_tokens = [f"<|audio_code_{i}|>" for i in range(max_audio_length)]
                     # 217204
                     llm_tokenizer.add_special_tokens({"additional_special_tokens": semantic_tokens})
-                    print(f"5Hz LM tokenizer loaded successfully in {time.time() - start_time:.2f} seconds")
+                    logger.info(f"5Hz LM tokenizer loaded successfully in {time.time() - start_time:.2f} seconds")
                     self.llm_tokenizer = llm_tokenizer
                     if device == "cuda":
                         status_msg = self._initialize_5hz_lm_cuda(full_lm_model_path)
-                        print(f"5Hz LM status message: {status_msg}")
+                        logger.info(f"5Hz LM status message: {status_msg}")
                         # Check if initialization failed (status_msg starts with ❌)
                         if status_msg.startswith("❌"):
                             # vllm initialization failed, fallback to PyTorch
@@ -304,6 +304,7 @@ class AceStepHandler:
                                     self.llm.eval()
                                     self.llm_backend = "pt"
                                     self.llm_initialized = True
+                                    logger.info("5Hz LM initialized successfully on CUDA device using Transformers backend")
                                 except Exception as e:
                                     return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", False
                         # If vllm initialization succeeded, self.llm_initialized should already be True
@@ -316,6 +317,7 @@ class AceStepHandler:
                             self.llm.eval()
                             self.llm_backend = "pt"
                             self.llm_initialized = True
+                            logger.info("5Hz LM initialized successfully on non-CUDA device using Transformers backend")
                         except Exception as e:
                             return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", False
                             
@@ -465,13 +467,13 @@ class AceStepHandler:
         """Initialize 5Hz LM model"""
         if not torch.cuda.is_available():
             self.llm_initialized = False
-            print("CUDA is not available. Please check your GPU setup.")
+            logger.error("CUDA is not available. Please check your GPU setup.")
             return "❌ CUDA is not available. Please check your GPU setup."
         try:
             from nanovllm import LLM, SamplingParams
         except ImportError:
             self.llm_initialized = False
-            print("nano-vllm is not installed. Please install it using 'cd acestep/third_parts/nano-vllm && pip install .")
+            logger.error("nano-vllm is not installed. Please install it using 'cd acestep/third_parts/nano-vllm && pip install .")
             return "❌ nano-vllm is not installed. Please install it using 'cd acestep/third_parts/nano-vllm && pip install ."
         
         try:
@@ -489,7 +491,7 @@ class AceStepHandler:
             else:
                 self.max_model_len = 2048
             
-            print(f"Initializing 5Hz LM with model: {model_path}, enforce_eager: False, tensor_parallel_size: 1, max_model_len: {self.max_model_len}, gpu_memory_utilization: {gpu_memory_utilization}")
+            logger.info(f"Initializing 5Hz LM with model: {model_path}, enforce_eager: False, tensor_parallel_size: 1, max_model_len: {self.max_model_len}, gpu_memory_utilization: {gpu_memory_utilization}")
             start_time = time.time()
             self.llm = LLM(
                 model=model_path,
@@ -498,7 +500,7 @@ class AceStepHandler:
                 max_model_len=self.max_model_len,
                 gpu_memory_utilization=gpu_memory_utilization,
             )
-            print(f"5Hz LM initialized successfully in {time.time() - start_time:.2f} seconds")
+            logger.info(f"5Hz LM initialized successfully in {time.time() - start_time:.2f} seconds")
             self.llm.tokenizer = self.llm_tokenizer
             self.llm_initialized = True
             self.llm_backend = "vllm"
@@ -523,7 +525,7 @@ class AceStepHandler:
                 tokenize=False,
                 add_generation_prompt=True,
             )
-            print("[debug] formatted_prompt: ", formatted_prompt)
+            logger.debug(f"[debug] formatted_prompt: {formatted_prompt}")
             
             sampling_params = SamplingParams(max_tokens=self.max_model_len, temperature=temperature)
             outputs = self.llm.generate([formatted_prompt], sampling_params)
@@ -649,7 +651,7 @@ class AceStepHandler:
             Tuple of (metadata_dict, audio_codes_string)
         """
         debug_output_text = output_text.split("</think>")[0]
-        print(f"Debug output text: {debug_output_text}")
+        logger.debug(f"Debug output text: {debug_output_text}")
         metadata = {}
         audio_codes = ""
         
@@ -741,7 +743,7 @@ class AceStepHandler:
             
             return audio
         except Exception as e:
-            print(f"Error processing target audio: {e}")
+            logger.error(f"Error processing target audio: {e}")
             return None
     
     def _parse_audio_code_string(self, code_str: str) -> List[int]:
@@ -882,7 +884,7 @@ class AceStepHandler:
                     return match.group(1).strip()
             return caption
         except Exception as e:
-            print(f"Error extracting caption: {e}")
+            logger.error(f"Error extracting caption: {e}")
             return caption
 
     def prepare_seeds(self, actual_batch_size, seed, use_random_seed):
@@ -1073,7 +1075,7 @@ class AceStepHandler:
             return audio
             
         except Exception as e:
-            print(f"Error processing reference audio: {e}")
+            logger.error(f"Error processing reference audio: {e}")
             return None
 
     def process_src_audio(self, audio_file) -> Optional[torch.Tensor]:
@@ -1101,7 +1103,7 @@ class AceStepHandler:
             return audio
             
         except Exception as e:
-            print(f"Error processing target audio: {e}")
+            logger.error(f"Error processing target audio: {e}")
             return None
         
     def prepare_batch_data(
@@ -1178,7 +1180,7 @@ class AceStepHandler:
             target_wavs = torch.zeros(2, frames)
             return target_wavs
         except Exception as e:
-            print(f"Error creating target audio: {e}")
+            logger.error(f"Error creating target audio: {e}")
             # Fallback to 30 seconds if error
             return torch.zeros(2, 30 * 48000)
     
@@ -1408,7 +1410,7 @@ class AceStepHandler:
                     code_hint = audio_code_hints[i]
                     # Prefer decoding from provided audio codes
                     if code_hint:
-                        print(f"[generate_music] Decoding audio codes for item {i}...")
+                        logger.info(f"[generate_music] Decoding audio codes for item {i}...")
                         decoded_latents = self._decode_audio_codes_to_latents(code_hint)
                         if decoded_latents is not None:
                             decoded_latents = decoded_latents.squeeze(0)
@@ -1425,7 +1427,7 @@ class AceStepHandler:
                         target_latent = self.silence_latent[0, :expected_latent_length, :]
                     else:
                         # Ensure input is in VAE's dtype
-                        print(f"[generate_music] Encoding target audio to latents for item {i}...")
+                        logger.info(f"[generate_music] Encoding target audio to latents for item {i}...")
                         vae_input = current_wav.to(self.device).to(self.vae.dtype)
                         target_latent = self.vae.encode(vae_input).latent_dist.sample()
                         # Cast back to model dtype
@@ -1595,7 +1597,7 @@ class AceStepHandler:
         for i in range(batch_size):
             if audio_code_hints[i] is not None:
                 # Decode audio codes to 25Hz latents
-                print(f"[generate_music] Decoding audio codes for LM hints for item {i}...")
+                logger.info(f"[generate_music] Decoding audio codes for LM hints for item {i}...")
                 hints = self._decode_audio_codes_to_latents(audio_code_hints[i])
                 if hints is not None:
                     # Pad or crop to match max_latent_length
@@ -1841,10 +1843,10 @@ class AceStepHandler:
         lyric_attention_mask = batch["lyric_attention_masks"]
         text_inputs = batch["text_inputs"]
 
-        print("[preprocess_batch] Inferring prompt embeddings...")
+        logger.info("[preprocess_batch] Inferring prompt embeddings...")
         with self._load_model_context("text_encoder"):
             text_hidden_states = self.infer_text_embeddings(text_token_idss)
-            print("[preprocess_batch] Inferring lyric embeddings...")
+            logger.info("[preprocess_batch] Inferring lyric embeddings...")
             lyric_hidden_states = self.infer_lyric_embeddings(lyric_token_idss)
 
             is_covers = batch["is_covers"]
@@ -1857,7 +1859,7 @@ class AceStepHandler:
             non_cover_text_attention_masks = batch.get("non_cover_text_attention_masks", None)
             non_cover_text_hidden_states = None
             if non_cover_text_input_ids is not None:
-                print("[preprocess_batch] Inferring non-cover text embeddings...")
+                logger.info("[preprocess_batch] Inferring non-cover text embeddings...")
                 non_cover_text_hidden_states = self.infer_text_embeddings(non_cover_text_input_ids)
 
         return (
@@ -2085,7 +2087,7 @@ class AceStepHandler:
             "cfg_interval_start": cfg_interval_start,
             "cfg_interval_end": cfg_interval_end,
         }
-        print("[service_generate] Generating audio...")
+        logger.info("[service_generate] Generating audio...")
         with self._load_model_context("model"):
             outputs = self.model.generate_audio(**generate_kwargs)
         return outputs
@@ -2213,10 +2215,10 @@ class AceStepHandler:
                 # Update instruction for cover task
                 instruction = "Generate audio semantic tokens based on the given conditions:"
 
-        print("[generate_music] Starting generation...")
+        logger.info("[generate_music] Starting generation...")
         if progress:
             progress(0.05, desc="Preparing inputs...")
-        print("[generate_music] Preparing inputs...")
+        logger.info("[generate_music] Preparing inputs...")
         
         # Reset offload cost
         self.current_offload_cost = 0.0
@@ -2242,7 +2244,7 @@ class AceStepHandler:
             # 1. Process reference audio
             refer_audios = None
             if reference_audio is not None:
-                print("[generate_music] Processing reference audio...")
+                logger.info("[generate_music] Processing reference audio...")
                 processed_ref_audio = self.process_reference_audio(reference_audio)
                 if processed_ref_audio is not None:
                     # Convert to the format expected by the service: List[List[torch.Tensor]]
@@ -2254,7 +2256,7 @@ class AceStepHandler:
             # 2. Process source audio
             processed_src_audio = None
             if src_audio is not None:
-                print("[generate_music] Processing source audio...")
+                logger.info("[generate_music] Processing source audio...")
                 processed_src_audio = self.process_src_audio(src_audio)
                 
             # 3. Prepare batch data
@@ -2316,15 +2318,15 @@ class AceStepHandler:
                 return_intermediate=should_return_intermediate
             )
             
-            print("[generate_music] Model generation completed. Decoding latents...")
+            logger.info("[generate_music] Model generation completed. Decoding latents...")
             pred_latents = outputs["target_latents"]  # [batch, latent_length, latent_dim]
             time_costs = outputs["time_costs"]
             time_costs["offload_time_cost"] = self.current_offload_cost
-            print(f"  - pred_latents: {pred_latents.shape}, dtype={pred_latents.dtype} {pred_latents.min()=}, {pred_latents.max()=}, {pred_latents.mean()=} {pred_latents.std()=}")
-            print(f"  - time_costs: {time_costs}")
+            logger.info(f"  - pred_latents: {pred_latents.shape}, dtype={pred_latents.dtype} {pred_latents.min()=}, {pred_latents.max()=}, {pred_latents.mean()=} {pred_latents.std()=}")
+            logger.info(f"  - time_costs: {time_costs}")
             if progress:
                 progress(0.8, desc="Decoding audio...")
-            print("[generate_music] Decoding latents with VAE...")
+            logger.info("[generate_music] Decoding latents with VAE...")
             
             # Decode latents to audio
             start_time = time.time()
@@ -2336,7 +2338,7 @@ class AceStepHandler:
                     pred_latents_for_decode = pred_latents_for_decode.to(self.vae.dtype)
                     
                     if use_tiled_decode:
-                        print("[generate_music] Using tiled VAE decode to reduce VRAM usage...")
+                        logger.info("[generate_music] Using tiled VAE decode to reduce VRAM usage...")
                         pred_wavs = self.tiled_decode(pred_latents_for_decode)  # [batch, channels, samples]
                     else:
                         pred_wavs = self.vae.decode(pred_latents_for_decode).sample
@@ -2350,7 +2352,7 @@ class AceStepHandler:
             # Update offload cost one last time to include VAE offloading
             time_costs["offload_time_cost"] = self.current_offload_cost
             
-            print("[generate_music] VAE decode completed. Saving audio files...")
+            logger.info("[generate_music] VAE decode completed. Saving audio files...")
             if progress:
                 progress(0.9, desc="Saving audio files...")
             
@@ -2389,7 +2391,7 @@ class AceStepHandler:
     **Steps:** {inference_steps}
     **Files:** {len(saved_files)} audio(s){time_costs_str}"""
             status_message = f"✅ Generation completed successfully!"
-            print(f"[generate_music] Done! Generated {len(saved_files)} audio files.")
+            logger.info(f"[generate_music] Done! Generated {len(saved_files)} audio files.")
             
             # Alignment scores and plots (placeholder for now)
             align_score_1 = ""
