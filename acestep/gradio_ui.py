@@ -216,6 +216,16 @@ def create_generation_section(handler) -> dict:
                     interactive=flash_attn_available,
                     info="Enable flash attention for faster inference (requires flash_attn package)" if flash_attn_available else "Flash attention not available (flash_attn package not installed)"
                 )
+                offload_to_cpu_checkbox = gr.Checkbox(
+                    label="Offload to CPU",
+                    value=False,
+                    info="Offload models to CPU when not in use to save GPU memory"
+                )
+                offload_dit_to_cpu_checkbox = gr.Checkbox(
+                    label="Offload DiT to CPU",
+                    value=False,
+                    info="Offload DiT model to CPU when not in use (only effective if Offload to CPU is checked)"
+                )
             
             init_btn = gr.Button("Initialize Service", variant="primary", size="lg")
             init_status = gr.Textbox(label="Status", interactive=False, lines=3)
@@ -487,6 +497,7 @@ def create_generation_section(handler) -> dict:
         "lm_model_path": lm_model_path,
         "init_llm_checkbox": init_llm_checkbox,
         "use_flash_attention_checkbox": use_flash_attention_checkbox,
+        "offload_to_cpu_checkbox": offload_to_cpu_checkbox,
         "task_type": task_type,
         "instruction_display_gen": instruction_display_gen,
         "track_name": track_name,
@@ -655,9 +666,13 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
     )
     
     # Service initialization
-    def init_service_wrapper(checkpoint, config_path, device, init_llm, lm_model_path, use_flash_attention):
+    def init_service_wrapper(checkpoint, config_path, device, init_llm, lm_model_path, use_flash_attention, offload_to_cpu, offload_dit_to_cpu):
         """Wrapper for service initialization, returns status and button state"""
-        status, enable = handler.initialize_service(checkpoint, config_path, device, init_llm, lm_model_path, use_flash_attention)
+        status, enable = handler.initialize_service(
+            checkpoint, config_path, device, init_llm, lm_model_path, 
+            use_flash_attention, compile_model=False, 
+            offload_to_cpu=offload_to_cpu, offload_dit_to_cpu=offload_dit_to_cpu
+        )
         return status, gr.update(interactive=enable)
     
     generation_section["init_btn"].click(
@@ -669,6 +684,8 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
             generation_section["init_llm_checkbox"],
             generation_section["lm_model_path"],
             generation_section["use_flash_attention_checkbox"],
+            generation_section["offload_to_cpu_checkbox"],
+            generation_section["offload_dit_to_cpu_checkbox"],
         ],
         outputs=[generation_section["init_status"], generation_section["generate_btn"]]
     )

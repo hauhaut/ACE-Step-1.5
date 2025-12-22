@@ -41,7 +41,9 @@ def main():
         device=device,
         init_llm=True,
         use_flash_attention=False, # Default in UI
-        compile_model=True
+        compile_model=False,
+        offload_to_cpu=True,
+        offload_dit_to_cpu=False, # Keep DiT on GPU
     )
     
     if not enabled:

@@ -8,6 +8,7 @@ import tempfile
 import traceback
 import re
 import random
+from contextlib import contextmanager
 from typing import Optional, Dict, Any, Tuple, List, Union
 
 import torch
@@ -81,6 +82,9 @@ class AceStepHandler:
             5: [8, 9, 11],
             6: [8]
         }
+        self.offload_to_cpu = False
+        self.offload_dit_to_cpu = False
+        self.current_offload_cost = 0.0
     
     def get_available_checkpoints(self) -> str:
         """Return project root directory path"""
@@ -146,6 +150,8 @@ class AceStepHandler:
         lm_model_path: str = "acestep-5Hz-lm-0.6B",
         use_flash_attention: bool = False,
         compile_model: bool = False,
+        offload_to_cpu: bool = False,
+        offload_dit_to_cpu: bool = False,
     ) -> Tuple[str, bool]:
         """
         Initialize model service
@@ -158,6 +164,8 @@ class AceStepHandler:
             lm_model_path: 5Hz LM model path
             use_flash_attention: Whether to use flash attention (requires flash_attn package)
             compile_model: Whether to use torch.compile to optimize the model
+            offload_to_cpu: Whether to offload models to CPU when not in use
+            offload_dit_to_cpu: Whether to offload DiT model to CPU when not in use (only effective if offload_to_cpu is True)
         
         Returns:
             (status_message, enable_generate_button)
@@ -167,6 +175,8 @@ class AceStepHandler:
                 device = "cuda" if torch.cuda.is_available() else "cpu"
             
             self.device = device
+            self.offload_to_cpu = offload_to_cpu
+            self.offload_dit_to_cpu = offload_dit_to_cpu
             # Set dtype based on device: bfloat16 for cuda, float32 for cpu
             self.dtype = torch.bfloat16 if device in ["cuda","xpu"] else torch.float32
 
@@ -211,7 +221,15 @@ class AceStepHandler:
                 self.model.config._attn_implementation = attn_implementation
                 self.config = self.model.config
                 # Move model to device and set dtype
-                self.model = self.model.to(device).to(self.dtype)
+                if not self.offload_to_cpu:
+                    self.model = self.model.to(device).to(self.dtype)
+                else:
+                    # If offload_to_cpu is True, check if we should keep DiT on GPU
+                    if not self.offload_dit_to_cpu:
+                        logger.info(f"Keeping main model on {device} (persistent)")
+                        self.model = self.model.to(device).to(self.dtype)
+                    else:
+                        self.model = self.model.to("cpu").to(self.dtype)
                 self.model.eval()
                 
                 if compile_model:
@@ -221,7 +239,11 @@ class AceStepHandler:
                 silence_latent_path = os.path.join(acestep_v15_checkpoint_path, "silence_latent.pt")
                 if os.path.exists(silence_latent_path):
                     self.silence_latent = torch.load(silence_latent_path).transpose(1, 2)
-                    self.silence_latent = self.silence_latent.to(device).to(self.dtype)
+                    # If DiT is on GPU, silence_latent should also be on GPU
+                    if not self.offload_to_cpu or not self.offload_dit_to_cpu:
+                        self.silence_latent = self.silence_latent.to(device).to(self.dtype)
+                    else:
+                        self.silence_latent = self.silence_latent.to("cpu").to(self.dtype)
                 else:
                     raise FileNotFoundError(f"Silence latent not found at {silence_latent_path}")
             else:
@@ -233,7 +255,10 @@ class AceStepHandler:
                 self.vae = AutoencoderOobleck.from_pretrained(vae_checkpoint_path)
                 # Use bfloat16 for VAE on GPU, otherwise use self.dtype (float32 on CPU)
                 vae_dtype = torch.bfloat16 if device in ["cuda", "xpu"] else self.dtype
-                self.vae = self.vae.to(device).to(vae_dtype)
+                if not self.offload_to_cpu:
+                    self.vae = self.vae.to(device).to(vae_dtype)
+                else:
+                    self.vae = self.vae.to("cpu").to(vae_dtype)
                 self.vae.eval()
             else:
                 raise FileNotFoundError(f"VAE checkpoint not found at {vae_checkpoint_path}")
@@ -243,7 +268,10 @@ class AceStepHandler:
             if os.path.exists(text_encoder_path):
                 self.text_tokenizer = AutoTokenizer.from_pretrained(text_encoder_path)
                 self.text_encoder = AutoModel.from_pretrained(text_encoder_path)
-                self.text_encoder = self.text_encoder.to(device).to(self.dtype)
+                if not self.offload_to_cpu:
+                    self.text_encoder = self.text_encoder.to(device).to(self.dtype)
+                else:
+                    self.text_encoder = self.text_encoder.to("cpu").to(self.dtype)
                 self.text_encoder.eval()
             else:
                 raise FileNotFoundError(f"Text encoder not found at {text_encoder_path}")
@@ -252,12 +280,11 @@ class AceStepHandler:
             if init_llm:
                 full_lm_model_path = os.path.join(checkpoint_dir, lm_model_path)
                 if os.path.exists(full_lm_model_path):
-                    if device == "cuda":
-                        status_msg = self._initialize_5hz_lm_cuda(full_lm_model_path)
-                        if not self.llm_initialized:
-                            return status_msg, False
-                    self.llm = AutoModel.from_pretrained(full_lm_model_path)
-                    self.llm_tokenizer = AutoTokenizer.from_pretrained(full_lm_model_path)
+                    status_msg = self._initialize_5hz_lm(full_lm_model_path)
+                    if not self.llm_initialized:
+                        print(f"Error initializing 5Hz LM: {status_msg}")
+                        return status_msg, False
+                    print(status_msg)
                 else:
                     # 5Hz LM path not found
                     return f"❌ 5Hz LM model not found at {full_lm_model_path}", False
@@ -275,7 +302,9 @@ class AceStepHandler:
                 status_msg += f"5Hz LM model: Not loaded (checkbox not selected)\n"
             status_msg += f"Dtype: {self.dtype}\n"
             status_msg += f"Attention: {actual_attn}\n"
-            status_msg += f"Compiled: {compile_model}"
+            status_msg += f"Compiled: {compile_model}\n"
+            status_msg += f"Offload to CPU: {self.offload_to_cpu}\n"
+            status_msg += f"Offload DiT to CPU: {self.offload_dit_to_cpu}"
             
             return status_msg, True
             
@@ -283,6 +312,86 @@ class AceStepHandler:
             error_msg = f"❌ Error initializing model: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             return error_msg, False
     
+    @contextmanager
+    def _load_model_context(self, model_name: str):
+        """
+        Context manager to load a model to GPU and offload it back to CPU after use.
+        
+        Args:
+            model_name: Name of the model to load ("text_encoder", "vae", "model", "llm")
+        """
+        if not self.offload_to_cpu:
+            yield
+            return
+
+        # If model is DiT ("model") and offload_dit_to_cpu is False, do not offload
+        if model_name == "model" and not self.offload_dit_to_cpu:
+            # Ensure it's on device if not already (should be handled by init, but safe to check)
+            model = getattr(self, model_name, None)
+            if model is not None:
+                # Check if model is on CPU, if so move to device (one-time move if it was somehow on CPU)
+                # We check the first parameter's device
+                try:
+                    param = next(model.parameters())
+                    if param.device.type == "cpu":
+                        logger.info(f"Moving {model_name} to {self.device} (persistent)")
+                        model.to(self.device).to(self.dtype)
+                        if hasattr(self, "silence_latent"):
+                            self.silence_latent = self.silence_latent.to(self.device).to(self.dtype)
+                except StopIteration:
+                    pass
+            yield
+            return
+
+        # If model is LLM and using nanovllm, do not offload (it stays on GPU)
+        if model_name == "llm" and getattr(self, "llm_type", None) == "nanovllm":
+            yield
+            return
+
+        model = getattr(self, model_name, None)
+        if model is None:
+            yield
+            return
+
+        # Load to GPU
+        logger.info(f"Loading {model_name} to {self.device}")
+        start_time = time.time()
+        if model_name == "vae":
+            vae_dtype = torch.bfloat16 if self.device in ["cuda", "xpu"] else self.dtype
+            model.to(self.device).to(vae_dtype)
+        elif model_name == "llm" and hasattr(model, "to"):
+             # Special handling for nanovllm LLM which might have custom to() method or structure
+             # Assuming it has a .to() method based on our previous edits to nanovllm
+             model.to(self.device)
+        else:
+            model.to(self.device).to(self.dtype)
+        
+        if model_name == "model" and hasattr(self, "silence_latent"):
+             self.silence_latent = self.silence_latent.to(self.device).to(self.dtype)
+        
+        load_time = time.time() - start_time
+        self.current_offload_cost += load_time
+        logger.info(f"Loaded {model_name} to {self.device} in {load_time:.4f}s")
+
+        try:
+            yield
+        finally:
+            # Offload to CPU
+            logger.info(f"Offloading {model_name} to CPU")
+            start_time = time.time()
+            if model_name == "llm" and hasattr(model, "to"):
+                 model.to("cpu")
+            else:
+                 model.to("cpu")
+            
+            if model_name == "model" and hasattr(self, "silence_latent"):
+                 self.silence_latent = self.silence_latent.to("cpu")
+            
+            torch.cuda.empty_cache()
+            offload_time = time.time() - start_time
+            self.current_offload_cost += offload_time
+            logger.info(f"Offloaded {model_name} to CPU in {offload_time:.4f}s")
+
     def import_dataset(self, dataset_type: str) -> str:
         """Import dataset (temporarily disabled)"""
         self.dataset_imported = False
@@ -314,36 +423,66 @@ class AceStepHandler:
         except Exception as e:
             return 0.9
     
-    def _initialize_5hz_lm_cuda(self, model_path: str) -> str:
+    def _initialize_5hz_lm(self, model_path: str) -> str:
         """Initialize 5Hz LM model"""
         try:
-            from nanovllm import LLM, SamplingParams
+            # Try to use nanovllm if on CUDA
+            use_nanovllm = False
+            if self.device == "cuda":
+                try:
+                    from nanovllm import LLM, SamplingParams
+                    use_nanovllm = True
+                except ImportError:
+                    pass
             
-            if not torch.cuda.is_available():
-                return "❌ CUDA is not available. Please check your GPU setup."
+            if use_nanovllm:
+                try:
+                    current_device = torch.cuda.current_device()
+                    device_name = torch.cuda.get_device_name(current_device)
+                    
+                    torch.cuda.empty_cache()
+                    gpu_memory_utilization = self.get_gpu_memory_utilization(
+                        minimal_gpu=8, 
+                        min_ratio=0.2, 
+                        max_ratio=0.9
+                    )
+                    
+                    self.llm = LLM(
+                        model=model_path,
+                        enforce_eager=False,
+                        tensor_parallel_size=1,
+                        max_model_len=4096,
+                        gpu_memory_utilization=gpu_memory_utilization,
+                    )
+                    self.llm_tokenizer = self.llm.tokenizer
+                    self.llm_initialized = True
+                    self.llm_type = "nanovllm"
+                    return f"✅ 5Hz LM initialized successfully (nanovllm)\nModel: {model_path}\nDevice: {device_name}\nGPU Memory Utilization: {gpu_memory_utilization:.2f}"
+                except Exception as e:
+                    logger.warning(f"nanovllm initialization failed: {e}, falling back to transformers")
+
+            # Fallback to transformers
+            from transformers import AutoModelForCausalLM
             
-            current_device = torch.cuda.current_device()
-            device_name = torch.cuda.get_device_name(current_device)
-            
-            torch.cuda.empty_cache()
-            gpu_memory_utilization = self.get_gpu_memory_utilization(
-                minimal_gpu=8, 
-                min_ratio=0.2, 
-                max_ratio=0.9
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                model_path, 
+                torch_dtype=self.dtype,
+                trust_remote_code=True
             )
             
-            self.llm = LLM(
-                model=model_path,
-                enforce_eager=False,
-                tensor_parallel_size=1,
-                max_model_len=4096,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
-            self.llm_tokenizer = self.llm.tokenizer
+            if not self.offload_to_cpu:
+                self.llm.to(self.device)
+            else:
+                self.llm.to("cpu")
+                
+            self.llm_tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
             self.llm_initialized = True
-            return f"✅ 5Hz LM initialized successfully\nModel: {model_path}\nDevice: {device_name}\nGPU Memory Utilization: {gpu_memory_utilization:.2f}"
+            self.llm_type = "transformers"
+            return f"✅ 5Hz LM initialized successfully (transformers)\nModel: {model_path}\nDevice: {self.device}"
+            
         except Exception as e:
             self.llm_initialized = False
+            self.llm_type = None
             error_msg = f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             return error_msg
     
@@ -353,35 +492,54 @@ class AceStepHandler:
             return {}, "", "❌ 5Hz LM not initialized. Please initialize it first."
         
         try:
-            from nanovllm import SamplingParams
-            
-            prompt = f"# Caption\n{caption}\n\n# Lyric\n{lyrics}\n"
-            
-            formatted_prompt = self.lm_tokenizer.apply_chat_template(
-                [
-                    {"role": "system", "content": "# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n"},
-                    {"role": "user", "content": prompt}
-                ],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            
-            sampling_params = SamplingParams(max_tokens=3072, temperature=temperature)
-            outputs = self.llm.generate([formatted_prompt], sampling_params)
-            
-            if isinstance(outputs, list) and len(outputs) > 0:
-                if hasattr(outputs[0], 'outputs') and len(outputs[0].outputs) > 0:
-                    output_text = outputs[0].outputs[0].text
-                elif hasattr(outputs[0], 'text'):
-                    output_text = outputs[0].text
+            with self._load_model_context("llm"):
+                prompt = f"# Caption\n{caption}\n\n# Lyric\n{lyrics}\n"
+                
+                formatted_prompt = self.lm_tokenizer.apply_chat_template(
+                    [
+                        {"role": "system", "content": "# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                
+                if getattr(self, "llm_type", "nanovllm") == "nanovllm":
+                    from nanovllm import SamplingParams
+                    sampling_params = SamplingParams(max_tokens=3072, temperature=temperature)
+                    outputs = self.llm.generate([formatted_prompt], sampling_params)
+                    
+                    if isinstance(outputs, list) and len(outputs) > 0:
+                        if hasattr(outputs[0], 'outputs') and len(outputs[0].outputs) > 0:
+                            output_text = outputs[0].outputs[0].text
+                        elif hasattr(outputs[0], 'text'):
+                            output_text = outputs[0].text
+                        else:
+                            output_text = str(outputs[0])
+                    else:
+                        output_text = str(outputs)
                 else:
-                    output_text = str(outputs[0])
-            else:
-                output_text = str(outputs)
-            
-            metadata, audio_codes = self.parse_lm_output(output_text)
-            codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
-            return metadata, audio_codes, f"✅ Generated successfully\nOutput length: {len(output_text)} chars\nCodes count: {codes_count}"
+                    # Transformers generation
+                    inputs = self.llm_tokenizer(formatted_prompt, return_tensors="pt").to(self.llm.device)
+                    
+                    # Generate
+                    with torch.no_grad():
+                        outputs = self.llm.generate(
+                            **inputs,
+                            max_new_tokens=3072,
+                            temperature=temperature,
+                            do_sample=True,
+                            pad_token_id=self.llm_tokenizer.pad_token_id,
+                            eos_token_id=self.llm_tokenizer.eos_token_id
+                        )
+                    
+                    # Decode
+                    generated_ids = outputs[0][inputs.input_ids.shape[1]:]
+                    output_text = self.llm_tokenizer.decode(generated_ids, skip_special_tokens=False)
+                
+                metadata, audio_codes = self.parse_lm_output(output_text)
+                codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
+                return metadata, audio_codes, f"✅ Generated successfully\nOutput length: {len(output_text)} chars\nCodes count: {codes_count}"
             
         except Exception as e:
             error_msg = f"❌ Error generating with 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
@@ -495,24 +653,25 @@ class AceStepHandler:
         if len(code_ids) == 0:
             return None
         
-        quantizer = self.model.tokenizer.quantizer
-        detokenizer = self.model.detokenizer
-        
-        num_quantizers = getattr(quantizer, "num_quantizers", 1)
-        indices = torch.tensor(code_ids, device=self.device, dtype=torch.long).unsqueeze(0)  # [1, T_5Hz]
-        
-        # Expand to include quantizer dimension: [1, T_5Hz, num_quantizers]
-        if indices.dim() == 2:
-            indices = indices.unsqueeze(-1).expand(-1, -1, num_quantizers)
-        
-        # Get quantized representation from indices: [1, T_5Hz, dim]
-        quantized = quantizer.get_output_from_indices(indices)
-        if quantized.dtype != self.dtype:
-            quantized = quantized.to(self.dtype)
-        
-        # Detokenize to 25Hz: [1, T_5Hz, dim] -> [1, T_25Hz, dim]
-        lm_hints_25hz = detokenizer(quantized)
-        return lm_hints_25hz
+        with self._load_model_context("model"):
+            quantizer = self.model.tokenizer.quantizer
+            detokenizer = self.model.detokenizer
+            
+            num_quantizers = getattr(quantizer, "num_quantizers", 1)
+            indices = torch.tensor(code_ids, device=self.device, dtype=torch.long).unsqueeze(0)  # [1, T_5Hz]
+            
+            # Expand to include quantizer dimension: [1, T_5Hz, num_quantizers]
+            if indices.dim() == 2:
+                indices = indices.unsqueeze(-1).expand(-1, -1, num_quantizers)
+            
+            # Get quantized representation from indices: [1, T_5Hz, dim]
+            quantized = quantizer.get_output_from_indices(indices)
+            if quantized.dtype != self.dtype:
+                quantized = quantized.to(self.dtype)
+            
+            # Detokenize to 25Hz: [1, T_5Hz, dim] -> [1, T_25Hz, dim]
+            lm_hints_25hz = detokenizer(quantized)
+            return lm_hints_25hz
     
     def _create_default_meta(self) -> str:
         """Create default metadata string."""
@@ -577,30 +736,31 @@ class AceStepHandler:
         if self.text_tokenizer is None or self.text_encoder is None:
             raise ValueError("Text encoder not initialized")
         
-        # Tokenize
-        text_inputs = self.text_tokenizer(
-            text_prompt,
-            padding="longest",
-            truncation=True,
-            max_length=256,
-            return_tensors="pt",
-        )
-        text_input_ids = text_inputs.input_ids.to(self.device)
-        text_attention_mask = text_inputs.attention_mask.to(self.device).bool()
-        
-        # Encode
-        with torch.no_grad():
-            text_outputs = self.text_encoder(text_input_ids)
-            if hasattr(text_outputs, 'last_hidden_state'):
-                text_hidden_states = text_outputs.last_hidden_state
-            elif isinstance(text_outputs, tuple):
-                text_hidden_states = text_outputs[0]
-            else:
-                text_hidden_states = text_outputs
-        
-        text_hidden_states = text_hidden_states.to(self.dtype)
-        
-        return text_hidden_states, text_attention_mask
+        with self._load_model_context("text_encoder"):
+            # Tokenize
+            text_inputs = self.text_tokenizer(
+                text_prompt,
+                padding="longest",
+                truncation=True,
+                max_length=256,
+                return_tensors="pt",
+            )
+            text_input_ids = text_inputs.input_ids.to(self.device)
+            text_attention_mask = text_inputs.attention_mask.to(self.device).bool()
+            
+            # Encode
+            with torch.no_grad():
+                text_outputs = self.text_encoder(text_input_ids)
+                if hasattr(text_outputs, 'last_hidden_state'):
+                    text_hidden_states = text_outputs.last_hidden_state
+                elif isinstance(text_outputs, tuple):
+                    text_hidden_states = text_outputs[0]
+                else:
+                    text_hidden_states = text_outputs
+            
+            text_hidden_states = text_hidden_states.to(self.dtype)
+            
+            return text_hidden_states, text_attention_mask
     
     def extract_caption_from_sft_format(self, caption: str) -> str:
         try:
@@ -1103,7 +1263,7 @@ class AceStepHandler:
             if isinstance(refer_audio_list, list):
                 for idx, refer_audio in enumerate(refer_audio_list):
                     refer_audio_list[idx] = refer_audio_list[idx].to(self.device).to(torch.bfloat16)
-            elif isinstance(refer_audio_list, torch.tensor):
+            elif isinstance(refer_audio_list, torch.Tensor):
                 refer_audios[ii] = refer_audios[ii].to(self.device)
         
         if vocal_languages is None:
@@ -1131,35 +1291,37 @@ class AceStepHandler:
             target_wavs_list = [target_wavs[i].clone() for i in range(batch_size)]
             if target_wavs.device != self.device:
                 target_wavs = target_wavs.to(self.device)
-            for i in range(batch_size):
-                code_hint = audio_code_hints[i]
-                # Prefer decoding from provided audio codes
-                if code_hint:
-                    print(f"[generate_music] Decoding audio codes for item {i}...")
-                    decoded_latents = self._decode_audio_codes_to_latents(code_hint)
-                    if decoded_latents is not None:
-                        decoded_latents = decoded_latents.squeeze(0)
-                        target_latents_list.append(decoded_latents)
-                        latent_lengths.append(decoded_latents.shape[0])
-                        # Create a silent wav matching the latent length for downstream scaling
-                        frames_from_codes = max(1, int(decoded_latents.shape[0] * 1920))
-                        target_wavs_list[i] = torch.zeros(2, frames_from_codes)
-                        continue
-                # Fallback to VAE encode from audio
-                current_wav = target_wavs_list[i].to(self.device).unsqueeze(0)
-                if self.is_silence(current_wav):
-                    expected_latent_length = current_wav.shape[-1] // 1920
-                    target_latent = self.silence_latent[0, :expected_latent_length, :]
-                else:
-                    # Ensure input is in VAE's dtype
-                    print(f"[generate_music] Encoding target audio to latents for item {i}...")
-                    vae_input = current_wav.to(self.device).to(self.vae.dtype)
-                    target_latent = self.vae.encode(vae_input).latent_dist.sample()
-                    # Cast back to model dtype
-                    target_latent = target_latent.to(self.dtype)
-                    target_latent = target_latent.squeeze(0).transpose(0, 1)
-                target_latents_list.append(target_latent)
-                latent_lengths.append(target_latent.shape[0])
+            
+            with self._load_model_context("vae"):
+                for i in range(batch_size):
+                    code_hint = audio_code_hints[i]
+                    # Prefer decoding from provided audio codes
+                    if code_hint:
+                        print(f"[generate_music] Decoding audio codes for item {i}...")
+                        decoded_latents = self._decode_audio_codes_to_latents(code_hint)
+                        if decoded_latents is not None:
+                            decoded_latents = decoded_latents.squeeze(0)
+                            target_latents_list.append(decoded_latents)
+                            latent_lengths.append(decoded_latents.shape[0])
+                            # Create a silent wav matching the latent length for downstream scaling
+                            frames_from_codes = max(1, int(decoded_latents.shape[0] * 1920))
+                            target_wavs_list[i] = torch.zeros(2, frames_from_codes)
+                            continue
+                    # Fallback to VAE encode from audio
+                    current_wav = target_wavs_list[i].to(self.device).unsqueeze(0)
+                    if self.is_silence(current_wav):
+                        expected_latent_length = current_wav.shape[-1] // 1920
+                        target_latent = self.silence_latent[0, :expected_latent_length, :]
+                    else:
+                        # Ensure input is in VAE's dtype
+                        print(f"[generate_music] Encoding target audio to latents for item {i}...")
+                        vae_input = current_wav.to(self.device).to(self.vae.dtype)
+                        target_latent = self.vae.encode(vae_input).latent_dist.sample()
+                        # Cast back to model dtype
+                        target_latent = target_latent.to(self.dtype)
+                        target_latent = target_latent.squeeze(0).transpose(0, 1)
+                    target_latents_list.append(target_latent)
+                    latent_lengths.append(target_latent.shape[0])
              
             # Pad target_wavs to consistent length for outputs
             max_target_frames = max(wav.shape[-1] for wav in target_wavs_list)
@@ -1551,7 +1713,8 @@ class AceStepHandler:
 
         # step 2: refer_audio timbre
         keys = batch["keys"]
-        refer_audio_acoustic_hidden_states_packed, refer_audio_order_mask = self.infer_refer_latent(batch["refer_audioss"])
+        with self._load_model_context("vae"):
+            refer_audio_acoustic_hidden_states_packed, refer_audio_order_mask = self.infer_refer_latent(batch["refer_audioss"])
         if refer_audio_acoustic_hidden_states_packed.dtype != dtype:
             refer_audio_acoustic_hidden_states_packed = refer_audio_acoustic_hidden_states_packed.to(dtype)
 
@@ -1568,22 +1731,23 @@ class AceStepHandler:
         text_inputs = batch["text_inputs"]
 
         print("[preprocess_batch] Inferring prompt embeddings...")
-        text_hidden_states = self.infer_text_embeddings(text_token_idss)
-        print("[preprocess_batch] Inferring lyric embeddings...")
-        lyric_hidden_states = self.infer_lyric_embeddings(lyric_token_idss)
+        with self._load_model_context("text_encoder"):
+            text_hidden_states = self.infer_text_embeddings(text_token_idss)
+            print("[preprocess_batch] Inferring lyric embeddings...")
+            lyric_hidden_states = self.infer_lyric_embeddings(lyric_token_idss)
 
-        is_covers = batch["is_covers"]
-        
-        # Get precomputed hints from batch if available
-        precomputed_lm_hints_25Hz = batch.get("precomputed_lm_hints_25Hz", None)
-        
-        # Get non-cover text input ids and attention masks from batch if available
-        non_cover_text_input_ids = batch.get("non_cover_text_input_ids", None)
-        non_cover_text_attention_masks = batch.get("non_cover_text_attention_masks", None)
-        non_cover_text_hidden_states = None
-        if non_cover_text_input_ids is not None:
-            print("[preprocess_batch] Inferring non-cover text embeddings...")
-            non_cover_text_hidden_states = self.infer_text_embeddings(non_cover_text_input_ids)
+            is_covers = batch["is_covers"]
+            
+            # Get precomputed hints from batch if available
+            precomputed_lm_hints_25Hz = batch.get("precomputed_lm_hints_25Hz", None)
+            
+            # Get non-cover text input ids and attention masks from batch if available
+            non_cover_text_input_ids = batch.get("non_cover_text_input_ids", None)
+            non_cover_text_attention_masks = batch.get("non_cover_text_attention_masks", None)
+            non_cover_text_hidden_states = None
+            if non_cover_text_input_ids is not None:
+                print("[preprocess_batch] Inferring non-cover text embeddings...")
+                non_cover_text_hidden_states = self.infer_text_embeddings(non_cover_text_input_ids)
 
         return (
             keys,
@@ -1811,7 +1975,8 @@ class AceStepHandler:
             "cfg_interval_end": cfg_interval_end,
         }
         print("[service_generate] Generating audio...")
-        outputs = self.model.generate_audio(**generate_kwargs)
+        with self._load_model_context("model"):
+            outputs = self.model.generate_audio(**generate_kwargs)
         return outputs
 
     def tiled_decode(self, latents, chunk_size=512, overlap=64):
@@ -1941,6 +2106,9 @@ class AceStepHandler:
         if progress:
             progress(0.05, desc="Preparing inputs...")
         print("[generate_music] Preparing inputs...")
+        
+        # Reset offload cost
+        self.current_offload_cost = 0.0
 
         # Caption and lyrics are optional - can be empty
         # Use provided batch_size or default
@@ -2040,6 +2208,7 @@ class AceStepHandler:
             print("[generate_music] Model generation completed. Decoding latents...")
             pred_latents = outputs["target_latents"]  # [batch, latent_length, latent_dim]
             time_costs = outputs["time_costs"]
+            time_costs["offload_time_cost"] = self.current_offload_cost
             print(f"  - pred_latents: {pred_latents.shape}, dtype={pred_latents.dtype} {pred_latents.min()=}, {pred_latents.max()=}, {pred_latents.mean()=} {pred_latents.std()=}")
             print(f"  - time_costs: {time_costs}")
             if progress:
@@ -2049,22 +2218,26 @@ class AceStepHandler:
             # Decode latents to audio
             start_time = time.time()
             with torch.no_grad():
-                # Transpose for VAE decode: [batch, latent_length, latent_dim] -> [batch, latent_dim, latent_length]
-                pred_latents_for_decode = pred_latents.transpose(1, 2)
-                # Ensure input is in VAE's dtype
-                pred_latents_for_decode = pred_latents_for_decode.to(self.vae.dtype)
-                
-                if use_tiled_decode:
-                    print("[generate_music] Using tiled VAE decode to reduce VRAM usage...")
-                    pred_wavs = self.tiled_decode(pred_latents_for_decode)  # [batch, channels, samples]
-                else:
-                    pred_wavs = self.vae.decode(pred_latents_for_decode).sample
-                
-                # Cast output to float32 for audio processing/saving
-                pred_wavs = pred_wavs.to(torch.float32)
+                with self._load_model_context("vae"):
+                    # Transpose for VAE decode: [batch, latent_length, latent_dim] -> [batch, latent_dim, latent_length]
+                    pred_latents_for_decode = pred_latents.transpose(1, 2)
+                    # Ensure input is in VAE's dtype
+                    pred_latents_for_decode = pred_latents_for_decode.to(self.vae.dtype)
+                    
+                    if use_tiled_decode:
+                        print("[generate_music] Using tiled VAE decode to reduce VRAM usage...")
+                        pred_wavs = self.tiled_decode(pred_latents_for_decode)  # [batch, channels, samples]
+                    else:
+                        pred_wavs = self.vae.decode(pred_latents_for_decode).sample
+                    
+                    # Cast output to float32 for audio processing/saving
+                    pred_wavs = pred_wavs.to(torch.float32)
             end_time = time.time()
             time_costs["vae_decode_time_cost"] = end_time - start_time
             time_costs["total_time_cost"] = time_costs["total_time_cost"] + time_costs["vae_decode_time_cost"]
+            
+            # Update offload cost one last time to include VAE offloading
+            time_costs["offload_time_cost"] = self.current_offload_cost
             
             print("[generate_music] VAE decode completed. Saving audio files...")
             if progress:
