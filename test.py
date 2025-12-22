@@ -2,6 +2,7 @@ import os
 import sys
 import torch
 import shutil
+import resource
 from acestep.handler import AceStepHandler
 
 
@@ -91,6 +92,12 @@ def main():
     seeds = "320145306, 1514681811"
     
     print("Starting generation...")
+
+    # Reset peak memory stats
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        torch.xpu.reset_peak_memory_stats()
+    elif torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     
     # Call generate_music
     results = handler.generate_music(
@@ -109,7 +116,8 @@ def main():
         task_type="text2music",
         cfg_interval_start=0.0,
         cfg_interval_end=0.95,
-        audio_format="wav"
+        audio_format="wav",
+        use_tiled_decode=True,
     )
     
     # Unpack results
@@ -118,6 +126,17 @@ def main():
      align_score2, align_text2, align_plot2) = results
      
     print("\nGeneration Complete!")
+
+    # Print memory stats
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        peak_vram = torch.xpu.max_memory_allocated() / (1024 ** 3)
+        print(f"Peak VRAM usage: {peak_vram:.2f} GB")
+    elif torch.cuda.is_available():
+        peak_vram = torch.cuda.max_memory_allocated() / (1024 ** 3)
+        print(f"Peak VRAM usage: {peak_vram:.2f} GB")
+        
+    peak_ram = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+    print(f"Peak RAM usage: {peak_ram:.2f} GB")
     print(f"Status: {status_msg}")
     print(f"Info: {info}")
     print(f"Seeds used: {seed_val}")

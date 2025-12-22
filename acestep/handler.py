@@ -14,6 +14,7 @@ import torch
 import torchaudio
 import soundfile as sf
 import time
+from tqdm import tqdm
 from loguru import logger
 import warnings
 
@@ -1134,6 +1135,7 @@ class AceStepHandler:
                 code_hint = audio_code_hints[i]
                 # Prefer decoding from provided audio codes
                 if code_hint:
+                    print(f"[generate_music] Decoding audio codes for item {i}...")
                     decoded_latents = self._decode_audio_codes_to_latents(code_hint)
                     if decoded_latents is not None:
                         decoded_latents = decoded_latents.squeeze(0)
@@ -1150,6 +1152,7 @@ class AceStepHandler:
                     target_latent = self.silence_latent[0, :expected_latent_length, :]
                 else:
                     # Ensure input is in VAE's dtype
+                    print(f"[generate_music] Encoding target audio to latents for item {i}...")
                     vae_input = current_wav.to(self.device).to(self.vae.dtype)
                     target_latent = self.vae.encode(vae_input).latent_dist.sample()
                     # Cast back to model dtype
@@ -1319,6 +1322,7 @@ class AceStepHandler:
         for i in range(batch_size):
             if audio_code_hints[i] is not None:
                 # Decode audio codes to 25Hz latents
+                print(f"[generate_music] Decoding audio codes for LM hints for item {i}...")
                 hints = self._decode_audio_codes_to_latents(audio_code_hints[i])
                 if hints is not None:
                     # Pad or crop to match max_latent_length
@@ -1563,7 +1567,9 @@ class AceStepHandler:
         lyric_attention_mask = batch["lyric_attention_masks"]
         text_inputs = batch["text_inputs"]
 
+        print("[preprocess_batch] Inferring prompt embeddings...")
         text_hidden_states = self.infer_text_embeddings(text_token_idss)
+        print("[preprocess_batch] Inferring lyric embeddings...")
         lyric_hidden_states = self.infer_lyric_embeddings(lyric_token_idss)
 
         is_covers = batch["is_covers"]
@@ -1576,6 +1582,7 @@ class AceStepHandler:
         non_cover_text_attention_masks = batch.get("non_cover_text_attention_masks", None)
         non_cover_text_hidden_states = None
         if non_cover_text_input_ids is not None:
+            print("[preprocess_batch] Inferring non-cover text embeddings...")
             non_cover_text_hidden_states = self.infer_text_embeddings(non_cover_text_input_ids)
 
         return (
@@ -1803,9 +1810,77 @@ class AceStepHandler:
             "cfg_interval_start": cfg_interval_start,
             "cfg_interval_end": cfg_interval_end,
         }
-        
+        print("[service_generate] Generating audio...")
         outputs = self.model.generate_audio(**generate_kwargs)
         return outputs
+
+    def tiled_decode(self, latents, chunk_size=512, overlap=64):
+        """
+        Decode latents using tiling to reduce VRAM usage.
+        Uses overlap-discard strategy to avoid boundary artifacts.
+        
+        Args:
+            latents: [Batch, Channels, Length]
+            chunk_size: Size of latent chunk to process at once
+            overlap: Overlap size in latent frames
+        """
+        B, C, T = latents.shape
+        
+        # If short enough, decode directly
+        if T <= chunk_size:
+            return self.vae.decode(latents).sample
+
+        # Calculate stride (core size)
+        stride = chunk_size - 2 * overlap
+        if stride <= 0:
+            raise ValueError(f"chunk_size {chunk_size} must be > 2 * overlap {overlap}")
+            
+        decoded_audio_list = []
+        
+        # We need to determine upsample factor to trim audio correctly
+        upsample_factor = None
+        
+        num_steps = math.ceil(T / stride)
+        
+        for i in tqdm(range(num_steps), desc="Decoding audio chunks"):
+            # Core range in latents
+            core_start = i * stride
+            core_end = min(core_start + stride, T)
+            
+            # Window range (with overlap)
+            win_start = max(0, core_start - overlap)
+            win_end = min(T, core_end + overlap)
+            
+            # Extract chunk
+            latent_chunk = latents[:, :, win_start:win_end]
+            
+            # Decode
+            # [Batch, Channels, AudioSamples]
+            audio_chunk = self.vae.decode(latent_chunk).sample
+            
+            # Determine upsample factor from the first chunk
+            if upsample_factor is None:
+                upsample_factor = audio_chunk.shape[-1] / latent_chunk.shape[-1]
+            
+            # Calculate trim amounts in audio samples
+            # How much overlap was added at the start?
+            added_start = core_start - win_start # latent frames
+            trim_start = int(round(added_start * upsample_factor))
+            
+            # How much overlap was added at the end?
+            added_end = win_end - core_end # latent frames
+            trim_end = int(round(added_end * upsample_factor))
+            
+            # Trim audio
+            audio_len = audio_chunk.shape[-1]
+            end_idx = audio_len - trim_end
+            
+            audio_core = audio_chunk[:, :, trim_start:end_idx]
+            decoded_audio_list.append(audio_core)
+            
+        # Concatenate
+        final_audio = torch.cat(decoded_audio_list, dim=-1)
+        return final_audio
 
     def generate_music(
         self,
@@ -1834,6 +1909,7 @@ class AceStepHandler:
         cfg_interval_end: float = 1.0,
         audio_format: str = "mp3",
         lm_temperature: float = 0.6,
+        use_tiled_decode: bool = True,
         progress=None
     ) -> Tuple[Optional[str], Optional[str], List[str], str, str, str, str, str, Optional[Any], str, str, Optional[Any]]:
         """
@@ -1887,6 +1963,7 @@ class AceStepHandler:
             # 1. Process reference audio
             refer_audios = None
             if reference_audio is not None:
+                print("[generate_music] Processing reference audio...")
                 processed_ref_audio = self.process_reference_audio(reference_audio)
                 if processed_ref_audio is not None:
                     # Convert to the format expected by the service: List[List[torch.Tensor]]
@@ -1898,6 +1975,7 @@ class AceStepHandler:
             # 2. Process source audio
             processed_src_audio = None
             if src_audio is not None:
+                print("[generate_music] Processing source audio...")
                 processed_src_audio = self.process_src_audio(src_audio)
                 
             # 3. Prepare batch data
@@ -1975,7 +2053,13 @@ class AceStepHandler:
                 pred_latents_for_decode = pred_latents.transpose(1, 2)
                 # Ensure input is in VAE's dtype
                 pred_latents_for_decode = pred_latents_for_decode.to(self.vae.dtype)
-                pred_wavs = self.vae.decode(pred_latents_for_decode).sample  # [batch, channels, samples]
+                
+                if use_tiled_decode:
+                    print("[generate_music] Using tiled VAE decode to reduce VRAM usage...")
+                    pred_wavs = self.tiled_decode(pred_latents_for_decode)  # [batch, channels, samples]
+                else:
+                    pred_wavs = self.vae.decode(pred_latents_for_decode).sample
+                
                 # Cast output to float32 for audio processing/saving
                 pred_wavs = pred_wavs.to(torch.float32)
             end_time = time.time()
