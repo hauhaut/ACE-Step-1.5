@@ -497,6 +497,7 @@ def create_generation_section(handler) -> dict:
         "init_llm_checkbox": init_llm_checkbox,
         "use_flash_attention_checkbox": use_flash_attention_checkbox,
         "offload_to_cpu_checkbox": offload_to_cpu_checkbox,
+        "offload_dit_to_cpu_checkbox": offload_dit_to_cpu_checkbox,
         "task_type": task_type,
         "instruction_display_gen": instruction_display_gen,
         "track_name": track_name,

@@ -293,7 +293,7 @@ class AceStepHandler:
                     logger.info(f"5Hz LM tokenizer loaded successfully in {time.time() - start_time:.2f} seconds")
                     self.llm_tokenizer = llm_tokenizer
                     if device == "cuda":
-                        status_msg = self._initialize_5hz_lm_cuda(full_lm_model_path)
+                        status_msg = self._initialize_5hz_lm_vllm(full_lm_model_path)
                         logger.info(f"5Hz LM status message: {status_msg}")
                         # Check if initialization failed (status_msg starts with ❌)
                         if status_msg.startswith("❌"):
@@ -470,7 +470,7 @@ class AceStepHandler:
         except Exception as e:
             return 0.9, low_gpu_memory_mode
     
-    def _initialize_5hz_lm(self, model_path: str) -> str:
+    def _initialize_5hz_lm_vllm(self, model_path: str) -> str:
         """Initialize 5Hz LM model"""
         if not torch.cuda.is_available():
             self.llm_initialized = False
