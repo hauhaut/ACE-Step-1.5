@@ -247,15 +247,22 @@ class AceStepHandler:
                 if compile_model:
                     self.model = torch.compile(self.model)
                     
-                    if self.quantization == "int8_weight_only":
-                        from torchao.quantization import quantize_, Int8WeightOnlyConfig
-                        quantize_(self.model, Int8WeightOnlyConfig())
-                        logger.info("DiT quantized with Int8WeightOnlyConfig")
-                    elif self.quantization == "fp8_weight_only":
-                        from torchao.quantization import quantize_, Float8WeightOnlyConfig
-                        quantize_(self.model, Float8WeightOnlyConfig())                        
-                    elif self.quantization is not None:
-                        raise ValueError(f"Unsupported quantization type: {self.quantization}")
+                    if self.quantization is not None:
+                        from torchao.quantization import quantize_
+                        if self.quantization == "int8_weight_only":
+                            from torchao.quantization import Int8WeightOnlyConfig
+                            quant_config = Int8WeightOnlyConfig()
+                        elif self.quantization == "fp8_weight_only":
+                            from torchao.quantization import Float8WeightOnlyConfig
+                            quant_config = Float8WeightOnlyConfig()
+                        elif self.quantization == "w8a8_dynamic":
+                            from torchao.quantization import Int8DynamicActivationInt8WeightConfig, MappingType
+                            quant_config = Int8DynamicActivationInt8WeightConfig(act_mapping_type=MappingType.ASYMMETRIC)
+                        else:
+                            raise ValueError(f"Unsupported quantization type: {self.quantization}")
+                        
+                        quantize_(self.model, quant_config)
+                        logger.info("DiT quantized with:",self.quantization)
                     
                     
                 silence_latent_path = os.path.join(acestep_v15_checkpoint_path, "silence_latent.pt")
