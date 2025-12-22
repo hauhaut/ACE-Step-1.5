@@ -204,7 +204,6 @@ def create_generation_section(handler) -> dict:
                     label="Initialize 5Hz LM",
                     value=False,
                     info="Check to initialize 5Hz LM during service initialization",
-                    interactive=False
                 )
             
             with gr.Row():
@@ -298,7 +297,7 @@ def create_generation_section(handler) -> dict:
                         )
                     
                     # 5Hz LM
-                    with gr.Row(visible=False) as use_5hz_lm_row:
+                    with gr.Row(visible=True) as use_5hz_lm_row:
                         use_5hz_lm_btn = gr.Button(
                             "Generate LM Hints",
                             variant="secondary",
@@ -748,9 +747,36 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
     def generate_lm_hints_wrapper(caption, lyrics, temperature):
         """Wrapper for 5Hz LM generation"""
         metadata, audio_codes, status = handler.generate_with_5hz_lm(caption, lyrics, temperature)
-        # 返回格式化的结果，可以根据需要调整
-        result_text = f"Status: {status}\n\nMetadata: {metadata}\n\nAudio Codes: {audio_codes[:200]}..." if len(audio_codes) > 200 else f"Status: {status}\n\nMetadata: {metadata}\n\nAudio Codes: {audio_codes}"
-        return result_text
+        
+        # Extract metadata values and map to UI fields
+        # Handle bpm
+        bpm_value = metadata.get('bpm', None)
+        if bpm_value == "N/A" or bpm_value == "":
+            bpm_value = None
+        
+        # Handle key_scale (metadata uses 'keyscale')
+        key_scale_value = metadata.get('keyscale', metadata.get('key_scale', ""))
+        if key_scale_value == "N/A":
+            key_scale_value = ""
+        
+        # Handle time_signature (metadata uses 'timesignature')
+        time_signature_value = metadata.get('timesignature', metadata.get('time_signature', ""))
+        if time_signature_value == "N/A":
+            time_signature_value = ""
+        
+        # Handle audio_duration (metadata uses 'duration')
+        audio_duration_value = metadata.get('duration', -1)
+        if audio_duration_value == "N/A" or audio_duration_value == "":
+            audio_duration_value = -1
+        
+        # Return audio codes and all metadata fields
+        return (
+            audio_codes,  # text2music_audio_code_string
+            bpm_value,    # bpm
+            key_scale_value,  # key_scale
+            time_signature_value,  # time_signature
+            audio_duration_value,  # audio_duration
+        )
     
     generation_section["use_5hz_lm_btn"].click(
         fn=generate_lm_hints_wrapper,
@@ -759,7 +785,13 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
             generation_section["lyrics"],
             generation_section["lm_temperature"]
         ],
-        outputs=[generation_section["text2music_audio_code_string"]]
+        outputs=[
+            generation_section["text2music_audio_code_string"],
+            generation_section["bpm"],
+            generation_section["key_scale"],
+            generation_section["time_signature"],
+            generation_section["audio_duration"],
+        ]
     )
     
     # Update instruction and UI visibility based on task type

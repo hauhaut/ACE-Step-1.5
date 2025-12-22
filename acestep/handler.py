@@ -4,6 +4,7 @@ Encapsulates all data processing and business logic as a bridge between model an
 """
 import os
 import math
+from copy import deepcopy
 import tempfile
 import traceback
 import re
@@ -58,9 +59,10 @@ class AceStepHandler:
         self.sample_rate = 48000
         
         # 5Hz LM related
-        self.lm_model = None
-        self.lm_tokenizer = None
-        self.lm_initialized = False
+        self.llm = None
+        self.llm_tokenizer = None
+        self.llm_initialized = False
+        self.llm_backend = None
         
         # Reward model (temporarily disabled)
         self.reward_model = None
@@ -218,12 +220,43 @@ class AceStepHandler:
             if init_llm:
                 full_lm_model_path = os.path.join(checkpoint_dir, lm_model_path)
                 if os.path.exists(full_lm_model_path):
+                    print("loading 5Hz LM tokenizer...")
+                    start_time = time.time()
+                    llm_tokenizer = deepcopy(self.text_tokenizer)
+                    max_audio_length = 2**16 - 1
+                    semantic_tokens = [f"<|audio_code_{i}|>" for i in range(max_audio_length)]
+                    # 217204
+                    llm_tokenizer.add_special_tokens({"additional_special_tokens": semantic_tokens})
+                    print(f"5Hz LM tokenizer loaded successfully in {time.time() - start_time:.2f} seconds")
+                    self.llm_tokenizer = llm_tokenizer
                     if device == "cuda":
                         status_msg = self._initialize_5hz_lm_cuda(full_lm_model_path)
-                        if not self.llm_initialized:
-                            return status_msg, False
-                    self.llm = AutoModel.from_pretrained(full_lm_model_path)
-                    self.llm_tokenizer = AutoTokenizer.from_pretrained(full_lm_model_path)
+                        print(f"5Hz LM status message: {status_msg}")
+                        # Check if initialization failed (status_msg starts with ❌)
+                        if status_msg.startswith("❌"):
+                            # vllm initialization failed, fallback to PyTorch
+                            if not self.llm_initialized:
+                                try:
+                                    self.llm = AutoModel.from_pretrained(full_lm_model_path)
+                                    self.llm = self.llm.to(device).to(self.dtype)
+                                    self.llm.eval()
+                                    self.llm_backend = "pt"
+                                    self.llm_initialized = True
+                                except Exception as e:
+                                    return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", False
+                        # If vllm initialization succeeded, self.llm_initialized should already be True
+                    else:
+                        # For CPU or other devices, use PyTorch backend
+                        try:
+                            self.llm = AutoModel.from_pretrained(full_lm_model_path)
+                            self.llm_tokenizer = AutoTokenizer.from_pretrained(full_lm_model_path, use_fast=True)
+                            self.llm = self.llm.to(device).to(self.dtype)
+                            self.llm.eval()
+                            self.llm_backend = "pt"
+                            self.llm_initialized = True
+                        except Exception as e:
+                            return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", False
+                            
                 else:
                     # 5Hz LM path not found
                     return f"❌ 5Hz LM model not found at {full_lm_model_path}", False
@@ -266,6 +299,10 @@ class AceStepHandler:
             reserved_mem_bytes = torch.cuda.memory_reserved(device)
             
             total_gpu = total_gpu_mem_bytes / 1024**3
+            low_gpu_memory_mode = False
+            if total_gpu < minimal_gpu:
+                minimal_gpu = 0.5 * total_gpu
+                low_gpu_memory_mode = True
             allocated_gpu = allocated_mem_bytes / 1024**3
             reserved_gpu = reserved_mem_bytes / 1024**3
             available_gpu = total_gpu - reserved_gpu
@@ -275,54 +312,64 @@ class AceStepHandler:
             else:
                 ratio = min(max_ratio, max(min_ratio, (available_gpu * 0.8) / total_gpu))
             
-            return ratio
+            return ratio, low_gpu_memory_mode
         except Exception as e:
-            return 0.9
+            return 0.9, low_gpu_memory_mode
     
     def _initialize_5hz_lm_cuda(self, model_path: str) -> str:
         """Initialize 5Hz LM model"""
+        if not torch.cuda.is_available():
+            self.llm_initialized = False
+            print("CUDA is not available. Please check your GPU setup.")
+            return "❌ CUDA is not available. Please check your GPU setup."
         try:
             from nanovllm import LLM, SamplingParams
-            
-            if not torch.cuda.is_available():
-                return "❌ CUDA is not available. Please check your GPU setup."
-            
+        except ImportError:
+            self.llm_initialized = False
+            print("nano-vllm is not installed. Please install it using 'cd acestep/third_parts/nano-vllm && pip install .")
+            return "❌ nano-vllm is not installed. Please install it using 'cd acestep/third_parts/nano-vllm && pip install ."
+        
+        try:
             current_device = torch.cuda.current_device()
             device_name = torch.cuda.get_device_name(current_device)
             
             torch.cuda.empty_cache()
-            gpu_memory_utilization = self.get_gpu_memory_utilization(
+            gpu_memory_utilization, low_gpu_memory_mode = self.get_gpu_memory_utilization(
                 minimal_gpu=8, 
                 min_ratio=0.2, 
                 max_ratio=0.9
             )
+            if low_gpu_memory_mode:
+                self.max_model_len = 1024
+            else:
+                self.max_model_len = 2048
             
+            print(f"Initializing 5Hz LM with model: {model_path}, enforce_eager: False, tensor_parallel_size: 1, max_model_len: {self.max_model_len}, gpu_memory_utilization: {gpu_memory_utilization}")
+            start_time = time.time()
             self.llm = LLM(
                 model=model_path,
                 enforce_eager=False,
                 tensor_parallel_size=1,
-                max_model_len=4096,
+                max_model_len=self.max_model_len,
                 gpu_memory_utilization=gpu_memory_utilization,
             )
-            self.llm_tokenizer = self.llm.tokenizer
+            print(f"5Hz LM initialized successfully in {time.time() - start_time:.2f} seconds")
+            self.llm.tokenizer = self.llm_tokenizer
             self.llm_initialized = True
+            self.llm_backend = "vllm"
             return f"✅ 5Hz LM initialized successfully\nModel: {model_path}\nDevice: {device_name}\nGPU Memory Utilization: {gpu_memory_utilization:.2f}"
         except Exception as e:
             self.llm_initialized = False
             error_msg = f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             return error_msg
-    
-    def generate_with_5hz_lm(self, caption: str, lyrics: str, temperature: float = 0.6) -> Tuple[Dict[str, Any], str, str]:
-        """Generate metadata and audio codes using 5Hz LM"""
-        if not self.lm_initialized or self.llm is None:
-            return {}, "", "❌ 5Hz LM not initialized. Please initialize it first."
-        
+
+    def generate_with_5hz_lm_vllm(self, caption: str, lyrics: str, temperature: float = 0.6) -> Tuple[Dict[str, Any], str, str]:
         try:
             from nanovllm import SamplingParams
             
             prompt = f"# Caption\n{caption}\n\n# Lyric\n{lyrics}\n"
             
-            formatted_prompt = self.lm_tokenizer.apply_chat_template(
+            formatted_prompt = self.llm_tokenizer.apply_chat_template(
                 [
                     {"role": "system", "content": "# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n"},
                     {"role": "user", "content": prompt}
@@ -330,10 +377,10 @@ class AceStepHandler:
                 tokenize=False,
                 add_generation_prompt=True,
             )
+            print("[debug] formatted_prompt: ", formatted_prompt)
             
-            sampling_params = SamplingParams(max_tokens=3072, temperature=temperature)
+            sampling_params = SamplingParams(max_tokens=self.max_model_len, temperature=temperature)
             outputs = self.llm.generate([formatted_prompt], sampling_params)
-            
             if isinstance(outputs, list) and len(outputs) > 0:
                 if hasattr(outputs[0], 'outputs') and len(outputs[0].outputs) > 0:
                     output_text = outputs[0].outputs[0].text
@@ -351,22 +398,113 @@ class AceStepHandler:
         except Exception as e:
             error_msg = f"❌ Error generating with 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             return {}, "", error_msg
+        
+    def generate_with_5hz_lm_pt(self, caption: str, lyrics: str, temperature: float = 0.6) -> Tuple[Dict[str, Any], str, str]:
+        try:
+            prompt = f"# Caption\n{caption}\n\n# Lyric\n{lyrics}\n"
+            
+            formatted_prompt = self.llm_tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": "# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n"},
+                    {"role": "user", "content": prompt}
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            
+            # Tokenize the prompt
+            inputs = self.llm_tokenizer(
+                formatted_prompt,
+                return_tensors="pt",
+                padding=False,
+                truncation=True,
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            # Generate with the model
+            with torch.no_grad():
+                # Get max_new_tokens from model config or use a default
+                max_new_tokens = getattr(self.llm.config, 'max_new_tokens', 4096)
+                if hasattr(self, 'max_model_len'):
+                    max_new_tokens = min(max_new_tokens, self.max_model_len)
+                
+                outputs = self.llm.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    do_sample=True if temperature > 0 else False,
+                    pad_token_id=self.llm_tokenizer.pad_token_id or self.llm_tokenizer.eos_token_id,
+                )
+            
+            # Decode the generated tokens
+            # Only decode the newly generated tokens (skip the input prompt)
+            generated_ids = outputs[0][inputs['input_ids'].shape[1]:]
+            output_text = self.llm_tokenizer.decode(generated_ids, skip_special_tokens=False)
+            
+            metadata, audio_codes = self.parse_lm_output(output_text)
+            codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
+            return metadata, audio_codes, f"✅ Generated successfully\nOutput length: {len(output_text)} chars\nCodes count: {codes_count}"
+            
+        except Exception as e:
+            error_msg = f"❌ Error generating with 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+            return {}, "", error_msg
+        
+    def generate_with_5hz_lm(self, caption: str, lyrics: str, temperature: float = 0.6) -> Tuple[Dict[str, Any], str, str]:
+        """Generate metadata and audio codes using 5Hz LM"""
+        # Check if 5Hz LM is initialized
+        if not hasattr(self, 'llm_initialized') or not self.llm_initialized:
+            debug_info = f"llm_initialized={getattr(self, 'llm_initialized', 'not set')}, "
+            debug_info += f"has_llm={hasattr(self, 'llm')}, "
+            debug_info += f"llm_is_none={getattr(self, 'llm', None) is None}, "
+            debug_info += f"llm_backend={getattr(self, 'llm_backend', 'not set')}"
+            return {}, "", f"❌ 5Hz LM not initialized. Please initialize it first. Debug: {debug_info}"
+        
+        if not hasattr(self, 'llm') or self.llm is None:
+            return {}, "", "❌ 5Hz LM model not loaded. Please initialize it first."
+        
+        if not hasattr(self, 'llm_backend'):
+            return {}, "", "❌ 5Hz LM backend not set. Please initialize it first."
+        
+        if self.llm_backend == "vllm":
+            return self.generate_with_5hz_lm_vllm(caption, lyrics, temperature)
+        else:
+            return self.generate_with_5hz_lm_pt(caption, lyrics, temperature)
     
     def parse_lm_output(self, output_text: str) -> Tuple[Dict[str, Any], str]:
-        """Parse LM output"""
+        """
+        Parse LM output to extract metadata and audio codes.
+        
+        Expected format:
+        <think>
+        bpm: 73
+        duration: 273
+        genres: Chinese folk
+        keyscale: G major
+        timesignature: 4
+        </think>
+        
+        <|audio_code_56535|><|audio_code_62918|>...
+        
+        Returns:
+            Tuple of (metadata_dict, audio_codes_string)
+        """
+        debug_output_text = output_text.split("</think>")[0]
+        print(f"Debug output text: {debug_output_text}")
         metadata = {}
         audio_codes = ""
         
         import re
         
-        # Extract audio codes
+        # Extract audio codes - find all <|audio_code_XXX|> patterns
         code_pattern = r'<\|audio_code_\d+\|>'
         code_matches = re.findall(code_pattern, output_text)
         if code_matches:
             audio_codes = "".join(code_matches)
         
-        # Extract metadata
+        # Extract metadata from reasoning section
+        # Try different reasoning tag patterns
         reasoning_patterns = [
+            r'<think>(.*?)</think>',
             r'<think>(.*?)</think>',
             r'<reasoning>(.*?)</reasoning>',
         ]
@@ -378,7 +516,9 @@ class AceStepHandler:
                 reasoning_text = match.group(1).strip()
                 break
         
+        # If no reasoning tags found, try to parse metadata from the beginning of output
         if not reasoning_text:
+            # Look for metadata lines before audio codes
             lines_before_codes = output_text.split('<|audio_code_')[0] if '<|audio_code_' in output_text else output_text
             reasoning_text = lines_before_codes.strip()
         
@@ -402,8 +542,12 @@ class AceStepHandler:
                                 metadata['duration'] = int(value)
                             except:
                                 metadata['duration'] = value
-                        elif key in ['genres', 'keyscale', 'timesignature']:
-                            metadata[key] = value
+                        elif key == 'genres':
+                            metadata['genres'] = value
+                        elif key == 'keyscale':
+                            metadata['keyscale'] = value
+                        elif key == 'timesignature':
+                            metadata['timesignature'] = value
         
         return metadata, audio_codes
 
