@@ -155,6 +155,7 @@ class AceStepHandler:
         compile_model: bool = False,
         offload_to_cpu: bool = False,
         offload_dit_to_cpu: bool = False,
+        quantization: Optional[str] = None,
     ) -> Tuple[str, bool]:
         """
         Initialize model service
@@ -184,6 +185,14 @@ class AceStepHandler:
             self.offload_dit_to_cpu = offload_dit_to_cpu
             # Set dtype based on device: bfloat16 for cuda, float32 for cpu
             self.dtype = torch.bfloat16 if device in ["cuda","xpu"] else torch.float32
+            self.quantization = quantization
+            if self.quantization is not None:
+                assert compile_model, "Quantization requires compile_model to be True"
+                try:
+                    import torchao
+                except ImportError:
+                    raise ImportError("torchao is required for quantization but is not installed. Please install torchao to use quantization features.")
+                
 
             # Auto-detect project root (independent of passed project_root parameter)
             current_file = os.path.abspath(__file__)
@@ -236,8 +245,18 @@ class AceStepHandler:
                 self.model.eval()
                 
                 if compile_model:
-                    logger.info("Compiling model with torch.compile...")
                     self.model = torch.compile(self.model)
+                    
+                    if self.quantization == "int8_weight_only":
+                        from torchao.quantization import quantize_, Int8WeightOnlyConfig
+                        quantize_(self.model, Int8WeightOnlyConfig())
+                        logger.info("DiT quantized with Int8WeightOnlyConfig")
+                    elif self.quantization == "fp8_weight_only":
+                        from torchao.quantization import quantize_, Float8WeightOnlyConfig
+                        quantize_(self.model, Float8WeightOnlyConfig())                        
+                    elif self.quantization is not None:
+                        raise ValueError(f"Unsupported quantization type: {self.quantization}")
+                    
                     
                 silence_latent_path = os.path.join(acestep_v15_checkpoint_path, "silence_latent.pt")
                 if os.path.exists(silence_latent_path):
@@ -265,6 +284,9 @@ class AceStepHandler:
                 self.vae.eval()
             else:
                 raise FileNotFoundError(f"VAE checkpoint not found at {vae_checkpoint_path}")
+
+            if compile_model:
+                self.vae = torch.compile(self.vae)
             
             # 3. Load text encoder and tokenizer
             text_encoder_path = os.path.join(checkpoint_dir, "Qwen3-Embedding-0.6B")

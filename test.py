@@ -46,6 +46,7 @@ def main():
         compile_model=True,
         offload_to_cpu=True,
         offload_dit_to_cpu=False, # Keep DiT on GPU
+        quantization="fp8_weight_only", # Enable FP8 weight-only quantization
     )
     
     if not enabled:
