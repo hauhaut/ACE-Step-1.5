@@ -46,6 +46,7 @@ def main():
         compile_model=True,
         offload_to_cpu=True,
         offload_dit_to_cpu=False, # Keep DiT on GPU
+        quantization="int8_weight_only", # Enable FP8 weight-only quantization
     )
     
     if not enabled:
@@ -107,7 +108,12 @@ def main():
         print(f"Generated Audio Codes (first 50 chars): {audio_codes[:50]}...")
     else:
         print("Skipping 5Hz LLM generation...")
-        metadata = {}
+        metadata = {
+            'bpm': 90,
+            'keyscale': 'A major',
+            'timesignature': '4',
+            'duration': 240,
+        }
         audio_codes = None
         lm_status = "Skipped"
 
