@@ -35,13 +35,15 @@ def main():
     device = "xpu"
     print(f"Using device: {device}")
     
+    use_llm = False
+
     status, enabled = handler.initialize_service(
         project_root=project_root,
         config_path=model_name,
         device=device,
-        init_llm=True,
+        init_llm=use_llm,
         use_flash_attention=False, # Default in UI
-        compile_model=False,
+        compile_model=True,
         offload_to_cpu=True,
         offload_dit_to_cpu=False, # Keep DiT on GPU
     )
@@ -95,6 +97,49 @@ def main():
     
     print("Starting generation...")
 
+    # Generate hints using 5Hz LLM
+    if use_llm:
+        print("Generating hints using 5Hz LLM...")
+        lm_temperature = 0.6
+        metadata, audio_codes, lm_status = handler.generate_with_5hz_lm(captions, lyrics, lm_temperature)
+        print(f"5Hz LLM Status: {lm_status}")
+        print(f"Generated Metadata: {metadata}")
+        print(f"Generated Audio Codes (first 50 chars): {audio_codes[:50]}...")
+    else:
+        print("Skipping 5Hz LLM generation...")
+        metadata = {}
+        audio_codes = None
+        lm_status = "Skipped"
+
+    # Use generated metadata if available
+    bpm = metadata.get('bpm', 90)
+    if bpm == "N/A" or bpm == "":
+        bpm = 90
+    else:
+        try:
+            bpm = int(float(bpm))
+        except:
+            bpm = 90
+            
+    key_scale = metadata.get('keyscale', metadata.get('key_scale', "A major"))
+    if key_scale == "N/A":
+        key_scale = "A major"
+        
+    time_signature = metadata.get('timesignature', metadata.get('time_signature', "4"))
+    if time_signature == "N/A":
+        time_signature = "4"
+        
+    audio_duration = metadata.get('duration', 120)
+    if audio_duration == "N/A":
+        audio_duration = 120
+    else:
+        try:
+            audio_duration = float(audio_duration)
+        except:
+            audio_duration = 120
+
+    print(f"Using parameters: BPM={bpm}, Key={key_scale}, Time Sig={time_signature}, Duration={audio_duration}")
+
     # Reset peak memory stats
     if hasattr(torch, 'xpu') and torch.xpu.is_available():
         torch.xpu.reset_peak_memory_stats()
@@ -105,21 +150,22 @@ def main():
     results = handler.generate_music(
         captions=captions,
         lyrics=lyrics,
-        bpm=90,
-        key_scale="A major",
-        time_signature="4",
+        bpm=bpm,
+        key_scale=key_scale,
+        time_signature=time_signature,
         vocal_language="zh",
         inference_steps=8,
         guidance_scale=7.0,
         use_random_seed=False,
         seed=seeds,
-        audio_duration=120,
+        audio_duration=audio_duration,
         batch_size=1,
         task_type="text2music",
         cfg_interval_start=0.0,
         cfg_interval_end=0.95,
         audio_format="wav",
         use_tiled_decode=True,
+        audio_code_string=audio_codes,
     )
     
     # Unpack results

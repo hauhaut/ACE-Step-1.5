@@ -20,7 +20,8 @@ from tqdm import tqdm
 from loguru import logger
 import warnings
 
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
+from transformers.generation.streamers import BaseStreamer
 from diffusers.models import AutoencoderOobleck
 
 
@@ -175,6 +176,8 @@ class AceStepHandler:
         try:
             if device == "auto":
                 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+            status_msg = ""
             
             self.device = device
             self.offload_to_cpu = offload_to_cpu
@@ -203,7 +206,6 @@ class AceStepHandler:
                     self.model = AutoModel.from_pretrained(
                         acestep_v15_checkpoint_path, 
                         trust_remote_code=True, 
-                        dtype=self.dtype,
                         attn_implementation=attn_implementation
                     )
                 except Exception as e:
@@ -214,7 +216,6 @@ class AceStepHandler:
                         self.model = AutoModel.from_pretrained(
                             acestep_v15_checkpoint_path, 
                             trust_remote_code=True, 
-                            dtype=self.dtype,
                             attn_implementation=attn_implementation
                         )
                     else:
@@ -299,8 +300,11 @@ class AceStepHandler:
                             # vllm initialization failed, fallback to PyTorch
                             if not self.llm_initialized:
                                 try:
-                                    self.llm = AutoModel.from_pretrained(full_lm_model_path)
-                                    self.llm = self.llm.to(device).to(self.dtype)
+                                    self.llm = AutoModelForCausalLM.from_pretrained(full_lm_model_path, trust_remote_code=True)
+                                    if not self.offload_to_cpu:
+                                        self.llm = self.llm.to(device).to(self.dtype)
+                                    else:
+                                        self.llm = self.llm.to("cpu").to(self.dtype)
                                     self.llm.eval()
                                     self.llm_backend = "pt"
                                     self.llm_initialized = True
@@ -311,9 +315,12 @@ class AceStepHandler:
                     else:
                         # For CPU or other devices, use PyTorch backend
                         try:
-                            self.llm = AutoModel.from_pretrained(full_lm_model_path)
-                            self.llm_tokenizer = AutoTokenizer.from_pretrained(full_lm_model_path, use_fast=True)
-                            self.llm = self.llm.to(device).to(self.dtype)
+                            self.llm = AutoModelForCausalLM.from_pretrained(full_lm_model_path, trust_remote_code=True)
+                            self.llm_tokenizer = AutoTokenizer.from_pretrained(full_lm_model_path, use_fast=True, trust_remote_code=True)
+                            if not self.offload_to_cpu:
+                                self.llm = self.llm.to(device).to(self.dtype)
+                            else:
+                                self.llm = self.llm.to("cpu").to(self.dtype)
                             self.llm.eval()
                             self.llm_backend = "pt"
                             self.llm_initialized = True
@@ -328,7 +335,7 @@ class AceStepHandler:
             # Determine actual attention implementation used
             actual_attn = getattr(self.config, "_attn_implementation", "eager")
             
-            status_msg = f"✅ Model initialized successfully on {device}\n"
+            status_msg = f"✅ Model initialized successfully on {device}\n" + status_msg
             status_msg += f"Main model: {acestep_v15_checkpoint_path}\n"
             status_msg += f"VAE: {vae_checkpoint_path}\n"
             status_msg += f"Text encoder: {text_encoder_path}\n"
@@ -581,22 +588,43 @@ class AceStepHandler:
                 padding=False,
                 truncation=True,
             )
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
             
             # Generate with the model
-            with torch.no_grad():
+            with self._load_model_context("llm"):
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                
                 # Get max_new_tokens from model config or use a default
                 max_new_tokens = getattr(self.llm.config, 'max_new_tokens', 4096)
                 if hasattr(self, 'max_model_len'):
                     max_new_tokens = min(max_new_tokens, self.max_model_len)
                 
-                outputs = self.llm.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    do_sample=True if temperature > 0 else False,
-                    pad_token_id=self.llm_tokenizer.pad_token_id or self.llm_tokenizer.eos_token_id,
-                )
+                # Define custom streamer for tqdm
+                class TqdmTokenStreamer(BaseStreamer):
+                    def __init__(self, total):
+                        self.pbar = tqdm(total=total, desc="Generating 5Hz tokens", unit="token", maxinterval=1)
+                        
+                    def put(self, value):
+                        # value is tensor of token ids
+                        if value.dim() > 1:
+                            num_tokens = value.numel()
+                        else:
+                            num_tokens = len(value)
+                        self.pbar.update(num_tokens)
+                        
+                    def end(self):
+                        self.pbar.close()
+
+                streamer = TqdmTokenStreamer(total=max_new_tokens)
+
+                with torch.no_grad():
+                    outputs = self.llm.generate(
+                        **inputs,
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        do_sample=True if temperature > 0 else False,
+                        pad_token_id=self.llm_tokenizer.pad_token_id or self.llm_tokenizer.eos_token_id,
+                        streamer=streamer,
+                    )
             
             # Decode the generated tokens
             # Only decode the newly generated tokens (skip the input prompt)
@@ -776,7 +804,7 @@ class AceStepHandler:
             # Expand to include quantizer dimension: [1, T_5Hz, num_quantizers]
             if indices.dim() == 2:
                 indices = indices.unsqueeze(-1).expand(-1, -1, num_quantizers)
-            
+            print(indices.shape)
             # Get quantized representation from indices: [1, T_5Hz, dim]
             quantized = quantizer.get_output_from_indices(indices)
             if quantized.dtype != self.dtype:
