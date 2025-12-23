@@ -212,22 +212,37 @@ class ModelRunner:
         """Prepare sampling parameters. For CFG batch, only return parameters for conditional sequences."""
         if is_cfg_batch:
             # For CFG batch, seqs contains [cond_seq1, cond_seq2, ..., uncond_seq1, uncond_seq2, ...]
-            # We only need temperatures for conditional sequences (first half)
+            # We only need parameters for conditional sequences (first half)
             num_cond = len(seqs) // 2
             temperatures = []
             cfg_scales = []
+            top_ks = []
+            top_ps = []
+            repetition_penalties = []
             for seq in seqs[:num_cond]:
                 temperatures.append(seq.temperature)
                 cfg_scales.append(seq.cfg_scale)
+                top_ks.append(seq.top_k if seq.top_k is not None else 0)
+                top_ps.append(seq.top_p if seq.top_p is not None else 1.0)
+                repetition_penalties.append(seq.repetition_penalty)
         else:
             temperatures = []
             cfg_scales = []
+            top_ks = []
+            top_ps = []
+            repetition_penalties = []
             for seq in seqs:
                 temperatures.append(seq.temperature)
                 cfg_scales.append(seq.cfg_scale)
+                top_ks.append(seq.top_k if seq.top_k is not None else 0)
+                top_ps.append(seq.top_p if seq.top_p is not None else 1.0)
+                repetition_penalties.append(seq.repetition_penalty)
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         cfg_scales = torch.tensor(cfg_scales, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
-        return temperatures, cfg_scales
+        top_ks = torch.tensor(top_ks, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        top_ps = torch.tensor(top_ps, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
+        repetition_penalties = torch.tensor(repetition_penalties, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
+        return temperatures, cfg_scales, top_ks, top_ps, repetition_penalties
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
@@ -274,7 +289,11 @@ class ModelRunner:
             # Prepare inputs for both conditional and unconditional (they're already in the batch)
             input_ids, positions = (self.prepare_prefill(seqs) if is_prefill 
                                    else self.prepare_decode(seqs))
-            temperatures, cfg_scales = self.prepare_sample(seqs, is_cfg_batch=True) if self.rank == 0 else (None, None)
+            sample_params = self.prepare_sample(seqs, is_cfg_batch=True) if self.rank == 0 else None
+            if sample_params is not None:
+                temperatures, cfg_scales, top_ks, top_ps, repetition_penalties = sample_params
+            else:
+                temperatures = cfg_scales = top_ks = top_ps = repetition_penalties = None
             
             # Run model forward (processes entire batch: cond + uncond)
             logits_all = self.run_model(input_ids, positions, is_prefill)
@@ -285,12 +304,44 @@ class ModelRunner:
                 logits_cond = logits_all[:num_cond]
                 logits_uncond = logits_all[num_cond:]
                 
-                # Apply CFG formula: logits_cfg = logits_cond + cfg_scale * (logits_cond - logits_uncond)
+                # Apply repetition penalty to conditional logits (before CFG)
+                if repetition_penalties is not None:
+                    for i, seq in enumerate(cond_seqs):
+                        penalty = repetition_penalties[i].item()
+                        if penalty != 1.0:
+                            # Only penalize completion tokens (not prompt tokens)
+                            completion_tokens = torch.tensor(seq.completion_token_ids, device=logits_cond.device)
+                            if len(completion_tokens) > 0:
+                                # Create token mask: mark tokens that appeared in completion
+                                token_mask = torch.zeros(logits_cond.shape[1], dtype=torch.bool, device=logits_cond.device)
+                                token_mask[completion_tokens] = True
+                                
+                                # Apply standard repetition penalty formula (matching transformers implementation):
+                                # For tokens in completion: if score < 0 then score * penalty, else score / penalty
+                                penalty_scores = torch.where(
+                                    logits_cond[i] < 0,
+                                    logits_cond[i] * penalty,
+                                    logits_cond[i] / penalty
+                                )
+                                # Only apply penalty to tokens that appeared in completion
+                                logits_cond[i] = torch.where(token_mask, penalty_scores, logits_cond[i])
+                
+                # Apply CFG formula: logits_cfg = logits_uncond + cfg_scale * (logits_cond - logits_uncond)
                 cfg_scales_tensor = cfg_scales.unsqueeze(1)  # [num_cond, 1]
-                logits_cfg = logits_cond + cfg_scales_tensor * (logits_cond - logits_uncond)
+                logits_cfg = logits_uncond + cfg_scales_tensor * (logits_cond - logits_uncond)
+                
+                # Prepare input_ids for sampler (for repetition penalty, though we already applied it)
+                cond_input_ids = torch.tensor([seq.token_ids for seq in cond_seqs], device=logits_cfg.device)
                 
                 # Sample from CFG logits
-                token_ids_cfg = self.sampler(logits_cfg, temperatures).tolist()
+                token_ids_cfg = self.sampler(
+                    logits_cfg, 
+                    temperatures,
+                    top_ks=top_ks if top_ks is not None else None,
+                    top_ps=top_ps if top_ps is not None else None,
+                    repetition_penalties=None,  # Already applied above
+                    input_ids=cond_input_ids,
+                ).tolist()
                 
                 # Return token_ids (will be applied to both conditional and unconditional sequences)
                 return token_ids_cfg
@@ -300,11 +351,51 @@ class ModelRunner:
             # Normal batch (non-CFG)
             input_ids, positions = (self.prepare_prefill(seqs) if is_prefill 
                                    else self.prepare_decode(seqs))
-            temperatures, cfg_scales = self.prepare_sample(seqs, is_cfg_batch=False) if self.rank == 0 else (None, None)
+            sample_params = self.prepare_sample(seqs, is_cfg_batch=False) if self.rank == 0 else None
+            if sample_params is not None:
+                temperatures, cfg_scales, top_ks, top_ps, repetition_penalties = sample_params
+            else:
+                temperatures = cfg_scales = top_ks = top_ps = repetition_penalties = None
             logits = self.run_model(input_ids, positions, is_prefill)
             reset_context()
-            token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
-            return token_ids
+            
+            if self.rank == 0:
+                # Apply repetition penalty to logits
+                if repetition_penalties is not None:
+                    for i, seq in enumerate(seqs):
+                        penalty = repetition_penalties[i].item()
+                        if penalty != 1.0:
+                            # Only penalize completion tokens (not prompt tokens)
+                            completion_tokens = torch.tensor(seq.completion_token_ids, device=logits.device)
+                            if len(completion_tokens) > 0:
+                                # Create token mask: mark tokens that appeared in completion
+                                token_mask = torch.zeros(logits.shape[1], dtype=torch.bool, device=logits.device)
+                                token_mask[completion_tokens] = True
+                                
+                                # Apply standard repetition penalty formula (matching transformers implementation):
+                                # For tokens in completion: if score < 0 then score * penalty, else score / penalty
+                                penalty_scores = torch.where(
+                                    logits[i] < 0,
+                                    logits[i] * penalty,
+                                    logits[i] / penalty
+                                )
+                                # Only apply penalty to tokens that appeared in completion
+                                logits[i] = torch.where(token_mask, penalty_scores, logits[i])
+                
+                # Prepare input_ids for sampler
+                seq_input_ids = torch.tensor([seq.token_ids for seq in seqs], device=logits.device)
+                
+                token_ids = self.sampler(
+                    logits, 
+                    temperatures,
+                    top_ks=top_ks if top_ks is not None else None,
+                    top_ps=top_ps if top_ps is not None else None,
+                    repetition_penalties=None,  # Already applied above
+                    input_ids=seq_input_ids,
+                ).tolist()
+                return token_ids
+            else:
+                return None
 
     @torch.inference_mode()
     def capture_cudagraph(self):

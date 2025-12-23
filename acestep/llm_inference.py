@@ -11,8 +11,18 @@ from contextlib import contextmanager
 import torch
 from tqdm import tqdm
 from loguru import logger
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, ClassifierFreeGuidanceLogitsProcessor
 from transformers.generation.streamers import BaseStreamer
+from transformers.generation.logits_process import (
+    LogitsProcessorList,
+    LogitsProcessor,
+    TopKLogitsWarper,
+    TopPLogitsWarper,
+    RepetitionPenaltyLogitsProcessor,
+    TemperatureLogitsWarper,
+)
+
+
 
 
 class LLMHandler:
@@ -209,7 +219,17 @@ class LLMHandler:
             error_msg = f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             return error_msg
     
-    def generate_with_5hz_lm_vllm(self, caption: str, lyrics: str, temperature: float = 0.6, cfg_scale: float = 1.0, negative_prompt: str = "NO USER INPUT") -> Tuple[Dict[str, Any], str, str]:
+    def generate_with_5hz_lm_vllm(
+        self, 
+        caption: str, 
+        lyrics: str, 
+        temperature: float = 0.6, 
+        cfg_scale: float = 1.0, 
+        negative_prompt: str = "NO USER INPUT",
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        repetition_penalty: float = 1.0,
+    ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM with vllm backend"""
         try:
             from nanovllm import SamplingParams
@@ -226,7 +246,14 @@ class LLMHandler:
             )
             logger.debug(f"[debug] formatted_prompt: {formatted_prompt}")
             
-            sampling_params = SamplingParams(max_tokens=self.max_model_len-64, temperature=temperature, cfg_scale=cfg_scale)
+            sampling_params = SamplingParams(
+                max_tokens=self.max_model_len-64, 
+                temperature=temperature, 
+                cfg_scale=cfg_scale,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+            )
             # Use CFG if cfg_scale > 1.0
             if cfg_scale > 1.0:
                 # Build unconditional prompt (user input replaced with "NO USER INPUT")
@@ -266,7 +293,17 @@ class LLMHandler:
             error_msg = f"❌ Error generating with 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             return {}, "", error_msg
     
-    def generate_with_5hz_lm_pt(self, caption: str, lyrics: str, temperature: float = 0.6) -> Tuple[Dict[str, Any], str, str]:
+    def generate_with_5hz_lm_pt(
+        self, 
+        caption: str, 
+        lyrics: str, 
+        temperature: float = 0.6,
+        cfg_scale: float = 1.0,
+        negative_prompt: str = "NO USER INPUT",
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        repetition_penalty: float = 1.0,
+    ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM with PyTorch backend"""
         try:
             prompt = f"# Caption\n{caption}\n\n# Lyric\n{lyrics}\n"
@@ -295,7 +332,7 @@ class LLMHandler:
                 # Get max_new_tokens from model config or use a default
                 max_new_tokens = getattr(self.llm.config, 'max_new_tokens', 4096)
                 if hasattr(self, 'max_model_len'):
-                    max_new_tokens = min(max_new_tokens, self.max_model_len)
+                    max_new_tokens = min(max_new_tokens, self.max_model_len - 64)
                 
                 # Define custom streamer for tqdm
                 class TqdmTokenStreamer(BaseStreamer):
@@ -315,15 +352,78 @@ class LLMHandler:
 
                 streamer = TqdmTokenStreamer(total=max_new_tokens)
 
-                with torch.no_grad():
-                    outputs = self.llm.generate(
-                        **inputs,
+                # Build logits processor list
+                logits_processor = LogitsProcessorList()
+                
+                # Add repetition penalty if needed
+                if repetition_penalty != 1.0:
+                    logits_processor.append(RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty))
+                
+                # Add temperature warper if needed (temperature is handled separately in generate, but we can also use warper)
+                # Note: temperature is passed directly to generate(), but we can use TemperatureLogitsWarper for consistency
+                if temperature != 1.0:
+                    logits_processor.append(TemperatureLogitsWarper(temperature=temperature))
+                
+                # Add top-k warper if specified
+                if top_k is not None and top_k > 0:
+                    logits_processor.append(TopKLogitsWarper(top_k=top_k))
+                
+                # Add top-p warper if specified
+                if top_p is not None and top_p > 0.0 and top_p < 1.0:
+                    logits_processor.append(TopPLogitsWarper(top_p=top_p))
+                
+                # Handle CFG if cfg_scale > 1.0
+                if cfg_scale > 1.0:
+                    # Build unconditional prompt
+                    formatted_unconditional_prompt = self.llm_tokenizer.apply_chat_template(
+                        [
+                            {"role": "system", "content": "# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n"},
+                            {"role": "user", "content": negative_prompt}
+                        ],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                    
+                    # Tokenize unconditional prompt
+                    uncond_inputs = self.llm_tokenizer(
+                        formatted_unconditional_prompt,
+                        return_tensors="pt",
+                        padding=False,
+                        truncation=True,
+                    )
+                    uncond_inputs = {k: v.to(self.device) for k, v in uncond_inputs.items()}
+                    
+                    # Use custom CFG generation with batch processing
+                    # Combine conditional and unconditional inputs into a batch
+                    # Format: [cond_input, uncond_input]
+                    batch_input_ids = torch.cat([inputs['input_ids'], uncond_inputs['input_ids']], dim=0)
+                    batch_attention_mask = None
+                    if 'attention_mask' in inputs:
+                        batch_attention_mask = torch.cat([inputs['attention_mask'], uncond_inputs.get('attention_mask', torch.ones_like(uncond_inputs['input_ids']))], dim=0)
+                    
+                    # Custom CFG generation loop
+                    outputs = self._generate_with_cfg(
+                        batch_input_ids=batch_input_ids,
+                        batch_attention_mask=batch_attention_mask,
                         max_new_tokens=max_new_tokens,
                         temperature=temperature,
-                        do_sample=True if temperature > 0 else False,
+                        cfg_scale=cfg_scale,
+                        logits_processor=logits_processor,
                         pad_token_id=self.llm_tokenizer.pad_token_id or self.llm_tokenizer.eos_token_id,
                         streamer=streamer,
                     )
+                else:
+                    # Generate without CFG
+                    with torch.no_grad():
+                        outputs = self.llm.generate(
+                            **inputs,
+                            max_new_tokens=max_new_tokens,
+                            temperature=temperature if temperature > 0 else 1.0,
+                            do_sample=True if temperature > 0 else False,
+                            logits_processor=logits_processor if len(logits_processor) > 0 else None,
+                            pad_token_id=self.llm_tokenizer.pad_token_id or self.llm_tokenizer.eos_token_id,
+                            streamer=streamer,
+                        )
             
             # Decode the generated tokens
             # Only decode the newly generated tokens (skip the input prompt)
@@ -338,7 +438,17 @@ class LLMHandler:
             error_msg = f"❌ Error generating with 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             return {}, "", error_msg
     
-    def generate_with_5hz_lm(self, caption: str, lyrics: str, temperature: float = 0.6, cfg_scale: float = 1.0, negative_prompt: str = "NO USER INPUT") -> Tuple[Dict[str, Any], str, str]:
+    def generate_with_5hz_lm(
+        self, 
+        caption: str, 
+        lyrics: str, 
+        temperature: float = 0.6, 
+        cfg_scale: float = 1.0, 
+        negative_prompt: str = "NO USER INPUT",
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        repetition_penalty: float = 1.0,
+    ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM"""
         # Check if 5Hz LM is initialized
         if not hasattr(self, 'llm_initialized') or not self.llm_initialized:
@@ -355,9 +465,15 @@ class LLMHandler:
             return {}, "", "❌ 5Hz LM backend not set. Please initialize it first."
         
         if self.llm_backend == "vllm":
-            return self.generate_with_5hz_lm_vllm(caption, lyrics, temperature, cfg_scale, negative_prompt)
+            return self.generate_with_5hz_lm_vllm(
+                caption, lyrics, temperature, cfg_scale, negative_prompt,
+                top_k, top_p, repetition_penalty
+            )
         else:
-            return self.generate_with_5hz_lm_pt(caption, lyrics, temperature)
+            return self.generate_with_5hz_lm_pt(
+                caption, lyrics, temperature, cfg_scale, negative_prompt,
+                top_k, top_p, repetition_penalty
+            )
     
     def parse_lm_output(self, output_text: str) -> Tuple[Dict[str, Any], str]:
         """
@@ -439,6 +555,112 @@ class LLMHandler:
                             metadata['timesignature'] = value
         
         return metadata, audio_codes
+    
+    def _generate_with_cfg(
+        self,
+        batch_input_ids: torch.Tensor,
+        batch_attention_mask: Optional[torch.Tensor],
+        max_new_tokens: int,
+        temperature: float,
+        cfg_scale: float,
+        logits_processor: Optional[LogitsProcessorList],
+        pad_token_id: int,
+        streamer: Optional[BaseStreamer],
+    ) -> torch.Tensor:
+        """
+        Custom generation loop with CFG support using batch processing.
+        Batch format: [conditional_input, unconditional_input]
+        This properly utilizes KV cache by processing both sequences in parallel.
+        """
+        model = self.llm
+        device = self.device
+        batch_size = batch_input_ids.shape[0] // 2  # Half are conditional, half are unconditional
+        cond_start_idx = 0
+        uncond_start_idx = batch_size
+        
+        # Initialize generated sequences
+        generated_ids = batch_input_ids.clone()
+        if batch_attention_mask is not None:
+            attention_mask = batch_attention_mask.clone()
+        else:
+            attention_mask = torch.ones_like(batch_input_ids)
+        
+        # Prepare model inputs
+        model_kwargs = {}
+        if batch_attention_mask is not None:
+            model_kwargs['attention_mask'] = attention_mask
+        
+        # Past key values for KV cache (if model supports it)
+        past_key_values = None
+        use_cache = hasattr(model, 'generation_config') and getattr(model.generation_config, 'use_cache', True)
+        
+        with torch.no_grad():
+            for step in range(max_new_tokens):
+                # Forward pass for the entire batch (conditional + unconditional)
+                if past_key_values is None:
+                    # First step: full forward pass
+                    outputs = model(
+                        input_ids=generated_ids,
+                        **model_kwargs,
+                        use_cache=use_cache,
+                    )
+                else:
+                    # Subsequent steps: only forward the last token (utilizing KV cache)
+                    outputs = model(
+                        input_ids=generated_ids[:, -1:],
+                        past_key_values=past_key_values,
+                        **model_kwargs,
+                        use_cache=use_cache,
+                    )
+                
+                # Get logits
+                next_token_logits = outputs.logits[:, -1, :]  # [batch_size*2, vocab_size]
+                
+                # Split conditional and unconditional logits
+                cond_logits = next_token_logits[cond_start_idx:cond_start_idx+batch_size]
+                uncond_logits = next_token_logits[uncond_start_idx:uncond_start_idx+batch_size]
+                
+                # Apply CFG formula: logits_cfg = logits_uncond + cfg_scale * (logits_cond - logits_uncond)
+                cfg_logits = uncond_logits + cfg_scale * (cond_logits - uncond_logits)
+                
+                # Apply logits processors (temperature, top-k, top-p, repetition penalty)
+                if logits_processor is not None:
+                    # Get current input_ids for repetition penalty (only conditional part)
+                    current_input_ids = generated_ids[cond_start_idx:cond_start_idx+batch_size]
+                    for processor in logits_processor:
+                        cfg_logits = processor(current_input_ids, cfg_logits)
+                
+                # Apply temperature and sample
+                if temperature > 0:
+                    cfg_logits = cfg_logits / temperature
+                    probs = torch.softmax(cfg_logits, dim=-1)
+                    next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+                else:
+                    next_tokens = torch.argmax(cfg_logits, dim=-1)
+                
+                # Update generated sequences (apply same token to both conditional and unconditional)
+                next_tokens = next_tokens.unsqueeze(1)
+                generated_ids = torch.cat([generated_ids, next_tokens.repeat(2, 1)], dim=1)
+                attention_mask = torch.cat([attention_mask, torch.ones((batch_size*2, 1), device=device, dtype=attention_mask.dtype)], dim=1)
+                model_kwargs['attention_mask'] = attention_mask
+                
+                # Update past_key_values for next iteration
+                if use_cache and hasattr(outputs, 'past_key_values'):
+                    past_key_values = outputs.past_key_values
+                
+                # Update streamer
+                if streamer is not None:
+                    streamer.put(next_tokens[0])  # Only stream conditional tokens
+                
+                # Check for EOS (simplified - you may want to check model's eos_token_id)
+                if (next_tokens[0] == pad_token_id).all():
+                    break
+        
+        if streamer is not None:
+            streamer.end()
+        
+        # Return only conditional output
+        return generated_ids[cond_start_idx:cond_start_idx+batch_size]
     
     @contextmanager
     def _load_model_context(self):

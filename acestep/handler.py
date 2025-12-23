@@ -1362,7 +1362,7 @@ class AceStepHandler:
 
         padded_non_cover_text_input_ids = None
         padded_non_cover_text_attention_masks = None
-        if audio_cover_strength < 1.0 and is_covers is not None and is_covers.any():
+        if audio_cover_strength < 1.0:
             non_cover_text_input_ids = []
             non_cover_text_attention_masks = []
             for i in range(batch_size):
@@ -1381,8 +1381,9 @@ class AceStepHandler:
                     return_tensors="pt",
                 )
                 text_token_ids = text_inputs_dict.input_ids[0]
+                non_cover_text_attention_mask = text_inputs_dict.attention_mask[0].bool()
                 non_cover_text_input_ids.append(text_token_ids)
-                non_cover_text_attention_masks.append(text_attention_mask)
+                non_cover_text_attention_masks.append(non_cover_text_attention_mask)
             
             padded_non_cover_text_input_ids = torch.stack([
                 torch.nn.functional.pad(

@@ -213,3 +213,5 @@ tests/
 checkpoints/
 playground.ipynb
 .history/
+upload_checkpoints.sh
+checkpoints.7z
