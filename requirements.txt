@@ -6,3 +6,4 @@ soundfile
 loguru
 einops
 accelerator
+vector-quantize-pytorch

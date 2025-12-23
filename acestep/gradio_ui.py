@@ -2,16 +2,19 @@
 Gradio UI Components Module
 Contains all Gradio interface component definitions and layouts
 """
+import os
 import gradio as gr
 from typing import Callable, Optional
 
 
-def create_gradio_interface(handler) -> gr.Blocks:
+def create_gradio_interface(dit_handler, llm_handler, dataset_handler) -> gr.Blocks:
     """
     Create Gradio interface
     
     Args:
-        handler: Business logic handler instance
+        dit_handler: DiT handler instance
+        llm_handler: LM handler instance
+        dataset_handler: Dataset handler instance
         
     Returns:
         Gradio Blocks instance
@@ -42,21 +45,21 @@ def create_gradio_interface(handler) -> gr.Blocks:
         """)
         
         # Dataset Explorer Section
-        dataset_section = create_dataset_section(handler)
+        dataset_section = create_dataset_section(dataset_handler)
         
         # Generation Section
-        generation_section = create_generation_section(handler)
+        generation_section = create_generation_section(dit_handler, llm_handler)
         
         # Results Section
-        results_section = create_results_section(handler)
+        results_section = create_results_section(dit_handler)
         
         # Connect event handlers
-        setup_event_handlers(demo, handler, dataset_section, generation_section, results_section)
+        setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, dataset_section, generation_section, results_section)
     
     return demo
 
 
-def create_dataset_section(handler) -> dict:
+def create_dataset_section(dataset_handler) -> dict:
     """Create dataset explorer section"""
     with gr.Group():
         gr.HTML('<div class="section-header"><h3>📊 Dataset Explorer</h3></div>')
@@ -153,7 +156,7 @@ def create_dataset_section(handler) -> dict:
     }
 
 
-def create_generation_section(handler) -> dict:
+def create_generation_section(dit_handler, llm_handler) -> dict:
     """Create generation section"""
     with gr.Group():
         gr.HTML('<div class="section-header"><h3>🎼 ACE-Step V1.5 Demo </h3></div>')
@@ -165,7 +168,7 @@ def create_generation_section(handler) -> dict:
                 with gr.Column(scale=4):
                     checkpoint_dropdown = gr.Dropdown(
                         label="Checkpoint File",
-                        choices=handler.get_available_checkpoints(),
+                        choices=dit_handler.get_available_checkpoints(),
                         value=None,
                         info="Select a trained model checkpoint file (full path or filename)"
                     )
@@ -174,7 +177,7 @@ def create_generation_section(handler) -> dict:
             
             with gr.Row():
                 # Get available acestep-v15- model list
-                available_models = handler.get_available_acestep_v15_models()
+                available_models = dit_handler.get_available_acestep_v15_models()
                 default_model = "acestep-v15-turbo" if "acestep-v15-turbo" in available_models else (available_models[0] if available_models else None)
                 
                 config_path = gr.Dropdown(
@@ -192,7 +195,7 @@ def create_generation_section(handler) -> dict:
             
             with gr.Row():
                 # Get available 5Hz LM model list
-                available_lm_models = handler.get_available_5hz_lm_models()
+                available_lm_models = llm_handler.get_available_5hz_lm_models()
                 default_lm_model = "acestep-5Hz-lm-0.6B" if "acestep-5Hz-lm-0.6B" in available_lm_models else (available_lm_models[0] if available_lm_models else None)
                 
                 lm_model_path = gr.Dropdown(
@@ -216,7 +219,7 @@ def create_generation_section(handler) -> dict:
                     info="Check to initialize 5Hz LM during service initialization",
                 )
                 # Auto-detect flash attention availability
-                flash_attn_available = handler.is_flash_attention_available()
+                flash_attn_available = dit_handler.is_flash_attention_available()
                 use_flash_attention_checkbox = gr.Checkbox(
                     label="Use Flash Attention",
                     value=flash_attn_available,
@@ -565,7 +568,7 @@ def create_generation_section(handler) -> dict:
     }
 
 
-def create_results_section(handler) -> dict:
+def create_results_section(dit_handler) -> dict:
     """Create results display section"""
     with gr.Group():
         gr.HTML('<div class="section-header"><h3>🎧 Generated Results</h3></div>')
@@ -620,7 +623,7 @@ def create_results_section(handler) -> dict:
     }
 
 
-def setup_event_handlers(demo, handler, dataset_section, generation_section, results_section):
+def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, dataset_section, generation_section, results_section):
     """Setup event handlers connecting UI components and business logic"""
     
     def update_init_status(status_msg, enable_btn):
@@ -629,14 +632,14 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
     
     # Dataset handlers
     dataset_section["import_dataset_btn"].click(
-        fn=handler.import_dataset,
+        fn=dataset_handler.import_dataset,
         inputs=[dataset_section["dataset_type"]],
         outputs=[dataset_section["data_status"]]
     )
     
     # Service initialization - refresh checkpoints
     def refresh_checkpoints():
-        choices = handler.get_available_checkpoints()
+        choices = dit_handler.get_available_checkpoints()
         return gr.update(choices=choices)
     
     generation_section["refresh_btn"].click(
@@ -698,12 +701,36 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
     # Service initialization
     def init_service_wrapper(checkpoint, config_path, device, init_llm, lm_model_path, backend, use_flash_attention, offload_to_cpu, offload_dit_to_cpu):
         """Wrapper for service initialization, returns status and button state"""
-        status, enable = handler.initialize_service(
-            checkpoint, config_path, device, init_llm, lm_model_path, 
-            backend=backend,
+        # Initialize DiT handler
+        status, enable = dit_handler.initialize_service(
+            checkpoint, config_path, device,
             use_flash_attention=use_flash_attention, compile_model=False, 
             offload_to_cpu=offload_to_cpu, offload_dit_to_cpu=offload_dit_to_cpu
         )
+        
+        # Initialize LM handler if requested
+        if init_llm:
+            # Get checkpoint directory
+            current_file = os.path.abspath(__file__)
+            project_root = os.path.dirname(os.path.dirname(current_file))
+            checkpoint_dir = os.path.join(project_root, "checkpoints")
+            
+            lm_status, lm_success = llm_handler.initialize(
+                checkpoint_dir=checkpoint_dir,
+                lm_model_path=lm_model_path,
+                backend=backend,
+                device=device,
+                offload_to_cpu=offload_to_cpu,
+                dtype=dit_handler.dtype
+            )
+            
+            if lm_success:
+                status += f"\n{lm_status}"
+            else:
+                status += f"\n{lm_status}"
+                # Don't fail the entire initialization if LM fails, but log it
+                # Keep enable as is (DiT initialization result) even if LM fails
+        
         return status, gr.update(interactive=enable)
     
     generation_section["init_btn"].click(
@@ -756,7 +783,7 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
         use_adg, cfg_interval_start, cfg_interval_end, audio_format, lm_temperature,
         progress=gr.Progress(track_tqdm=True)
     ):
-        return handler.generate_music(
+        return dit_handler.generate_music(
             captions=captions, lyrics=lyrics, bpm=bpm, key_scale=key_scale,
             time_signature=time_signature, vocal_language=vocal_language,
             inference_steps=inference_steps, guidance_scale=guidance_scale,
@@ -820,7 +847,7 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
     # 5Hz LM generation (simplified version, can be extended as needed)
     def generate_lm_hints_wrapper(caption, lyrics, temperature, cfg_scale, negative_prompt):
         """Wrapper for 5Hz LM generation"""
-        metadata, audio_codes, status = handler.generate_with_5hz_lm(caption, lyrics, temperature, cfg_scale, negative_prompt)
+        metadata, audio_codes, status = llm_handler.generate_with_5hz_lm(caption, lyrics, temperature, cfg_scale, negative_prompt)
         
         # Extract metadata values and map to UI fields
         # Handle bpm
@@ -878,7 +905,7 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
         audio_codes_content: str = ""
     ) -> tuple:
         """Update instruction and UI visibility based on task type."""
-        instruction = handler.generate_instruction(
+        instruction = dit_handler.generate_instruction(
             task_type=task_type_value,
             track_name=track_name_value,
             complete_track_classes=complete_track_classes_value

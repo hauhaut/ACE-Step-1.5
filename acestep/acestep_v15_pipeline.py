@@ -10,6 +10,8 @@ for proxy_var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL
     os.environ.pop(proxy_var, None)
 
 from .handler import AceStepHandler
+from .llm_inference import LLMHandler
+from .dataset_handler import DatasetHandler
 from .gradio_ui import create_gradio_interface
 
 
@@ -20,11 +22,13 @@ def create_demo():
     Returns:
         Gradio Blocks instance
     """
-    # Create handler instance (business logic processor)
-    handler = AceStepHandler()
+    # Create independent handler instances
+    dit_handler = AceStepHandler()  # DiT handler
+    llm_handler = LLMHandler()      # LM handler
+    dataset_handler = DatasetHandler()  # Dataset handler
     
-    # Create Gradio interface
-    demo = create_gradio_interface(handler)
+    # Create Gradio interface with all handlers
+    demo = create_gradio_interface(dit_handler, llm_handler, dataset_handler)
     
     return demo
 
