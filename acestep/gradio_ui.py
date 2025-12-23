@@ -36,6 +36,20 @@ def create_gradio_interface(dit_handler, llm_handler, dataset_handler, init_para
             border-radius: 5px;
             margin: 10px 0;
         }
+        .lm-hints-row {
+            align-items: stretch;
+        }
+        .lm-hints-col {
+            display: flex;
+        }
+        .lm-hints-col > div {
+            flex: 1;
+            display: flex;
+        }
+        .lm-hints-btn button {
+            height: 100%;
+            width: 100%;
+        }
         """
     ) as demo:
         
@@ -320,43 +334,46 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                     )
                     
                     # Audio uploads
-                    with gr.Accordion("🎵 Audio Uploads", open=False):
-                        with gr.Row():
+                    audio_uploads_accordion = gr.Accordion("🎵 Audio Uploads", open=False)
+                    with audio_uploads_accordion:
+                        with gr.Row(equal_height=True):
                             with gr.Column(scale=2):
                                 reference_audio = gr.Audio(
                                     label="Reference Audio (optional)",
                                     type="filepath",
                                 )
-                            with gr.Column(scale=8):
+                            with gr.Column(scale=7):
                                 src_audio = gr.Audio(
                                     label="Source Audio (optional)",
                                     type="filepath",
                                 )
+                            with gr.Column(scale=1, min_width=80):
+                                convert_src_to_codes_btn = gr.Button(
+                                    "Convert to Codes",
+                                    variant="secondary",
+                                    size="sm"
+                                )
                         
-                        audio_code_string = gr.Textbox(
-                            label="Audio Codes (optional)",
-                            placeholder="<|audio_code_10695|><|audio_code_54246|>...",
-                            lines=4,
-                            visible=False,
-                            info="Paste precomputed audio code tokens"
-                        )
-                    
                     # Audio Codes for text2music
                     with gr.Accordion("🎼 Audio Codes (for text2music)", open=True, visible=True) as text2music_audio_codes_group:
-                        text2music_audio_code_string = gr.Textbox(
-                            label="Audio Codes",
-                            placeholder="<|audio_code_10695|><|audio_code_54246|>...",
-                            lines=6,
-                            info="Paste precomputed audio code tokens for text2music generation"
-                        )
+                        with gr.Row(equal_height=True, elem_classes=["lm-hints-row"]):
+                            with gr.Column(scale=9):
+                                text2music_audio_code_string = gr.Textbox(
+                                    label="Audio Codes",
+                                    placeholder="<|audio_code_10695|><|audio_code_54246|>...",
+                                    lines=6,
+                                    info="Paste precomputed audio code tokens for text2music generation"
+                                )
+                            with gr.Column(scale=3, elem_classes=["lm-hints-col"]):
+                                with gr.Row(equal_height=True, visible=True) as use_5hz_lm_row:
+                                    use_5hz_lm_btn = gr.Button(
+                                        "Generate LM Hints",
+                                        variant="secondary",
+                                        # size="lg",
+                                        elem_classes=["lm-hints-btn"],
+                                    )
                     
-                    # 5Hz LM
-                    with gr.Row(visible=True) as use_5hz_lm_row:
-                        use_5hz_lm_btn = gr.Button(
-                            "Generate LM Hints",
-                            variant="secondary",
-                            size="lg",
-                        )
+                    with gr.Row(equal_height=True):
                         lm_temperature = gr.Slider(
                             label="Temperature",
                             minimum=0.0,
@@ -364,7 +381,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                             value=0.85,
                             step=0.1,
                             scale=1,
-                            info="Temperature for 5Hz LM sampling (higher = more random, lower = more deterministic)"
+                            info="5Hz LM temperature (higher = random)"
                         )
                         lm_cfg_scale = gr.Slider(
                             label="CFG Scale",
@@ -373,10 +390,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                             value=2.0,
                             step=0.1,
                             scale=1,
-                            info="Classifier-Free Guidance scale for 5Hz LM (1.0 = no CFG, higher = stronger guidance)"
+                            info="5Hz LM CFG (1.0 = no CFG)"
                         )
-                    
-                    with gr.Row():
                         lm_top_k = gr.Slider(
                             label="Top-K",
                             minimum=0,
@@ -384,7 +399,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                             value=0,
                             step=1,
                             scale=1,
-                            info="Top-K sampling: consider only top K tokens (0 = disabled)"
+                            info="Top-K (0 = disabled)"
                         )
                         lm_top_p = gr.Slider(
                             label="Top-P",
@@ -393,7 +408,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                             value=0.9,
                             step=0.01,
                             scale=1,
-                            info="Top-P (nucleus) sampling: cumulative probability threshold (1.0 = disabled)"
+                            info="Top-P (1.0 = disabled)"
                         )
                         lm_repetition_penalty = gr.Slider(
                             label="Repetition Penalty",
@@ -402,19 +417,9 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                             value=1.0,
                             step=0.01,
                             scale=1,
-                            info="Repetition penalty: >1.0 reduces repetition, <1.0 increases it (1.0 = no penalty). For audio generation, use 1.0 or very small values (1.01-1.05) as audio tokens naturally repeat.",
+                            info="Repetition penalty: >1.0 reduces repetition, <1.0 increases it. Use 1.0 or very small values for audio tokens.",
                             visible=False,
                         )
-                    
-                    # Negative prompt for CFG (only visible when LM initialized and cfg_scale > 1)
-                    lm_negative_prompt = gr.Textbox(
-                        label="Negative Prompt",
-                        value="NO USER INPUT",
-                        placeholder="Enter negative prompt for CFG (default: NO USER INPUT)",
-                        visible=True,
-                        info="Negative prompt used for Classifier-Free Guidance when CFG Scale > 1.0",
-                        lines=2
-                    )
                     
                     # Repainting controls
                     with gr.Group(visible=False) as repainting_group:
@@ -445,12 +450,24 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                 
                 # Music Caption
                 with gr.Accordion("📝 Music Caption", open=True):
-                    captions = gr.Textbox(
-                        label="Music Caption (optional)",
-                        placeholder="A peaceful acoustic guitar melody with soft vocals...",
-                        lines=3,
-                        info="Describe the style, genre, instruments, and mood"
-                    )
+                    with gr.Row(equal_height=True):
+                        captions = gr.Textbox(
+                            label="Music Caption (optional)",
+                            placeholder="A peaceful acoustic guitar melody with soft vocals...",
+                            lines=3,
+                            info="Describe the style, genre, instruments, and mood",
+                            scale=7,
+                        )
+                        # Negative prompt for CFG (only visible when LM initialized and cfg_scale > 1)
+                        lm_negative_prompt = gr.Textbox(
+                            label="Negative Prompt",
+                            value="NO USER INPUT",
+                            placeholder="Enter negative prompt for CFG (default: NO USER INPUT)",
+                            visible=True,
+                            info="Negative prompt (use when CFG Scale > 1.0)",
+                            lines=3,
+                            scale=5,
+                        )
                 
                 # Lyrics
                 with gr.Accordion("📝 Lyrics", open=True):
@@ -468,7 +485,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                             choices=["en", "zh", "ja", "ko", "es", "fr", "de"],
                             value="en",
                             label="Vocal Language (optional)",
-                            allow_custom_value=True
+                            allow_custom_value=True,
+                            info="use `unknown` for inst"
                         )
                         bpm = gr.Number(
                             label="BPM (optional)",
@@ -477,15 +495,17 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                             info="leave empty for N/A"
                         )
                         key_scale = gr.Textbox(
-                            label="Key/Scale (optional)",
+                            label="KeyScale (optional)",
                             placeholder="Leave empty for N/A",
                             value="",
+                            info="A-G, #/♭, major/minor"
                         )
                         time_signature = gr.Dropdown(
                             choices=["2", "3", "4", "N/A", ""],
                             value="4",
                             label="Time Signature (optional)",
-                            allow_custom_value=True
+                            allow_custom_value=True,
+                            info="2/4, 3/4, 4/4..."
                         )
                         audio_duration = gr.Number(
                             label="Audio Duration (seconds)",
@@ -497,7 +517,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                         )
                         batch_size_input = gr.Number(
                             label="Batch Size",
-                            value=1,
+                            value=2,
                             minimum=1,
                             maximum=8,
                             step=1,
@@ -582,6 +602,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
         generate_btn = gr.Button("🎵 Generate Music", variant="primary", size="lg", interactive=generate_btn_interactive)
     
     return {
+        "service_config_accordion": service_config_accordion,
         "checkpoint_dropdown": checkpoint_dropdown,
         "refresh_btn": refresh_btn,
         "config_path": config_path,
@@ -598,9 +619,10 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
         "instruction_display_gen": instruction_display_gen,
         "track_name": track_name,
         "complete_track_classes": complete_track_classes,
+        "audio_uploads_accordion": audio_uploads_accordion,
         "reference_audio": reference_audio,
         "src_audio": src_audio,
-        "audio_code_string": audio_code_string,
+        "convert_src_to_codes_btn": convert_src_to_codes_btn,
         "text2music_audio_code_string": text2music_audio_code_string,
         "text2music_audio_codes_group": text2music_audio_codes_group,
         "use_5hz_lm_row": use_5hz_lm_row,
@@ -650,11 +672,21 @@ def create_results_section(dit_handler) -> dict:
                     type="filepath",
                     interactive=False
                 )
+                send_to_src_btn_1 = gr.Button(
+                    "Send To Src Audio",
+                    variant="secondary",
+                    size="sm"
+                )
             with gr.Column():
                 generated_audio_2 = gr.Audio(
                     label="🎵 Generated Music (Sample 2)",
                     type="filepath",
                     interactive=False
+                )
+                send_to_src_btn_2 = gr.Button(
+                    "Send To Src Audio",
+                    variant="secondary",
+                    size="sm"
                 )
 
         with gr.Accordion("📁 Batch Results & Generation Details", open=False):
@@ -680,6 +712,8 @@ def create_results_section(dit_handler) -> dict:
         "status_output": status_output,
         "generated_audio_1": generated_audio_1,
         "generated_audio_2": generated_audio_2,
+        "send_to_src_btn_1": send_to_src_btn_1,
+        "send_to_src_btn_2": send_to_src_btn_2,
         "generated_audio_batch": generated_audio_batch,
         "generation_info": generation_info,
         "align_score_1": align_score_1,
@@ -768,7 +802,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     
     # Service initialization
     def init_service_wrapper(checkpoint, config_path, device, init_llm, lm_model_path, backend, use_flash_attention, offload_to_cpu, offload_dit_to_cpu):
-        """Wrapper for service initialization, returns status and button state"""
+        """Wrapper for service initialization, returns status, button state, and accordion state"""
         # Initialize DiT handler
         status, enable = dit_handler.initialize_service(
             checkpoint, config_path, device,
@@ -799,7 +833,11 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 # Don't fail the entire initialization if LM fails, but log it
                 # Keep enable as is (DiT initialization result) even if LM fails
         
-        return status, gr.update(interactive=enable)
+        # Check if model is initialized - if so, collapse the accordion
+        is_model_initialized = dit_handler.model is not None
+        accordion_state = gr.update(open=not is_model_initialized)
+        
+        return status, gr.update(interactive=enable), accordion_state
     
     # Update negative prompt visibility based on "Initialize 5Hz LM" checkbox
     def update_negative_prompt_visibility(init_llm_checked):
@@ -855,7 +893,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["offload_to_cpu_checkbox"],
             generation_section["offload_dit_to_cpu_checkbox"],
         ],
-        outputs=[generation_section["init_status"], generation_section["generate_btn"]]
+        outputs=[generation_section["init_status"], generation_section["generate_btn"], generation_section["service_config_accordion"]]
     )
     
     # Generation with progress bar
@@ -992,6 +1030,18 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         ]
     )
     
+    # Convert src audio to codes
+    def convert_src_audio_to_codes_wrapper(src_audio):
+        """Wrapper for converting src audio to codes"""
+        codes_string = dit_handler.convert_src_audio_to_codes(src_audio)
+        return codes_string
+    
+    generation_section["convert_src_to_codes_btn"].click(
+        fn=convert_src_audio_to_codes_wrapper,
+        inputs=[generation_section["src_audio"]],
+        outputs=[generation_section["text2music_audio_code_string"]]
+    )
+    
     # Update instruction and UI visibility based on task type
     def update_instruction_ui(
         task_type_value: str, 
@@ -1020,8 +1070,6 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         else:
             audio_cover_strength_label = "Audio Cover Strength"
             audio_cover_strength_info = "Control how many denoising steps use cover mode"
-        # Show audio_code_string for cover
-        audio_code_visible = task_type_value == "cover"
         # Show repainting controls for repaint and lego
         repainting_visible = task_type_value in ["repaint", "lego"]
         # Show use_5hz_lm, lm_temperature for text2music
@@ -1037,7 +1085,6 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             gr.update(visible=complete_visible),  # complete_track_classes
             gr.update(visible=audio_cover_strength_visible, label=audio_cover_strength_label, info=audio_cover_strength_info),  # audio_cover_strength
             gr.update(visible=repainting_visible),  # repainting_group
-            gr.update(visible=audio_code_visible),  # audio_code_string
             gr.update(visible=use_5hz_lm_visible),  # use_5hz_lm_row
             gr.update(visible=text2music_audio_codes_visible),  # text2music_audio_codes_group
         )
@@ -1058,7 +1105,6 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["complete_track_classes"],
             generation_section["audio_cover_strength"],
             generation_section["repainting_group"],
-            generation_section["audio_code_string"],
             generation_section["use_5hz_lm_row"],
             generation_section["text2music_audio_codes_group"],
         ]
@@ -1080,7 +1126,6 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["complete_track_classes"],
             generation_section["audio_cover_strength"],
             generation_section["repainting_group"],
-            generation_section["audio_code_string"],
             generation_section["use_5hz_lm_row"],
             generation_section["text2music_audio_codes_group"],
         ]
@@ -1102,9 +1147,46 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["complete_track_classes"],
             generation_section["audio_cover_strength"],
             generation_section["repainting_group"],
-            generation_section["audio_code_string"],
             generation_section["use_5hz_lm_row"],
             generation_section["text2music_audio_codes_group"],
         ]
+    )
+    
+    # Send generated audio to src_audio
+    def send_audio_to_src(audio_file):
+        """Send generated audio file to src_audio input"""
+        if audio_file is None:
+            return None
+        return audio_file
+    
+    results_section["send_to_src_btn_1"].click(
+        fn=send_audio_to_src,
+        inputs=[results_section["generated_audio_1"]],
+        outputs=[generation_section["src_audio"]]
+    )
+    
+    results_section["send_to_src_btn_2"].click(
+        fn=send_audio_to_src,
+        inputs=[results_section["generated_audio_2"]],
+        outputs=[generation_section["src_audio"]]
+    )
+    
+    # Auto-expand Audio Uploads accordion when audio is uploaded
+    def update_audio_uploads_accordion(reference_audio, src_audio):
+        """Update Audio Uploads accordion open state based on whether audio files are present"""
+        has_audio = (reference_audio is not None) or (src_audio is not None)
+        return gr.update(open=has_audio)
+    
+    # Bind to both audio components' change events
+    generation_section["reference_audio"].change(
+        fn=update_audio_uploads_accordion,
+        inputs=[generation_section["reference_audio"], generation_section["src_audio"]],
+        outputs=[generation_section["audio_uploads_accordion"]]
+    )
+    
+    generation_section["src_audio"].change(
+        fn=update_audio_uploads_accordion,
+        inputs=[generation_section["reference_audio"], generation_section["src_audio"]],
+        outputs=[generation_section["audio_uploads_accordion"]]
     )
 

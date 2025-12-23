@@ -504,6 +504,49 @@ class AceStepHandler:
         
         return parsed_metas
     
+    def build_dit_inputs(
+        self,
+        task: str,
+        instruction: Optional[str],
+        caption: str,
+        lyrics: str,
+        metas: Optional[Union[str, Dict[str, Any]]] = None,
+        vocal_language: str = "en",
+    ) -> Tuple[str, str]:
+        """
+        Build text inputs for the caption and lyric branches used by DiT.
+
+        Args:
+            task: Task name (e.g., text2music, cover, repaint); kept for logging/future branching.
+            instruction: Instruction text; default fallback matches service_generate behavior.
+            caption: Caption string.
+            lyrics: Lyrics string.
+            metas: Metadata (str or dict); follows _parse_metas formatting.
+            vocal_language: Language code for lyrics section.
+
+        Returns:
+            (caption_input_text, lyrics_input_text)
+
+        Example:
+            caption_input, lyrics_input = handler.build_dit_inputs(
+                task="text2music",
+                instruction=None,
+                caption="A calm piano melody",
+                lyrics="la la la",
+                metas={"bpm": 90, "duration": 45},
+                vocal_language="en",
+            )
+        """
+        # Align instruction formatting with _prepare_batch
+        final_instruction = instruction or "Fill the audio semantic mask based on the given conditions:"
+        if not final_instruction.endswith(":"):
+            final_instruction = final_instruction + ":"
+
+        parsed_meta = self._parse_metas([metas])[0]
+        caption_input = SFT_GEN_PROMPT.format(final_instruction, caption, parsed_meta)
+        lyrics_input = f"# Languages\n{vocal_language}\n\n# Lyric\n{lyrics}<|endoftext|>"
+        return caption_input, lyrics_input
+    
     def _get_text_hidden_states(self, text_prompt: str) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get text hidden states from text encoder."""
         if self.text_tokenizer is None or self.text_encoder is None:
@@ -765,6 +808,71 @@ class AceStepHandler:
         except Exception as e:
             logger.error(f"Error processing target audio: {e}")
             return None
+    
+    def convert_src_audio_to_codes(self, audio_file) -> str:
+        """
+        Convert uploaded source audio to audio codes string.
+        
+        Args:
+            audio_file: Path to audio file or None
+            
+        Returns:
+            Formatted codes string like '<|audio_code_123|><|audio_code_456|>...' or error message
+        """
+        if audio_file is None:
+            return "❌ Please upload source audio first"
+        
+        if self.model is None or self.vae is None:
+            return "❌ Model not initialized. Please initialize the service first."
+        
+        try:
+            # Process audio file
+            processed_audio = self.process_src_audio(audio_file)
+            if processed_audio is None:
+                return "❌ Failed to process audio file"
+            
+            # Encode audio to latents using VAE
+            with torch.no_grad():
+                with self._load_model_context("vae"):
+                    # Prepare audio for VAE: [channels, samples] -> [1, channels, samples]
+                    vae_input = processed_audio.unsqueeze(0).to(self.device).to(self.vae.dtype)
+                    
+                    # Check if audio is silence
+                    if self.is_silence(vae_input):
+                        return "❌ Audio file appears to be silent"
+                    
+                    # Encode to latents
+                    latents = self.vae.encode(vae_input).latent_dist.sample()
+                    # Cast back to model dtype
+                    latents = latents.to(self.dtype)
+                    # Transpose: [1, d, T] -> [1, T, d] -> [T, d]
+                    latents = latents.squeeze(0).transpose(0, 1)  # [T, d]
+                
+                # Create attention mask for latents
+                attention_mask = torch.ones(latents.shape[0], dtype=torch.bool, device=self.device)
+                
+                # Tokenize latents to get code indices
+                with self._load_model_context("model"):
+                    # Prepare latents for tokenize: [T, d] -> [1, T, d]
+                    hidden_states = latents.unsqueeze(0)  # [1, T, d]
+                    
+                    # Call tokenize method
+                    # tokenize returns: (quantized, indices, attention_mask)
+                    _, indices, _ = self.model.tokenize(hidden_states, self.silence_latent, attention_mask.unsqueeze(0))
+                    
+                    # Format indices as code string
+                    # indices shape: [1, T_5Hz] or [1, T_5Hz, num_quantizers]
+                    # Flatten and convert to list
+                    indices_flat = indices.flatten().cpu().tolist()
+                    codes_string = "".join([f"<|audio_code_{idx}|>" for idx in indices_flat])
+                    
+                    logger.info(f"[convert_src_audio_to_codes] Generated {len(indices_flat)} audio codes")
+                    return codes_string
+                    
+        except Exception as e:
+            error_msg = f"❌ Error converting audio to codes: {str(e)}\n{traceback.format_exc()}"
+            logger.error(error_msg)
+            return error_msg
         
     def prepare_batch_data(
         self,
@@ -1919,10 +2027,15 @@ class AceStepHandler:
                 refer_audios = [[torch.zeros(2, 30*self.sample_rate)] for _ in range(actual_batch_size)]
             
             # 2. Process source audio
+            # If audio_code_string is provided, ignore src_audio and use codes instead
             processed_src_audio = None
             if src_audio is not None:
-                logger.info("[generate_music] Processing source audio...")
-                processed_src_audio = self.process_src_audio(src_audio)
+                # Check if audio codes are provided - if so, ignore src_audio
+                if audio_code_string and str(audio_code_string).strip():
+                    logger.info("[generate_music] Audio codes provided, ignoring src_audio and using codes instead")
+                else:
+                    logger.info("[generate_music] Processing source audio...")
+                    processed_src_audio = self.process_src_audio(src_audio)
                 
             # 3. Prepare batch data
             captions_batch, instructions_batch, lyrics_batch, vocal_languages_batch, metas_batch = self.prepare_batch_data(
