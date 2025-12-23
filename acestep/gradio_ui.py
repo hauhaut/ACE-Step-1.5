@@ -438,8 +438,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                         maximum=1.0,
                         value=1.0,
                         step=0.01,
-                        label="Audio Cover Strength",
-                        info="Control how many denoising steps use cover mode",
+                        label="LM codes strength",
+                        info="Control how many denoising steps use LM-generated codes",
                         visible=True
                     )
                 

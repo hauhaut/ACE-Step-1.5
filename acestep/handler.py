@@ -1406,6 +1406,9 @@ class AceStepHandler:
                 for seq in non_cover_text_attention_masks
             ])
         
+        if audio_cover_strength < 1.0:
+            assert padded_non_cover_text_input_ids is not None, "When audio_cover_strength < 1.0, padded_non_cover_text_input_ids must not be None"
+            assert padded_non_cover_text_attention_masks is not None, "When audio_cover_strength < 1.0, padded_non_cover_text_attention_masks must not be None"
         # Prepare batch
         batch = {
             "keys": keys,
@@ -1690,6 +1693,7 @@ class AceStepHandler:
             repainting_end=repainting_end,
             instructions=instructions,
             audio_code_hints=audio_code_hints,
+            audio_cover_strength=audio_cover_strength,
         )
         
         processed_data = self.preprocess_batch(batch)
@@ -1738,7 +1742,7 @@ class AceStepHandler:
             "silence_latent": self.silence_latent,
             "seed": seed_param,
             "non_cover_text_hidden_states": non_cover_text_hidden_states,
-            "non_cover_text_attention_masks": non_cover_text_attention_masks,
+            "non_cover_text_attention_mask": non_cover_text_attention_masks,
             "precomputed_lm_hints_25Hz": precomputed_lm_hints_25Hz,
             "audio_cover_strength": audio_cover_strength,
             "infer_method": infer_method,
