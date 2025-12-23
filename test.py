@@ -2,7 +2,10 @@ import os
 import sys
 import torch
 import shutil
-import resource
+if sys.platform != 'win32':
+    import resource
+else:
+    import psutil
 from acestep.handler import AceStepHandler
 
 
@@ -32,7 +35,14 @@ def main():
         print(f"Using model: {model_name}")
         
     # Initialize service
-    device = "xpu"
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        device = "xpu"
+    elif torch.cuda.is_available():
+        device = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
     print(f"Using device: {device}")
     
     use_llm = False
@@ -42,7 +52,7 @@ def main():
         config_path=model_name,
         device=device,
         init_llm=use_llm,
-        use_flash_attention=False, # Default in UI
+        use_flash_attention=True, # Default in UI
         compile_model=True,
         offload_to_cpu=True,
         offload_dit_to_cpu=False, # Keep DiT on GPU
@@ -189,7 +199,12 @@ def main():
         peak_vram = torch.cuda.max_memory_allocated() / (1024 ** 3)
         print(f"Peak VRAM usage: {peak_vram:.2f} GB")
         
-    peak_ram = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+    if sys.platform != 'win32':
+        peak_ram = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+    else:
+        process = psutil.Process()
+        peak_ram = process.memory_info().rss / (1024 ** 3)
+
     print(f"Peak RAM usage: {peak_ram:.2f} GB")
     print(f"Status: {status_msg}")
     print(f"Info: {info}")

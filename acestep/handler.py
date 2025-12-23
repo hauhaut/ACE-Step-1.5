@@ -185,7 +185,8 @@ class AceStepHandler:
                     self.model = AutoModel.from_pretrained(
                         acestep_v15_checkpoint_path, 
                         trust_remote_code=True, 
-                        attn_implementation=attn_implementation
+                        attn_implementation=attn_implementation,
+                        dtype="bfloat16"
                     )
                 except Exception as e:
                     logger.warning(f"Failed to load model with {attn_implementation}: {e}")
@@ -232,7 +233,7 @@ class AceStepHandler:
                             raise ValueError(f"Unsupported quantization type: {self.quantization}")
                         
                         quantize_(self.model, quant_config)
-                        logger.info("DiT quantized with:",self.quantization)
+                        logger.info(f"DiT quantized with: {self.quantization}")
                     
                     
                 silence_latent_path = os.path.join(acestep_v15_checkpoint_path, "silence_latent.pt")
