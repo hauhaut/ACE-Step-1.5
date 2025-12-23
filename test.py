@@ -35,23 +35,13 @@ def main():
         print(f"Using model: {model_name}")
         
     # Initialize service
-    if hasattr(torch, 'xpu') and torch.xpu.is_available():
-        device = "xpu"
-    elif torch.cuda.is_available():
-        device = "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = "cpu"
-    print(f"Using device: {device}")
     
     use_llm = False
 
     status, enabled = handler.initialize_service(
         project_root=project_root,
         config_path=model_name,
-        device=device,
-        init_llm=use_llm,
+        device='auto',
         use_flash_attention=True, # Default in UI
         compile_model=True,
         offload_to_cpu=True,

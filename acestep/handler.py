@@ -146,7 +146,14 @@ class AceStepHandler:
         """
         try:
             if device == "auto":
-                device = "cuda" if torch.cuda.is_available() else "cpu"
+                if hasattr(torch, 'xpu') and torch.xpu.is_available():
+                    device = "xpu"
+                elif torch.cuda.is_available():
+                    device = "cuda"
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    device = "mps"
+                else:
+                    device = "cpu"
 
             status_msg = ""
             
