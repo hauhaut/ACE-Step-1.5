@@ -151,6 +151,7 @@ class AceStepHandler:
         device: str = "auto",
         init_llm: bool = False,
         lm_model_path: str = "acestep-5Hz-lm-0.6B",
+        backend: str = "vllm",
         use_flash_attention: bool = False,
         compile_model: bool = False,
         offload_to_cpu: bool = False,
@@ -166,6 +167,7 @@ class AceStepHandler:
             device: Device type
             init_llm: Whether to initialize 5Hz LM model
             lm_model_path: 5Hz LM model path
+            backend: Backend for 5Hz LM model ("vllm" or "pt")
             use_flash_attention: Whether to use flash attention (requires flash_attn package)
             compile_model: Whether to use torch.compile to optimize the model
             offload_to_cpu: Whether to offload models to CPU when not in use
@@ -315,20 +317,20 @@ class AceStepHandler:
                 if os.path.exists(full_lm_model_path):
                     logger.info("loading 5Hz LM tokenizer...")
                     start_time = time.time()
-                    llm_tokenizer = deepcopy(self.text_tokenizer)
-                    max_audio_length = 2**16 - 1
-                    semantic_tokens = [f"<|audio_code_{i}|>" for i in range(max_audio_length)]
-                    # 217204
-                    llm_tokenizer.add_special_tokens({"additional_special_tokens": semantic_tokens})
+                    llm_tokenizer = AutoTokenizer.from_pretrained(full_lm_model_path, use_fast=True)
                     logger.info(f"5Hz LM tokenizer loaded successfully in {time.time() - start_time:.2f} seconds")
                     self.llm_tokenizer = llm_tokenizer
-                    if device == "cuda":
-                        status_msg = self._initialize_5hz_lm_cuda(full_lm_model_path)
+                    
+                    # Initialize based on user-selected backend
+                    if backend == "vllm":
+                        # Try to initialize with vllm
+                        status_msg = self._initialize_5hz_lm_vllm(full_lm_model_path)
                         logger.info(f"5Hz LM status message: {status_msg}")
                         # Check if initialization failed (status_msg starts with ❌)
                         if status_msg.startswith("❌"):
                             # vllm initialization failed, fallback to PyTorch
                             if not self.llm_initialized:
+                                logger.warning("vllm initialization failed, falling back to PyTorch backend")
                                 try:
                                     self.llm = AutoModelForCausalLM.from_pretrained(full_lm_model_path, trust_remote_code=True)
                                     if not self.offload_to_cpu:
@@ -338,15 +340,14 @@ class AceStepHandler:
                                     self.llm.eval()
                                     self.llm_backend = "pt"
                                     self.llm_initialized = True
-                                    logger.info("5Hz LM initialized successfully on CUDA device using Transformers backend")
+                                    logger.info("5Hz LM initialized successfully using PyTorch backend (fallback)")
                                 except Exception as e:
                                     return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", False
                         # If vllm initialization succeeded, self.llm_initialized should already be True
                     else:
-                        # For CPU or other devices, use PyTorch backend
+                        # Use PyTorch backend (pt)
                         try:
                             self.llm = AutoModelForCausalLM.from_pretrained(full_lm_model_path, trust_remote_code=True)
-                            self.llm_tokenizer = AutoTokenizer.from_pretrained(full_lm_model_path, use_fast=True, trust_remote_code=True)
                             if not self.offload_to_cpu:
                                 self.llm = self.llm.to(device).to(self.dtype)
                             else:
@@ -354,7 +355,7 @@ class AceStepHandler:
                             self.llm.eval()
                             self.llm_backend = "pt"
                             self.llm_initialized = True
-                            logger.info("5Hz LM initialized successfully on non-CUDA device using Transformers backend")
+                            logger.info(f"5Hz LM initialized successfully using PyTorch backend on {device}")
                         except Exception as e:
                             return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", False
                             
@@ -370,7 +371,9 @@ class AceStepHandler:
             status_msg += f"VAE: {vae_checkpoint_path}\n"
             status_msg += f"Text encoder: {text_encoder_path}\n"
             if init_llm and hasattr(self, 'llm') and self.llm is not None:
+                backend_info = getattr(self, 'llm_backend', 'unknown')
                 status_msg += f"5Hz LM model: {os.path.join(checkpoint_dir, lm_model_path)}\n"
+                status_msg += f"5Hz LM backend: {backend_info}\n"
             else:
                 status_msg += f"5Hz LM model: Not loaded (checkbox not selected)\n"
             status_msg += f"Dtype: {self.dtype}\n"
@@ -500,7 +503,7 @@ class AceStepHandler:
         except Exception as e:
             return 0.9, low_gpu_memory_mode
     
-    def _initialize_5hz_lm(self, model_path: str) -> str:
+    def _initialize_5hz_lm_vllm(self, model_path: str) -> str:
         """Initialize 5Hz LM model"""
         if not torch.cuda.is_available():
             self.llm_initialized = False
@@ -524,9 +527,9 @@ class AceStepHandler:
                 max_ratio=0.9
             )
             if low_gpu_memory_mode:
-                self.max_model_len = 1024
-            else:
                 self.max_model_len = 2048
+            else:
+                self.max_model_len = 4096
             
             logger.info(f"Initializing 5Hz LM with model: {model_path}, enforce_eager: False, tensor_parallel_size: 1, max_model_len: {self.max_model_len}, gpu_memory_utilization: {gpu_memory_utilization}")
             start_time = time.time()
@@ -536,9 +539,9 @@ class AceStepHandler:
                 tensor_parallel_size=1,
                 max_model_len=self.max_model_len,
                 gpu_memory_utilization=gpu_memory_utilization,
+                tokenizer=self.llm_tokenizer,
             )
             logger.info(f"5Hz LM initialized successfully in {time.time() - start_time:.2f} seconds")
-            self.llm.tokenizer = self.llm_tokenizer
             self.llm_initialized = True
             self.llm_backend = "vllm"
             return f"✅ 5Hz LM initialized successfully\nModel: {model_path}\nDevice: {device_name}\nGPU Memory Utilization: {gpu_memory_utilization:.2f}"
@@ -548,7 +551,7 @@ class AceStepHandler:
             error_msg = f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             return error_msg
 
-    def generate_with_5hz_lm_vllm(self, caption: str, lyrics: str, temperature: float = 0.6) -> Tuple[Dict[str, Any], str, str]:
+    def generate_with_5hz_lm_vllm(self, caption: str, lyrics: str, temperature: float = 0.6, cfg_scale: float = 1.0, negative_prompt: str = "NO USER INPUT") -> Tuple[Dict[str, Any], str, str]:
         try:
             from nanovllm import SamplingParams
             
@@ -564,35 +567,41 @@ class AceStepHandler:
             )
             logger.debug(f"[debug] formatted_prompt: {formatted_prompt}")
             
-            sampling_params = SamplingParams(max_tokens=self.max_model_len, temperature=temperature)
-            outputs = self.llm.generate([formatted_prompt], sampling_params)
+            sampling_params = SamplingParams(max_tokens=self.max_model_len-64, temperature=temperature, cfg_scale=cfg_scale)
+            # Use CFG if cfg_scale > 1.0
+            if cfg_scale > 1.0:
+                # Build unconditional prompt (user input replaced with "NO USER INPUT")
+                formatted_unconditional_prompt = self.lm_tokenizer.apply_chat_template(
+                    [
+                        {"role": "system", "content": "# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n"},
+                        {"role": "user", "content": negative_prompt}
+                    ],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                outputs = self.llm.generate(
+                    [formatted_prompt], 
+                    sampling_params,
+                    unconditional_prompts=[formatted_unconditional_prompt]
+                )
+            else:
+                outputs = self.lm_model.generate([formatted_prompt], sampling_params)
+            # Extract text from output - handle different output formats
             if isinstance(outputs, list) and len(outputs) > 0:
                 if hasattr(outputs[0], 'outputs') and len(outputs[0].outputs) > 0:
                     output_text = outputs[0].outputs[0].text
                 elif hasattr(outputs[0], 'text'):
                     output_text = outputs[0].text
+                elif isinstance(outputs[0], dict) and 'text' in outputs[0]:
+                    output_text = outputs[0]['text']
                 else:
-                    # Transformers generation
-                    inputs = self.llm_tokenizer(formatted_prompt, return_tensors="pt").to(self.llm.device)
-                    
-                    # Generate
-                    with torch.no_grad():
-                        outputs = self.llm.generate(
-                            **inputs,
-                            max_new_tokens=3072,
-                            temperature=temperature,
-                            do_sample=True,
-                            pad_token_id=self.llm_tokenizer.pad_token_id,
-                            eos_token_id=self.llm_tokenizer.eos_token_id
-                        )
-                    
-                    # Decode
-                    generated_ids = outputs[0][inputs.input_ids.shape[1]:]
-                    output_text = self.llm_tokenizer.decode(generated_ids, skip_special_tokens=False)
-                
-                metadata, audio_codes = self.parse_lm_output(output_text)
-                codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
-                return metadata, audio_codes, f"✅ Generated successfully\nOutput length: {len(output_text)} chars\nCodes count: {codes_count}"
+                    output_text = str(outputs[0])
+            else:
+                output_text = str(outputs)
+            metadata, audio_codes = self.parse_lm_output(output_text)
+            print(f"[debug]output_text: {output_text}")
+            codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
+            return metadata, audio_codes, f"✅ Generated successfully\nOutput length: {len(output_text)} chars\nCodes count: {codes_count}"
             
         except Exception as e:
             error_msg = f"❌ Error generating with 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
@@ -669,7 +678,7 @@ class AceStepHandler:
             error_msg = f"❌ Error generating with 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             return {}, "", error_msg
         
-    def generate_with_5hz_lm(self, caption: str, lyrics: str, temperature: float = 0.6) -> Tuple[Dict[str, Any], str, str]:
+    def generate_with_5hz_lm(self, caption: str, lyrics: str, temperature: float = 0.6, cfg_scale: float = 1.0, negative_prompt: str = "NO USER INPUT") -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM"""
         # Check if 5Hz LM is initialized
         if not hasattr(self, 'llm_initialized') or not self.llm_initialized:
@@ -686,7 +695,7 @@ class AceStepHandler:
             return {}, "", "❌ 5Hz LM backend not set. Please initialize it first."
         
         if self.llm_backend == "vllm":
-            return self.generate_with_5hz_lm_vllm(caption, lyrics, temperature)
+            return self.generate_with_5hz_lm_vllm(caption, lyrics, temperature, cfg_scale, negative_prompt)
         else:
             return self.generate_with_5hz_lm_pt(caption, lyrics, temperature)
     

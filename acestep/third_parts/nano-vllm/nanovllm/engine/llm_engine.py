@@ -21,28 +21,6 @@ class LLMEngine:
         self.ps = []
         self.events = []
         ctx = mp.get_context("spawn")
-        
-        # Pre-validate port availability by attempting to bind to it
-        # This helps avoid race conditions when multiple LLMEngine instances start simultaneously
-        import socket
-        from nanovllm.config import find_available_port
-        max_port_retries = 10
-        for port_attempt in range(max_port_retries):
-            try:
-                # Test if port is actually available by binding to it
-                test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                test_socket.bind(('localhost', config.dist_port))
-                test_socket.close()
-                # Port is available, break
-                break
-            except OSError:
-                # Port is in use, find next available
-                if port_attempt < max_port_retries - 1:
-                    config.dist_port = find_available_port(start_port=config.dist_port + 1, max_attempts=10)
-                else:
-                    raise RuntimeError(f"Failed to find available port after {max_port_retries} attempts")
-        
         for i in range(1, config.tensor_parallel_size):
             event = ctx.Event()
             process = ctx.Process(target=ModelRunner, args=(config, i, event))
@@ -50,7 +28,12 @@ class LLMEngine:
             self.ps.append(process)
             self.events.append(event)
         self.model_runner = ModelRunner(config, 0, self.events)
-        self.tokenizer = None
+        tokenizer = kwargs.get("tokenizer", None)
+        if tokenizer is not None:
+            self.tokenizer = tokenizer
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
+        config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
         atexit.register(self.exit)
 

@@ -1,16 +1,43 @@
 import pickle
-import socket
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
-from nanovllm.config import Config, find_available_port
+from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
+
+import socket
+
+
+def find_available_port(start_port: int = 2333, max_attempts: int = 100) -> int:
+    """Find an available port starting from start_port.
+    
+    Args:
+        start_port: The starting port number to check
+        max_attempts: Maximum number of ports to try
+        
+    Returns:
+        An available port number
+        
+    Raises:
+        RuntimeError: If no available port is found within max_attempts
+    """
+    for i in range(max_attempts):
+        port = start_port + i
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(('localhost', port))
+                return port
+        except OSError:
+            # Port is in use, try next one
+            continue
+    raise RuntimeError(f"Could not find an available port starting from {start_port} after {max_attempts} attempts")
 
 
 class ModelRunner:
@@ -23,33 +50,9 @@ class ModelRunner:
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event
-
-        # Try to initialize process group with retry logic for port conflicts
-        # Only rank 0 binds to the port, so only rank 0 needs retry logic
-        dist_port = self.config.dist_port
-        max_retries = 10
-        for attempt in range(max_retries):
-            try:
-                dist.init_process_group("nccl", f"tcp://localhost:{dist_port}", world_size=self.world_size, rank=rank)
-                break
-            except RuntimeError as e:
-                if ("EADDRINUSE" in str(e) or "address already in use" in str(e).lower()) and rank == 0:
-                    # Port is in use, try next port (only for rank 0)
-                    if attempt < max_retries - 1:
-                        # Find next available port
-                        dist_port = find_available_port(start_port=dist_port + 1, max_attempts=10)
-                        self.config.dist_port = dist_port
-                        # If we had a previous failed attempt, destroy any partial process group
-                        if dist.is_initialized():
-                            try:
-                                dist.destroy_process_group()
-                            except:
-                                pass
-                    else:
-                        raise RuntimeError(f"Failed to find available port after {max_retries} attempts. Last error: {e}")
-                else:
-                    # Other error or non-rank-0 process, re-raise
-                    raise
+        dist_port = find_available_port()
+        print(f"[debug]dist_port: {dist_port}")
+        dist.init_process_group("nccl", f"tcp://localhost:{dist_port}", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
@@ -144,15 +147,9 @@ class ModelRunner:
                 layer_id += 1
 
     def prepare_block_tables(self, seqs: list[Sequence]):
-        max_len = max(len(seq.block_table) for seq in seqs) if seqs else 0
-        if max_len == 0:
-            # Return empty 2D tensor with correct shape
-            return torch.zeros((len(seqs), 0), dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        max_len = max(len(seq.block_table) for seq in seqs)
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        # Ensure it's 2D: if only one sequence, shape should be [1, max_len]
-        if block_tables.dim() == 1:
-            block_tables = block_tables.unsqueeze(0)
         return block_tables
 
     def prepare_prefill(self, seqs: list[Sequence]):
@@ -247,29 +244,7 @@ class ModelRunner:
             graph_vars["slot_mapping"][:bs] = context.slot_mapping
             graph_vars["context_lens"].zero_()
             graph_vars["context_lens"][:bs] = context.context_lens
-            # Handle block_tables: ensure it's 2D and size matches
-            if context.block_tables is not None and context.block_tables.numel() > 0:
-                # Ensure block_tables is 2D
-                if context.block_tables.dim() == 1:
-                    # Reshape 1D to 2D: [num_blocks] -> [1, num_blocks]
-                    block_tables_2d = context.block_tables.unsqueeze(0)
-                else:
-                    block_tables_2d = context.block_tables
-                
-                # Get dimensions
-                context_bs = block_tables_2d.size(0)
-                context_num_blocks = block_tables_2d.size(1)
-                graph_num_blocks = graph_vars["block_tables"].size(1)
-                
-                # Use minimum to avoid size mismatch
-                num_blocks_to_copy = min(context_num_blocks, graph_num_blocks)
-                actual_bs = min(bs, context_bs)
-                
-                # Copy block_tables with size matching
-                graph_vars["block_tables"][:actual_bs, :num_blocks_to_copy] = block_tables_2d[:actual_bs, :num_blocks_to_copy]
-                # Fill remaining with -1 if needed
-                if num_blocks_to_copy < graph_num_blocks:
-                    graph_vars["block_tables"][:actual_bs, num_blocks_to_copy:] = -1
+            graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 

@@ -160,17 +160,18 @@ def create_generation_section(handler) -> dict:
         
         # Service Configuration
         with gr.Accordion("🔧 Service Configuration", open=True) as service_config_accordion:
-            with gr.Row():
-                with gr.Column(scale=2):
+            # Dropdown options section - all dropdowns grouped together
+            with gr.Row(equal_height=True):
+                with gr.Column(scale=4):
                     checkpoint_dropdown = gr.Dropdown(
                         label="Checkpoint File",
                         choices=handler.get_available_checkpoints(),
                         value=None,
                         info="Select a trained model checkpoint file (full path or filename)"
                     )
-                with gr.Column(scale=1):
+                with gr.Column(scale=1, min_width=90):
                     refresh_btn = gr.Button("🔄 Refresh", size="sm")
-                    
+            
             with gr.Row():
                 # Get available acestep-v15- model list
                 available_models = handler.get_available_acestep_v15_models()
@@ -200,13 +201,20 @@ def create_generation_section(handler) -> dict:
                     value=default_lm_model,
                     info="Select the 5Hz LM model checkpoint (auto-scanned from checkpoints)"
                 )
+                backend_dropdown = gr.Dropdown(
+                    choices=["vllm", "pt"],
+                    value="vllm",
+                    label="5Hz LM Backend",
+                    info="Select backend for 5Hz LM: vllm (faster) or pt (PyTorch, more compatible)"
+                )
+            
+            # Checkbox options section - all checkboxes grouped together
+            with gr.Row():
                 init_llm_checkbox = gr.Checkbox(
                     label="Initialize 5Hz LM",
                     value=False,
                     info="Check to initialize 5Hz LM during service initialization",
                 )
-            
-            with gr.Row():
                 # Auto-detect flash attention availability
                 flash_attn_available = handler.is_flash_attention_available()
                 use_flash_attention_checkbox = gr.Checkbox(
@@ -223,7 +231,7 @@ def create_generation_section(handler) -> dict:
                 offload_dit_to_cpu_checkbox = gr.Checkbox(
                     label="Offload DiT to CPU",
                     value=False,
-                    info="Offload DiT model to CPU when not in use (only effective if Offload to CPU is checked)"
+                    info="Offload DiT to CPU (needs Offload to CPU)"
                 )
             
             init_btn = gr.Button("Initialize Service", variant="primary", size="lg")
@@ -319,9 +327,28 @@ def create_generation_section(handler) -> dict:
                             maximum=2.0,
                             value=0.7,
                             step=0.1,
-                            scale=2,
-                            info="Temperature for 5Hz LM sampling"
+                            scale=1,
+                            info="Temperature for 5Hz LM sampling (higher = more random, lower = more deterministic)"
                         )
+                        lm_cfg_scale = gr.Slider(
+                            label="CFG Scale",
+                            minimum=1.0,
+                            maximum=3.0,
+                            value=1.0,
+                            step=0.1,
+                            scale=1,
+                            info="Classifier-Free Guidance scale for 5Hz LM (1.0 = no CFG, higher = stronger guidance)"
+                        )
+                    
+                    # Negative prompt for CFG (only visible when LM initialized and cfg_scale > 1)
+                    lm_negative_prompt = gr.Textbox(
+                        label="Negative Prompt",
+                        value="NO USER INPUT",
+                        placeholder="Enter negative prompt for CFG (default: NO USER INPUT)",
+                        visible=False,
+                        info="Negative prompt used for Classifier-Free Guidance when CFG Scale > 1.0",
+                        lines=2
+                    )
                     
                     # Repainting controls
                     with gr.Group(visible=False) as repainting_group:
@@ -495,6 +522,7 @@ def create_generation_section(handler) -> dict:
         "init_status": init_status,
         "lm_model_path": lm_model_path,
         "init_llm_checkbox": init_llm_checkbox,
+        "backend_dropdown": backend_dropdown,
         "use_flash_attention_checkbox": use_flash_attention_checkbox,
         "offload_to_cpu_checkbox": offload_to_cpu_checkbox,
         "offload_dit_to_cpu_checkbox": offload_dit_to_cpu_checkbox,
@@ -510,6 +538,8 @@ def create_generation_section(handler) -> dict:
         "use_5hz_lm_row": use_5hz_lm_row,
         "use_5hz_lm_btn": use_5hz_lm_btn,
         "lm_temperature": lm_temperature,
+        "lm_cfg_scale": lm_cfg_scale,
+        "lm_negative_prompt": lm_negative_prompt,
         "repainting_group": repainting_group,
         "repainting_start": repainting_start,
         "repainting_end": repainting_end,
@@ -666,11 +696,12 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
     )
     
     # Service initialization
-    def init_service_wrapper(checkpoint, config_path, device, init_llm, lm_model_path, use_flash_attention, offload_to_cpu, offload_dit_to_cpu):
+    def init_service_wrapper(checkpoint, config_path, device, init_llm, lm_model_path, backend, use_flash_attention, offload_to_cpu, offload_dit_to_cpu):
         """Wrapper for service initialization, returns status and button state"""
         status, enable = handler.initialize_service(
             checkpoint, config_path, device, init_llm, lm_model_path, 
-            use_flash_attention, compile_model=False, 
+            backend=backend,
+            use_flash_attention=use_flash_attention, compile_model=False, 
             offload_to_cpu=offload_to_cpu, offload_dit_to_cpu=offload_dit_to_cpu
         )
         return status, gr.update(interactive=enable)
@@ -683,11 +714,36 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
             generation_section["device"],
             generation_section["init_llm_checkbox"],
             generation_section["lm_model_path"],
+            generation_section["backend_dropdown"],
             generation_section["use_flash_attention_checkbox"],
             generation_section["offload_to_cpu_checkbox"],
             generation_section["offload_dit_to_cpu_checkbox"],
         ],
         outputs=[generation_section["init_status"], generation_section["generate_btn"]]
+    )
+    
+    # Update negative prompt visibility based on LM initialization and CFG scale
+    def update_negative_prompt_visibility(init_status, cfg_scale):
+        """Update negative prompt visibility: show only if LM initialized and cfg_scale > 1"""
+        # Check if LM is initialized by looking for "5Hz LM backend:" in status
+        lm_initialized = init_status is not None and "5Hz LM backend:" in str(init_status)
+        # Check if cfg_scale > 1
+        cfg_enabled = cfg_scale is not None and float(cfg_scale) > 1.0
+        # Show only if both conditions are met
+        return gr.update(visible=lm_initialized and cfg_enabled)
+    
+    # Update visibility when init_status changes
+    generation_section["init_status"].change(
+        fn=update_negative_prompt_visibility,
+        inputs=[generation_section["init_status"], generation_section["lm_cfg_scale"]],
+        outputs=[generation_section["lm_negative_prompt"]]
+    )
+    
+    # Update visibility when cfg_scale changes
+    generation_section["lm_cfg_scale"].change(
+        fn=update_negative_prompt_visibility,
+        inputs=[generation_section["init_status"], generation_section["lm_cfg_scale"]],
+        outputs=[generation_section["lm_negative_prompt"]]
     )
     
     # Generation with progress bar
@@ -762,9 +818,9 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
     )
     
     # 5Hz LM generation (simplified version, can be extended as needed)
-    def generate_lm_hints_wrapper(caption, lyrics, temperature):
+    def generate_lm_hints_wrapper(caption, lyrics, temperature, cfg_scale, negative_prompt):
         """Wrapper for 5Hz LM generation"""
-        metadata, audio_codes, status = handler.generate_with_5hz_lm(caption, lyrics, temperature)
+        metadata, audio_codes, status = handler.generate_with_5hz_lm(caption, lyrics, temperature, cfg_scale, negative_prompt)
         
         # Extract metadata values and map to UI fields
         # Handle bpm
@@ -801,7 +857,9 @@ def setup_event_handlers(demo, handler, dataset_section, generation_section, res
         inputs=[
             generation_section["captions"],
             generation_section["lyrics"],
-            generation_section["lm_temperature"]
+            generation_section["lm_temperature"],
+            generation_section["lm_cfg_scale"],
+            generation_section["lm_negative_prompt"]
         ],
         outputs=[
             generation_section["text2music_audio_code_string"],
