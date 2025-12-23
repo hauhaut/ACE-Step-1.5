@@ -5,4 +5,5 @@ gradio
 soundfile
 loguru
 einops
-accelerator
+accelerate
+psutil
