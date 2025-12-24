@@ -352,6 +352,14 @@ class ModelRunner:
                 cfg_scales_tensor = cfg_scales.unsqueeze(1)  # [num_cond, 1]
                 logits_cfg = logits_uncond + cfg_scales_tensor * (logits_cond - logits_uncond)
                 
+                # Apply logits processor for constrained decoding (if any sequence has one)
+                for i, seq in enumerate(cond_seqs):
+                    if seq.logits_processor is not None:
+                        # Create input_ids tensor for this sequence
+                        seq_input_ids = torch.tensor([seq.token_ids], device=logits_cfg.device)
+                        # Apply processor to this sequence's logits
+                        logits_cfg[i:i+1] = seq.logits_processor(seq_input_ids, logits_cfg[i:i+1])
+                
                 # Prepare input_ids for sampler (for repetition penalty, though we already applied it)
                 cond_input_ids = torch.tensor([seq.token_ids for seq in cond_seqs], device=logits_cfg.device)
                 
@@ -364,6 +372,11 @@ class ModelRunner:
                     repetition_penalties=None,  # Already applied above
                     input_ids=cond_input_ids,
                 ).tolist()
+                
+                # Update logits processor state after sampling
+                for i, seq in enumerate(cond_seqs):
+                    if seq.logits_processor_update_state is not None:
+                        seq.logits_processor_update_state(token_ids_cfg[i])
                 
                 # Return token_ids (will be applied to both conditional and unconditional sequences)
                 return token_ids_cfg
@@ -404,6 +417,17 @@ class ModelRunner:
                                 # Only apply penalty to tokens that appeared in completion
                                 logits[i] = torch.where(token_mask, penalty_scores, logits[i])
                 
+                # Apply logits processor for constrained decoding (if any sequence has one)
+                # Clone logits to avoid in-place update issues in inference mode
+                logits = logits.clone()
+                for i, seq in enumerate(seqs):
+                    if seq.logits_processor is not None:
+                        # Create input_ids tensor for this sequence
+                        seq_input_ids = torch.tensor([seq.token_ids], device=logits.device)
+                        # Apply processor to this sequence's logits (clone to avoid inference mode issues)
+                        processed = seq.logits_processor(seq_input_ids, logits[i:i+1].clone())
+                        logits[i] = processed[0]
+                
                 # Prepare input_ids for sampler
                 seq_input_ids = torch.tensor([seq.token_ids for seq in seqs], device=logits.device)
                 
@@ -415,6 +439,12 @@ class ModelRunner:
                     repetition_penalties=None,  # Already applied above
                     input_ids=seq_input_ids,
                 ).tolist()
+                
+                # Update logits processor state after sampling
+                for i, seq in enumerate(seqs):
+                    if seq.logits_processor_update_state is not None:
+                        seq.logits_processor_update_state(token_ids[i])
+                
                 return token_ids
             else:
                 return None

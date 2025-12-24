@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Callable, Any
 
 
 @dataclass
@@ -11,6 +11,12 @@ class SamplingParams:
     top_k: Optional[int] = None  # Top-k sampling: consider only top k tokens
     top_p: Optional[float] = None  # Top-p (nucleus) sampling: consider tokens with cumulative probability <= top_p
     repetition_penalty: float = 1.0  # Repetition penalty: >1.0 reduces repetition, <1.0 increases it
+    # Optional logits processor for constrained decoding
+    # Should be a callable with signature: (input_ids: torch.Tensor, logits: torch.Tensor) -> torch.Tensor
+    logits_processor: Optional[Any] = field(default=None, repr=False)
+    # Optional callback to update processor state after each token
+    # Should be a callable with signature: (token_id: int) -> None
+    logits_processor_update_state: Optional[Callable[[int], None]] = field(default=None, repr=False)
 
     def __post_init__(self):
         assert self.temperature > 1e-10, "greedy sampling is not permitted"

@@ -1,6 +1,7 @@
 from copy import copy
 from enum import Enum, auto
 from itertools import count
+from typing import Optional, Callable, Any
 
 from nanovllm.sampling_params import SamplingParams
 
@@ -36,6 +37,9 @@ class Sequence:
         # For CFG: reference to the corresponding conditional sequence (if this is unconditional)
         # For conditional sequences, this points to the unconditional sequence
         self.paired_seq = conditional_seq  # For conditional seq, points to uncond; for uncond seq, points to cond
+        # For constrained decoding: logits processor and state update callback
+        self.logits_processor: Optional[Any] = sampling_params.logits_processor
+        self.logits_processor_update_state: Optional[Callable[[int], None]] = sampling_params.logits_processor_update_state
 
     def __len__(self):
         return self.num_tokens
