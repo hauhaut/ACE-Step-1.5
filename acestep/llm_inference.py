@@ -878,9 +878,19 @@ class LLMHandler:
         top_k: Optional[int],
         top_p: Optional[float],
         repetition_penalty: float,
+        use_constrained_decoding: bool = True,
+        constrained_decoding_debug: bool = False,
     ) -> str:
         """Shared vllm path: accept prebuilt formatted prompt and return text."""
         from nanovllm import SamplingParams
+
+        # Create constrained processor if enabled
+        constrained_processor = None
+        if use_constrained_decoding:
+            constrained_processor = MetadataConstrainedLogitsProcessor(
+                tokenizer=self.llm_tokenizer,
+                debug=constrained_decoding_debug,
+            )
 
         sampling_params = SamplingParams(
             max_tokens=self.max_model_len - 64,
@@ -889,6 +899,8 @@ class LLMHandler:
             top_k=top_k,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
+            logits_processor=constrained_processor,
+            logits_processor_update_state=constrained_processor.update_state if constrained_processor else None,
         )
 
         if cfg_scale > 1.0:
@@ -1111,6 +1123,8 @@ class LLMHandler:
         top_k: Optional[int],
         top_p: Optional[float],
         repetition_penalty: float,
+        use_constrained_decoding: bool = True,
+        constrained_decoding_debug: bool = False,
     ) -> str:
         """Shared PyTorch path: accept prebuilt formatted prompt and return text."""
         inputs = self.llm_tokenizer(
@@ -1119,6 +1133,14 @@ class LLMHandler:
             padding=False,
             truncation=True,
         )
+
+        # Create constrained processor if enabled
+        constrained_processor = None
+        if use_constrained_decoding:
+            constrained_processor = MetadataConstrainedLogitsProcessor(
+                tokenizer=self.llm_tokenizer,
+                debug=constrained_decoding_debug,
+            )
 
         with self._load_model_context():
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
@@ -1154,7 +1176,7 @@ class LLMHandler:
                 batch_input_ids = batch_inputs_tokenized['input_ids']
                 batch_attention_mask = batch_inputs_tokenized.get('attention_mask', None)
 
-                # Use custom CFG generation loop
+                # Use custom CFG generation loop with constrained decoding
                 outputs = self._generate_with_cfg_custom(
                     batch_input_ids=batch_input_ids,
                     batch_attention_mask=batch_attention_mask,
@@ -1166,10 +1188,25 @@ class LLMHandler:
                     repetition_penalty=repetition_penalty,
                     pad_token_id=self.llm_tokenizer.pad_token_id or self.llm_tokenizer.eos_token_id,
                     streamer=None,
+                    constrained_processor=constrained_processor,
                 )
                 
                 # Extract only the conditional output (first in batch)
                 outputs = outputs[0:1]  # Keep only conditional output
+            elif use_constrained_decoding:
+                # Use custom constrained decoding loop for non-CFG
+                outputs = self._generate_with_constrained_decoding(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs.get("attention_mask"),
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    pad_token_id=self.llm_tokenizer.pad_token_id or self.llm_tokenizer.eos_token_id,
+                    streamer=None,
+                    constrained_processor=constrained_processor,
+                )
             else:
                 # Generate without CFG using native generate() parameters
                 with torch.no_grad():
@@ -1294,6 +1331,8 @@ class LLMHandler:
         self,
         formatted_prompt: str,
         cfg: Optional[Dict[str, Any]] = None,
+        use_constrained_decoding: bool = True,
+        constrained_decoding_debug: bool = False,
     ) -> Tuple[str, str]:
         """
         Generate raw LM text output from a pre-built formatted prompt.
@@ -1305,6 +1344,8 @@ class LLMHandler:
                 - cfg_scale (float)
                 - negative_prompt (str) used when cfg_scale > 1
                 - top_k (int), top_p (float), repetition_penalty (float)
+            use_constrained_decoding: Whether to use FSM-based constrained decoding
+            constrained_decoding_debug: Whether to enable debug logging for constrained decoding
 
         Returns:
             (output_text, status_message)
@@ -1336,6 +1377,8 @@ class LLMHandler:
                     top_k=top_k,
                     top_p=top_p,
                     repetition_penalty=repetition_penalty,
+                    use_constrained_decoding=use_constrained_decoding,
+                    constrained_decoding_debug=constrained_decoding_debug,
                 )
                 return output_text, f"✅ Generated successfully (vllm) | length={len(output_text)}"
 
@@ -1348,6 +1391,8 @@ class LLMHandler:
                 top_k=top_k,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
+                use_constrained_decoding=use_constrained_decoding,
+                constrained_decoding_debug=constrained_decoding_debug,
             )
             return output_text, f"✅ Generated successfully (pt) | length={len(output_text)}"
 
