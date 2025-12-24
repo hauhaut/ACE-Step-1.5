@@ -1,0 +1,599 @@
+"""FastAPI server for ACE-Step V1.5.
+
+Endpoints:
+- POST /v1/music/generate  Create an async music generation job (queued)
+    - Supports application/json and multipart/form-data (with file upload)
+- GET  /v1/jobs/{job_id}   Poll job status/result (+ queue position/eta when queued)
+
+NOTE:
+- In-memory queue and job store -> run uvicorn with workers=1.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+import time
+import traceback
+import tempfile
+import urllib.parse
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Lock
+from typing import Any, Dict, Literal, Optional
+from uuid import uuid4
+
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field
+from starlette.datastructures import UploadFile as StarletteUploadFile
+
+from .handler import AceStepHandler
+
+
+JobStatus = Literal["queued", "running", "succeeded", "failed"]
+
+
+class GenerateMusicRequest(BaseModel):
+    caption: str = Field(default="", description="Text caption describing the music")
+    lyrics: str = Field(default="", description="Lyric text")
+
+    bpm: Optional[int] = None
+    key_scale: str = ""
+    time_signature: str = ""
+    vocal_language: str = "en"
+    inference_steps: int = 8
+    guidance_scale: float = 7.0
+    use_random_seed: bool = True
+    seed: int = -1
+
+    reference_audio_path: Optional[str] = None
+    src_audio_path: Optional[str] = None
+    audio_duration: Optional[float] = None
+    batch_size: Optional[int] = None
+
+    audio_code_string: str = ""
+
+    repainting_start: float = 0.0
+    repainting_end: Optional[float] = None
+
+    instruction: str = "Fill the audio semantic mask based on the given conditions:"
+    audio_cover_strength: float = 1.0
+    task_type: str = "text2music"
+
+    use_adg: bool = False
+    cfg_interval_start: float = 0.0
+    cfg_interval_end: float = 1.0
+
+    audio_format: str = "mp3"
+    use_tiled_decode: bool = True
+
+
+class CreateJobResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    queue_position: int = 0  # 1-based best-effort position when queued
+
+
+class JobResult(BaseModel):
+    first_audio_path: Optional[str] = None
+    second_audio_path: Optional[str] = None
+    audio_paths: list[str] = Field(default_factory=list)
+
+    generation_info: str = ""
+    status_message: str = ""
+    seed_value: str = ""
+
+
+class JobResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    created_at: float
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+
+    # queue observability
+    queue_position: int = 0
+    eta_seconds: Optional[float] = None
+    avg_job_seconds: Optional[float] = None
+
+    result: Optional[JobResult] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class _JobRecord:
+    job_id: str
+    status: JobStatus
+    created_at: float
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class _JobStore:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._jobs: Dict[str, _JobRecord] = {}
+
+    def create(self) -> _JobRecord:
+        job_id = str(uuid4())
+        rec = _JobRecord(job_id=job_id, status="queued", created_at=time.time())
+        with self._lock:
+            self._jobs[job_id] = rec
+        return rec
+
+    def get(self, job_id: str) -> Optional[_JobRecord]:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def mark_running(self, job_id: str) -> None:
+        with self._lock:
+            rec = self._jobs[job_id]
+            rec.status = "running"
+            rec.started_at = time.time()
+
+    def mark_succeeded(self, job_id: str, result: Dict[str, Any]) -> None:
+        with self._lock:
+            rec = self._jobs[job_id]
+            rec.status = "succeeded"
+            rec.finished_at = time.time()
+            rec.result = result
+            rec.error = None
+
+    def mark_failed(self, job_id: str, error: str) -> None:
+        with self._lock:
+            rec = self._jobs[job_id]
+            rec.status = "failed"
+            rec.finished_at = time.time()
+            rec.result = None
+            rec.error = error
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _get_project_root() -> str:
+    current_file = os.path.abspath(__file__)
+    return os.path.dirname(os.path.dirname(current_file))
+
+
+def _to_int(v: Any, default: Optional[int] = None) -> Optional[int]:
+    if v is None:
+        return default
+    if isinstance(v, int):
+        return v
+    s = str(v).strip()
+    if s == "":
+        return default
+    return int(s)
+
+
+def _to_float(v: Any, default: Optional[float] = None) -> Optional[float]:
+    if v is None:
+        return default
+    if isinstance(v, float):
+        return v
+    s = str(v).strip()
+    if s == "":
+        return default
+    return float(s)
+
+
+def _to_bool(v: Any, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s == "":
+        return default
+    return s in {"1", "true", "yes", "y", "on"}
+
+
+async def _save_upload_to_temp(upload: StarletteUploadFile, *, prefix: str) -> str:
+    suffix = Path(upload.filename or "").suffix
+    fd, path = tempfile.mkstemp(prefix=f"{prefix}_", suffix=suffix)
+    os.close(fd)
+    try:
+        with open(path, "wb") as f:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+    except Exception:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            await upload.close()
+        except Exception:
+            pass
+    return path
+
+
+def create_app() -> FastAPI:
+    store = _JobStore()
+
+    QUEUE_MAXSIZE = int(os.getenv("ACESTEP_QUEUE_MAXSIZE", "200"))
+    WORKER_COUNT = int(os.getenv("ACESTEP_QUEUE_WORKERS", "1"))  # 单 GPU 建议 1
+
+    INITIAL_AVG_JOB_SECONDS = float(os.getenv("ACESTEP_AVG_JOB_SECONDS", "5.0"))
+    AVG_WINDOW = int(os.getenv("ACESTEP_AVG_WINDOW", "50"))
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Clear proxy env that may affect downstream libs
+        for proxy_var in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]:
+            os.environ.pop(proxy_var, None)
+
+        handler = AceStepHandler()
+        init_lock = asyncio.Lock()
+        app.state._initialized = False
+        app.state._init_error = None
+        app.state._init_lock = init_lock
+
+        max_workers = int(os.getenv("ACESTEP_API_WORKERS", "1"))
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+
+        # Queue & observability
+        app.state.job_queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)  # (job_id, req)
+        app.state.pending_ids = deque()  # queued job_ids
+        app.state.pending_lock = asyncio.Lock()
+
+        # temp files per job (from multipart uploads)
+        app.state.job_temp_files = {}  # job_id -> list[path]
+        app.state.job_temp_files_lock = asyncio.Lock()
+
+        # stats
+        app.state.stats_lock = asyncio.Lock()
+        app.state.recent_durations = deque(maxlen=AVG_WINDOW)
+        app.state.avg_job_seconds = INITIAL_AVG_JOB_SECONDS
+
+        app.state.handler = handler
+        app.state.executor = executor
+        app.state.job_store = store
+        app.state._python_executable = sys.executable
+
+        async def _ensure_initialized() -> None:
+            h: AceStepHandler = app.state.handler
+
+            if getattr(app.state, "_initialized", False):
+                return
+            if getattr(app.state, "_init_error", None):
+                raise RuntimeError(app.state._init_error)
+
+            async with app.state._init_lock:
+                if getattr(app.state, "_initialized", False):
+                    return
+                if getattr(app.state, "_init_error", None):
+                    raise RuntimeError(app.state._init_error)
+
+                project_root = _get_project_root()
+                config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
+                device = os.getenv("ACESTEP_DEVICE", "auto")
+
+                use_flash_attention = _env_bool("ACESTEP_USE_FLASH_ATTENTION", True)
+                offload_to_cpu = _env_bool("ACESTEP_OFFLOAD_TO_CPU", False)
+                offload_dit_to_cpu = _env_bool("ACESTEP_OFFLOAD_DIT_TO_CPU", False)
+
+                status_msg, ok = h.initialize_service(
+                    project_root=project_root,
+                    config_path=config_path,
+                    device=device,
+                    use_flash_attention=use_flash_attention,
+                    compile_model=False,
+                    offload_to_cpu=offload_to_cpu,
+                    offload_dit_to_cpu=offload_dit_to_cpu,
+                )
+                if not ok:
+                    app.state._init_error = status_msg
+                    raise RuntimeError(status_msg)
+                app.state._initialized = True
+
+        async def _cleanup_job_temp_files(job_id: str) -> None:
+            async with app.state.job_temp_files_lock:
+                paths = app.state.job_temp_files.pop(job_id, [])
+            for p in paths:
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+        async def _run_one_job(job_id: str, req: GenerateMusicRequest) -> None:
+            job_store: _JobStore = app.state.job_store
+            h: AceStepHandler = app.state.handler
+            executor: ThreadPoolExecutor = app.state.executor
+
+            await _ensure_initialized()
+            job_store.mark_running(job_id)
+
+            def _blocking_generate() -> Dict[str, Any]:
+                first, second, paths, gen_info, status_msg, seed_value, *_ = h.generate_music(
+                    captions=req.caption,
+                    lyrics=req.lyrics,
+                    bpm=req.bpm,
+                    key_scale=req.key_scale,
+                    time_signature=req.time_signature,
+                    vocal_language=req.vocal_language,
+                    inference_steps=req.inference_steps,
+                    guidance_scale=req.guidance_scale,
+                    use_random_seed=req.use_random_seed,
+                    seed=req.seed,
+                    reference_audio=req.reference_audio_path,
+                    audio_duration=req.audio_duration,
+                    batch_size=req.batch_size,
+                    src_audio=req.src_audio_path,
+                    audio_code_string=req.audio_code_string,
+                    repainting_start=req.repainting_start,
+                    repainting_end=req.repainting_end,
+                    instruction=req.instruction,
+                    audio_cover_strength=req.audio_cover_strength,
+                    task_type=req.task_type,
+                    use_adg=req.use_adg,
+                    cfg_interval_start=req.cfg_interval_start,
+                    cfg_interval_end=req.cfg_interval_end,
+                    audio_format=req.audio_format,
+                    use_tiled_decode=req.use_tiled_decode,
+                    progress=None,
+                )
+                return {
+                    "first_audio_path": first,
+                    "second_audio_path": second,
+                    "audio_paths": paths,
+                    "generation_info": gen_info,
+                    "status_message": status_msg,
+                    "seed_value": seed_value,
+                }
+
+            t0 = time.time()
+            try:
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(executor, _blocking_generate)
+                job_store.mark_succeeded(job_id, result)
+            except Exception:
+                job_store.mark_failed(job_id, traceback.format_exc())
+            finally:
+                dt = max(0.0, time.time() - t0)
+                async with app.state.stats_lock:
+                    app.state.recent_durations.append(dt)
+                    if app.state.recent_durations:
+                        app.state.avg_job_seconds = sum(app.state.recent_durations) / len(app.state.recent_durations)
+
+        async def _queue_worker(worker_idx: int) -> None:
+            while True:
+                job_id, req = await app.state.job_queue.get()
+                try:
+                    async with app.state.pending_lock:
+                        try:
+                            app.state.pending_ids.remove(job_id)
+                        except ValueError:
+                            pass
+
+                    await _run_one_job(job_id, req)
+                finally:
+                    await _cleanup_job_temp_files(job_id)
+                    app.state.job_queue.task_done()
+
+        worker_count = max(1, WORKER_COUNT)
+        workers = [asyncio.create_task(_queue_worker(i)) for i in range(worker_count)]
+        app.state.worker_tasks = workers
+
+        try:
+            yield
+        finally:
+            for t in workers:
+                t.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    app = FastAPI(title="ACE-Step API", version="1.0", lifespan=lifespan)
+
+    async def _queue_position(job_id: str) -> int:
+        async with app.state.pending_lock:
+            try:
+                return list(app.state.pending_ids).index(job_id) + 1
+            except ValueError:
+                return 0
+
+    async def _eta_seconds_for_position(pos: int) -> Optional[float]:
+        if pos <= 0:
+            return None
+        async with app.state.stats_lock:
+            avg = float(getattr(app.state, "avg_job_seconds", INITIAL_AVG_JOB_SECONDS))
+        return pos * avg
+
+    @app.post("/v1/music/generate", response_model=CreateJobResponse)
+    async def create_music_generate_job(request: Request) -> CreateJobResponse:
+        content_type = (request.headers.get("content-type") or "").lower()
+        temp_files: list[str] = []
+
+        def _build_req_from_mapping(mapping: Any, *, reference_audio_path: Optional[str], src_audio_path: Optional[str]) -> GenerateMusicRequest:
+            get = getattr(mapping, "get", None)
+            if not callable(get):
+                raise HTTPException(status_code=400, detail="Invalid request payload")
+
+            return GenerateMusicRequest(
+                caption=str(get("caption", "") or ""),
+                lyrics=str(get("lyrics", "") or ""),
+                bpm=_to_int(get("bpm"), None),
+                key_scale=str(get("key_scale", "") or ""),
+                time_signature=str(get("time_signature", "") or ""),
+                vocal_language=str(get("vocal_language", "en") or "en"),
+                inference_steps=_to_int(get("inference_steps"), 8) or 8,
+                guidance_scale=_to_float(get("guidance_scale"), 7.0) or 7.0,
+                use_random_seed=_to_bool(get("use_random_seed"), True),
+                seed=_to_int(get("seed"), -1) or -1,
+                reference_audio_path=reference_audio_path,
+                src_audio_path=src_audio_path,
+                audio_duration=_to_float(get("audio_duration"), None),
+                batch_size=_to_int(get("batch_size"), None),
+                audio_code_string=str(get("audio_code_string", "") or ""),
+                repainting_start=_to_float(get("repainting_start"), 0.0) or 0.0,
+                repainting_end=_to_float(get("repainting_end"), None),
+                instruction=str(get("instruction", "Fill the audio semantic mask based on the given conditions:") or ""),
+                audio_cover_strength=_to_float(get("audio_cover_strength"), 1.0) or 1.0,
+                task_type=str(get("task_type", "text2music") or "text2music"),
+                use_adg=_to_bool(get("use_adg"), False),
+                cfg_interval_start=_to_float(get("cfg_interval_start"), 0.0) or 0.0,
+                cfg_interval_end=_to_float(get("cfg_interval_end"), 1.0) or 1.0,
+                audio_format=str(get("audio_format", "mp3") or "mp3"),
+                use_tiled_decode=_to_bool(get("use_tiled_decode"), True),
+            )
+
+        def _first_value(v: Any) -> Any:
+            if isinstance(v, list) and v:
+                return v[0]
+            return v
+
+        if content_type.startswith("application/json"):
+            body = await request.json()
+            req = GenerateMusicRequest(**body)
+
+        elif content_type.endswith("+json"):
+            body = await request.json()
+            req = GenerateMusicRequest(**body)
+
+        elif content_type.startswith("multipart/form-data"):
+            form = await request.form()
+
+            ref_up = form.get("reference_audio")
+            src_up = form.get("src_audio")
+
+            reference_audio_path = None
+            src_audio_path = None
+
+            if isinstance(ref_up, StarletteUploadFile):
+                reference_audio_path = await _save_upload_to_temp(ref_up, prefix="reference_audio")
+                temp_files.append(reference_audio_path)
+            else:
+                reference_audio_path = str(form.get("reference_audio_path") or "").strip() or None
+
+            if isinstance(src_up, StarletteUploadFile):
+                src_audio_path = await _save_upload_to_temp(src_up, prefix="src_audio")
+                temp_files.append(src_audio_path)
+            else:
+                src_audio_path = str(form.get("src_audio_path") or "").strip() or None
+
+            req = _build_req_from_mapping(form, reference_audio_path=reference_audio_path, src_audio_path=src_audio_path)
+
+        elif content_type.startswith("application/x-www-form-urlencoded"):
+            form = await request.form()
+            reference_audio_path = str(form.get("reference_audio_path") or "").strip() or None
+            src_audio_path = str(form.get("src_audio_path") or "").strip() or None
+            req = _build_req_from_mapping(form, reference_audio_path=reference_audio_path, src_audio_path=src_audio_path)
+
+        else:
+            raw = await request.body()
+            raw_stripped = raw.lstrip()
+            # Best-effort: accept missing/incorrect Content-Type if payload is valid JSON.
+            if raw_stripped.startswith(b"{") or raw_stripped.startswith(b"["):
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                    if isinstance(body, dict):
+                        req = GenerateMusicRequest(**body)
+                    else:
+                        raise HTTPException(status_code=400, detail="JSON payload must be an object")
+                except HTTPException:
+                    raise
+                except Exception:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid JSON body (hint: set 'Content-Type: application/json')",
+                    )
+            # Best-effort: parse key=value bodies even if Content-Type is missing.
+            elif raw_stripped and b"=" in raw:
+                parsed = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+                flat = {k: _first_value(v) for k, v in parsed.items()}
+                reference_audio_path = str(flat.get("reference_audio_path") or "").strip() or None
+                src_audio_path = str(flat.get("src_audio_path") or "").strip() or None
+                req = _build_req_from_mapping(flat, reference_audio_path=reference_audio_path, src_audio_path=src_audio_path)
+            else:
+                raise HTTPException(
+                    status_code=415,
+                    detail=(
+                        f"Unsupported Content-Type: {content_type or '(missing)'}; "
+                        "use application/json, application/x-www-form-urlencoded, or multipart/form-data"
+                    ),
+                )
+
+        rec = store.create()
+
+        q: asyncio.Queue = app.state.job_queue
+        if q.full():
+            for p in temp_files:
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+            raise HTTPException(status_code=429, detail="Server busy: queue is full")
+
+        if temp_files:
+            async with app.state.job_temp_files_lock:
+                app.state.job_temp_files[rec.job_id] = temp_files
+
+        async with app.state.pending_lock:
+            app.state.pending_ids.append(rec.job_id)
+            position = len(app.state.pending_ids)
+
+        await q.put((rec.job_id, req))
+        return CreateJobResponse(job_id=rec.job_id, status="queued", queue_position=position)
+
+    @app.get("/v1/jobs/{job_id}", response_model=JobResponse)
+    async def get_job(job_id: str) -> JobResponse:
+        rec = store.get(job_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        pos = 0
+        eta = None
+        async with app.state.stats_lock:
+            avg = float(getattr(app.state, "avg_job_seconds", INITIAL_AVG_JOB_SECONDS))
+
+        if rec.status == "queued":
+            pos = await _queue_position(job_id)
+            eta = await _eta_seconds_for_position(pos)
+
+        return JobResponse(
+            job_id=rec.job_id,
+            status=rec.status,
+            created_at=rec.created_at,
+            started_at=rec.started_at,
+            finished_at=rec.finished_at,
+            queue_position=pos,
+            eta_seconds=eta,
+            avg_job_seconds=avg,
+            result=JobResult(**rec.result) if rec.result else None,
+            error=rec.error,
+        )
+
+    return app
+
+
+app = create_app()
+
+
+def main() -> None:
+    import uvicorn
+
+    host = os.getenv("ACESTEP_API_HOST", "127.0.0.1")
+    port = int(os.getenv("ACESTEP_API_PORT", "8001"))
+
+    # IMPORTANT: in-memory queue/store -> workers MUST be 1
+    uvicorn.run("acestep.api_server:app", host=host, port=port, reload=False, workers=1)
+
+
+if __name__ == "__main__":
+    main()

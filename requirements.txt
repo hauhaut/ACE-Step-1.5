@@ -8,3 +8,5 @@ einops
 accelerator
 vector-quantize-pytorch
 psutil
+fastapi
+uvicorn

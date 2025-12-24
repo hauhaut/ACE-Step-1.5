@@ -18,10 +18,13 @@ dependencies = [
     "loguru>=0.7.3",
     "einops>=0.8.1",
     "accelerate>=1.12.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
 ]
 
 [project.scripts]
 acestep = "acestep.acestep_v15_pipeline:main"
+acestep-api = "acestep.api_server:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -32,7 +35,7 @@ dev-dependencies = []
 
 [[tool.uv.index]]
 name = "pytorch"
-url = "https://download.pytorch.org/whl/cu130"
+url = "https://download.pytorch.org/whl/cu128"
 
 [tool.hatch.build.targets.wheel]
 packages = ["acestep"]

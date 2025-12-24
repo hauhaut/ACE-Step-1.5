@@ -43,6 +43,9 @@ def find_available_port(start_port: int = 2333, max_attempts: int = 100) -> int:
 class ModelRunner:
 
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
+        # Enable capturing scalar outputs to avoid graph breaks from Tensor.item() calls
+        torch._dynamo.config.capture_scalar_outputs = True
+        
         self.config = config
         hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
@@ -55,7 +58,9 @@ class ModelRunner:
         dist.init_process_group("nccl", f"tcp://localhost:{dist_port}", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(hf_config.torch_dtype)
+        # Use dtype instead of deprecated torch_dtype
+        config_dtype = getattr(hf_config, 'dtype', getattr(hf_config, 'torch_dtype', torch.float32))
+        torch.set_default_dtype(config_dtype)
         torch.set_default_device("cuda")
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
@@ -130,14 +135,31 @@ class ModelRunner:
         config = self.config
         hf_config = config.hf_config
         free, total = torch.cuda.mem_get_info()
-        used = total - free
-        peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
-        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
-        assert config.num_kvcache_blocks > 0
+        # Use dtype instead of deprecated torch_dtype
+        config_dtype = getattr(hf_config, 'dtype', getattr(hf_config, 'torch_dtype', torch.float32))
+        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * config_dtype.itemsize
+        
+        # Calculate available memory for KV cache
+        # After warmup_model, empty_cache has been called, so current represents model memory only
+        # Use free memory but respect the gpu_memory_utilization limit
+        target_total_usage = total * config.gpu_memory_utilization
+        available_for_kv_cache = min(free * 0.9, target_total_usage - current)
+        
+        # Ensure we have positive memory available
+        if available_for_kv_cache <= 0:
+            available_for_kv_cache = free * 0.5  # Fallback to 50% of free memory
+        
+        config.num_kvcache_blocks = max(1, int(available_for_kv_cache) // block_bytes)
+        if config.num_kvcache_blocks <= 0:
+            raise RuntimeError(
+                f"Insufficient GPU memory for KV cache. "
+                f"Free: {free / 1024**3:.2f} GB, Current: {current / 1024**3:.2f} GB, "
+                f"Available for KV: {available_for_kv_cache / 1024**3:.2f} GB, "
+                f"Block size: {block_bytes / 1024**2:.2f} MB"
+            )
         self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
         layer_id = 0
         for module in self.model.modules():
