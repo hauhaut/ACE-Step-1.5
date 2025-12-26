@@ -414,15 +414,42 @@ def create_app() -> FastAPI:
                     return None if fv >= 1.0 else fv
 
                 def _maybe_fill_from_metadata(current: GenerateMusicRequest, meta: Dict[str, Any]) -> tuple[Optional[int], str, str, Optional[float]]:
+                    def _parse_first_float(v: Any) -> Optional[float]:
+                        if v is None:
+                            return None
+                        if isinstance(v, (int, float)):
+                            return float(v)
+                        s = str(v).strip()
+                        if not s or s.upper() == "N/A":
+                            return None
+                        try:
+                            return float(s)
+                        except Exception:
+                            pass
+                        m = re.search(r"[-+]?\d*\.?\d+", s)
+                        if not m:
+                            return None
+                        try:
+                            return float(m.group(0))
+                        except Exception:
+                            return None
+
+                    def _parse_first_int(v: Any) -> Optional[int]:
+                        fv = _parse_first_float(v)
+                        if fv is None:
+                            return None
+                        try:
+                            return int(round(fv))
+                        except Exception:
+                            return None
+
                     # Fill only when user did not provide values
                     bpm_val = current.bpm
                     if bpm_val is None:
-                        try:
-                            m = meta.get("bpm")
-                            if m not in (None, "", "N/A"):
-                                bpm_val = int(float(m))
-                        except Exception:
-                            bpm_val = current.bpm
+                        m = meta.get("bpm")
+                        parsed = _parse_first_int(m)
+                        if parsed is not None and parsed > 0:
+                            bpm_val = parsed
 
                     key_scale_val = current.key_scale
                     if not key_scale_val:
@@ -439,19 +466,18 @@ def create_app() -> FastAPI:
                     dur_val = current.audio_duration
                     if dur_val is None:
                         m = meta.get("duration", meta.get("audio_duration"))
-                        try:
-                            if m not in (None, "", "N/A"):
-                                dur_val = float(m)
-                                if dur_val <= 0:
-                                    dur_val = None
-                                # Avoid truncating lyrical songs when LM predicts a very short duration.
-                                # (Users can still force a short duration by explicitly setting `audio_duration`.)
-                                if dur_val is not None and (current.lyrics or "").strip():
-                                    min_dur = float(os.getenv("ACESTEP_LM_MIN_DURATION_SECONDS", "30"))
-                                    if dur_val < min_dur:
-                                        dur_val = None
-                        except Exception:
-                            dur_val = current.audio_duration
+                        parsed = _parse_first_float(m)
+                        if parsed is not None:
+                            dur_val = float(parsed)
+                            if dur_val <= 0:
+                                dur_val = None
+
+                        # Avoid truncating lyrical songs when LM predicts a very short duration.
+                        # (Users can still force a short duration by explicitly setting `audio_duration`.)
+                        if dur_val is not None and (current.lyrics or "").strip():
+                            min_dur = float(os.getenv("ACESTEP_LM_MIN_DURATION_SECONDS", "30"))
+                            if dur_val < min_dur:
+                                dur_val = None
 
                     return bpm_val, key_scale_val, time_sig_val, dur_val
 
@@ -476,6 +502,35 @@ def create_app() -> FastAPI:
                     return float(min(max(est, min_dur), max_dur))
 
                 def _extract_lm_fields(meta: Dict[str, Any]) -> Dict[str, Any]:
+                    def _parse_first_float(v: Any) -> Optional[float]:
+                        if v is None:
+                            return None
+                        if isinstance(v, (int, float)):
+                            return float(v)
+                        s = str(v).strip()
+                        if not s or s.upper() == "N/A":
+                            return None
+                        try:
+                            return float(s)
+                        except Exception:
+                            pass
+                        m = re.search(r"[-+]?\d*\.?\d+", s)
+                        if not m:
+                            return None
+                        try:
+                            return float(m.group(0))
+                        except Exception:
+                            return None
+
+                    def _parse_first_int(v: Any) -> Optional[int]:
+                        fv = _parse_first_float(v)
+                        if fv is None:
+                            return None
+                        try:
+                            return int(round(fv))
+                        except Exception:
+                            return None
+
                     def _none_if_na(v: Any) -> Any:
                         if v is None:
                             return None
@@ -486,16 +541,10 @@ def create_app() -> FastAPI:
                     out: Dict[str, Any] = {}
 
                     bpm_raw = _none_if_na(meta.get("bpm"))
-                    try:
-                        out["bpm"] = int(float(bpm_raw)) if bpm_raw is not None else None
-                    except Exception:
-                        out["bpm"] = None
+                    out["bpm"] = _parse_first_int(bpm_raw)
 
                     dur_raw = _none_if_na(meta.get("duration"))
-                    try:
-                        out["duration"] = float(dur_raw) if dur_raw is not None else None
-                    except Exception:
-                        out["duration"] = None
+                    out["duration"] = _parse_first_float(dur_raw)
 
                     genres_raw = _none_if_na(meta.get("genres"))
                     out["genres"] = str(genres_raw) if genres_raw is not None else None
