@@ -39,8 +39,29 @@ Suitable for passing only text parameters, or referencing audio file paths that 
 | :--- | :--- | :--- | :--- |
 | `caption` | string | `""` | Music description prompt |
 | `lyrics` | string | `""` | Lyrics content |
+| `thinking` | bool | `false` | Whether to use 5Hz LM to generate audio codes (lm-dit behavior). |
 | `vocal_language` | string | `"en"` | Lyrics language (en, zh, ja, etc.) |
 | `audio_format` | string | `"mp3"` | Output format (mp3, wav, flac) |
+
+**thinking Semantics (Important)**:
+
+- `thinking=false`:
+  - The server will **NOT** use 5Hz LM to generate `audio_code_string`.
+  - DiT runs in **text2music** mode and **ignores** any provided `audio_code_string`.
+- `thinking=true`:
+  - The server will use 5Hz LM to generate `audio_code_string` (lm-dit behavior).
+  - DiT runs in **cover** mode and uses `audio_code_string`.
+
+**Metadata Auto-Completion (Always On)**:
+
+Regardless of `thinking`, if any of the following fields are missing, the server may call 5Hz LM to **fill only the missing fields** based on `caption`/`lyrics`:
+
+- `bpm`
+- `key_scale`
+- `time_signature`
+- `audio_duration`
+
+User-provided values always win; LM only fills the fields that are empty/missing.
 
 **Music Attribute Parameters**:
 
@@ -50,6 +71,12 @@ Suitable for passing only text parameters, or referencing audio file paths that 
 | `key_scale` | string | `""` | Key/scale (e.g., "C Major") |
 | `time_signature` | string | `""` | Time signature (e.g., "4/4") |
 | `audio_duration` | float | null | Generation duration (seconds) |
+
+**Audio Codes (Optional)**:
+
+| Parameter Name | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `audio_code_string` | string or string[] | `""` | Audio semantic tokens (5Hz) for `llm_dit`. If provided as an array, it should match `batch_size` (or the server batch size). |
 
 **Generation Control Parameters**:
 
@@ -61,20 +88,19 @@ Suitable for passing only text parameters, or referencing audio file paths that 
 | `seed` | int | `-1` | Specify seed (when use_random_seed=false) |
 | `batch_size` | int | null | Batch generation count |
 
-**5Hz LM Parameters (Optional, server-side codes generation)**:
+**5Hz LM Parameters (Optional, server-side)**:
 
-If you want the server to generate `audio_code_string` using the 5Hz LM (equivalent to Gradio's **Generate LM Hints** button), set `use_5hz_lm=true`.
+These parameters control 5Hz LM sampling, used for metadata auto-completion and (when `thinking=true`) codes generation.
 
 | Parameter Name | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `use_5hz_lm` | bool | `false` | Enable server-side 5Hz LM code generation |
 | `lm_model_path` | string | null | 5Hz LM checkpoint dir name (e.g. `acestep-5Hz-lm-0.6B`) |
 | `lm_backend` | string | `"vllm"` | `vllm` or `pt` |
-| `lm_temperature` | float | `0.6` | Sampling temperature |
-| `lm_cfg_scale` | float | `1.0` | CFG scale (>1 enables CFG) |
+| `lm_temperature` | float | `0.85` | Sampling temperature |
+| `lm_cfg_scale` | float | `2.0` | CFG scale (>1 enables CFG) |
 | `lm_negative_prompt` | string | `"NO USER INPUT"` | Negative prompt used by CFG |
 | `lm_top_k` | int | null | Top-k (0/null disables) |
-| `lm_top_p` | float | null | Top-p (>=1/null disables) |
+| `lm_top_p` | float | `0.9` | Top-p (>=1 will be treated as disabled) |
 | `lm_repetition_penalty` | float | `1.0` | Repetition penalty |
 
 **Edit/Reference Audio Parameters** (requires absolute path on server):
@@ -124,7 +150,7 @@ curl -X POST http://localhost:8001/v1/music/generate \
   }'
 ```
 
-**JSON Method (server-side 5Hz LM)**:
+**JSON Method (thinking=true: generate codes + fill missing metas)**:
 
 ```bash
 curl -X POST http://localhost:8001/v1/music/generate \
@@ -132,22 +158,38 @@ curl -X POST http://localhost:8001/v1/music/generate \
   -d '{
     "caption": "upbeat pop song",
     "lyrics": "Hello world",
-    "use_5hz_lm": true,
-    "lm_temperature": 0.6,
-    "lm_cfg_scale": 1.0,
-    "lm_top_k": 0,
-    "lm_top_p": 1.0,
+    "thinking": true,
+    "lm_temperature": 0.85,
+    "lm_cfg_scale": 2.0,
+    "lm_top_k": null,
+    "lm_top_p": 0.9,
     "lm_repetition_penalty": 1.0
   }'
 ```
 
-When `use_5hz_lm=true` and the server generates LM codes, the job `result` will also include the following optional fields:
+**JSON Method (thinking=false: do NOT generate codes, but fill missing metas)**:
+
+Example: user specifies `bpm` but omits `audio_duration`. The server may call LM to infer `duration` from `caption`/`lyrics` and use it only if the user did not set it.
+
+```bash
+curl -X POST http://localhost:8001/v1/music/generate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "caption": "slow emotional ballad",
+    "lyrics": "...",
+    "thinking": false,
+    "bpm": 72
+  }'
+```
+
+When the server invokes the 5Hz LM (to fill metas and/or generate codes), the job `result` may include the following optional fields:
 
 - `bpm`
 - `duration`
 - `genres`
 - `keyscale`
 - `timesignature`
+- `metas` (raw-ish metadata dict)
 
 > Note: If you use `curl -d` but **forget** to add `-H 'Content-Type: application/json'`, curl will default to sending `application/x-www-form-urlencoded`, and older server versions will return 415.
 

@@ -44,8 +44,11 @@ class GenerateMusicRequest(BaseModel):
     caption: str = Field(default="", description="Text caption describing the music")
     lyrics: str = Field(default="", description="Lyric text")
 
-    # Match feishu bot semantics: `dit` (metas only) vs `llm_dit` (metas + audio codes)
-    infer_type: Optional[Literal["dit", "llm_dit"]] = None
+    # New API semantics:
+    # - thinking=True: use 5Hz LM to generate audio codes (lm-dit behavior)
+    # - thinking=False: do not use LM to generate codes (dit behavior)
+    # Regardless of thinking, if some metas are missing, server may use LM to fill them.
+    thinking: bool = False
 
     bpm: Optional[int] = None
     key_scale: str = ""
@@ -77,8 +80,7 @@ class GenerateMusicRequest(BaseModel):
     audio_format: str = "mp3"
     use_tiled_decode: bool = True
 
-    # 5Hz LM generation (server-side, like gradio's generate_lm_hints_wrapper)
-    use_5hz_lm: bool = False
+    # 5Hz LM (server-side): used for metadata completion and (when thinking=True) codes generation.
     lm_model_path: Optional[str] = None  # e.g. "acestep-5Hz-lm-0.6B"
     lm_backend: Literal["vllm", "pt"] = "vllm"
 
@@ -99,15 +101,6 @@ _DEFAULT_DIT_INSTRUCTION = "Fill the audio semantic mask based on the given cond
 _DEFAULT_LM_INSTRUCTION = "Generate audio semantic tokens based on the given conditions:"
 
 
-def _normalize_infer_type(v: Any) -> Optional[str]:
-    s = str(v or "").strip().lower()
-    if not s:
-        return None
-    if s in {"dit", "llm_dit"}:
-        return s
-    return None
-
-
 class CreateJobResponse(BaseModel):
     job_id: str
     status: JobStatus
@@ -123,7 +116,7 @@ class JobResult(BaseModel):
     status_message: str = ""
     seed_value: str = ""
 
-    # 5Hz LM metadata (present when `use_5hz_lm=true` and server generates codes)
+    # 5Hz LM metadata (present when server invoked LM)
     # Keep a raw-ish dict for clients that expect a `metas` object.
     metas: Dict[str, Any] = Field(default_factory=dict)
     bpm: Optional[int] = None
@@ -539,13 +532,7 @@ def create_app() -> FastAPI:
                 time_sig_val = req.time_signature
                 audio_duration_val = req.audio_duration
 
-                # Infer type semantics: `dit` => metas only, `llm_dit` => metas + audio codes.
-                # Default to llm_dit only when we actually have (or will generate) codes.
-                explicit_infer = (req.infer_type or "").strip().lower() in {"dit", "llm_dit"}
-                infer_type = (req.infer_type or "").strip().lower()
-                if infer_type not in {"dit", "llm_dit"}:
-                    has_codes = bool(audio_code_string and str(audio_code_string).strip())
-                    infer_type = "llm_dit" if (req.use_5hz_lm or has_codes) else "dit"
+                thinking = bool(getattr(req, "thinking", False))
 
                 # If LM-generated code hints are used, a too-strong cover strength can suppress lyric/vocal conditioning.
                 # We keep backward compatibility: only auto-adjust when user didn't override (still at default 1.0).
@@ -562,7 +549,16 @@ def create_app() -> FastAPI:
                         effective_batch_size = 1
                 effective_batch_size = max(1, int(effective_batch_size))
 
-                if req.use_5hz_lm and not (audio_code_string and str(audio_code_string).strip()):
+                has_codes = bool(audio_code_string and str(audio_code_string).strip())
+                need_lm_codes = bool(thinking) and (not has_codes)
+                need_lm_metas = (
+                    (bpm_val is None)
+                    or (not (key_scale_val or "").strip())
+                    or (not (time_sig_val or "").strip())
+                    or (audio_duration_val is None)
+                )
+
+                if need_lm_metas or need_lm_codes:
                     # Lazy init 5Hz LM once
                     with app.state._llm_init_lock:
                         if getattr(app.state, "_llm_initialized", False) is False and getattr(app.state, "_llm_init_error", None) is None:
@@ -590,87 +586,81 @@ def create_app() -> FastAPI:
                                 app.state._llm_initialized = True
 
                     if getattr(app.state, "_llm_init_error", None):
-                        raise RuntimeError(f"5Hz LM init failed: {app.state._llm_init_error}")
+                        # If codes generation is required, fail hard.
+                        if need_lm_codes:
+                            raise RuntimeError(f"5Hz LM init failed: {app.state._llm_init_error}")
+                        # Otherwise, skip LM best-effort (fallback to default/meta-less behavior)
+                    else:
+                        lm_infer = "llm_dit" if need_lm_codes else "dit"
 
-                    def _lm_call() -> tuple[Dict[str, Any], str, str]:
-                        return llm.generate_with_stop_condition(
-                            caption=req.caption,
-                            lyrics=req.lyrics,
-                            infer_type=infer_type,
-                            temperature=float(req.lm_temperature),
-                            cfg_scale=max(1.0, float(req.lm_cfg_scale)),
-                            negative_prompt=str(req.lm_negative_prompt or "NO USER INPUT"),
-                            top_k=_normalize_optional_int(req.lm_top_k),
-                            top_p=_normalize_optional_float(req.lm_top_p),
-                            repetition_penalty=float(req.lm_repetition_penalty),
-                        )
+                        def _lm_call() -> tuple[Dict[str, Any], str, str]:
+                            return llm.generate_with_stop_condition(
+                                caption=req.caption,
+                                lyrics=req.lyrics,
+                                infer_type=lm_infer,
+                                temperature=float(req.lm_temperature),
+                                cfg_scale=max(1.0, float(req.lm_cfg_scale)),
+                                negative_prompt=str(req.lm_negative_prompt or "NO USER INPUT"),
+                                top_k=_normalize_optional_int(req.lm_top_k),
+                                top_p=_normalize_optional_float(req.lm_top_p),
+                                repetition_penalty=float(req.lm_repetition_penalty),
+                            )
 
-                    meta, codes, status = _lm_call()
+                        meta, codes, status = _lm_call()
 
-                    if infer_type == "llm_dit":
-                        if not codes:
-                            raise RuntimeError(f"5Hz LM generation failed: {status}")
+                        if need_lm_codes:
+                            if not codes:
+                                raise RuntimeError(f"5Hz LM generation failed: {status}")
 
-                        # LM once per job; rely on DiT seeds for batch diversity.
-                        # For convenience, replicate the same codes across the batch.
-                        if effective_batch_size > 1:
-                            # use the same codes for all in the batch
-                            audio_code_string = [codes] * effective_batch_size
+                            # LM once per job; rely on DiT seeds for batch diversity.
+                            # For convenience, replicate the same codes across the batch.
+                            if effective_batch_size > 1:
+                                audio_code_string = [codes] * effective_batch_size
+                            else:
+                                audio_code_string = codes
 
-                            # If needed in future: call LM multiple times for more diverse codes.
-                            # codes_list: list[str] = [codes]
-                            # for _ in range(effective_batch_size - 1):
-                            #     _m2, _c2, _s2 = _lm_call()
-                            #     if not _c2:
-                            #         raise RuntimeError(f"5Hz LM generation failed: {_s2}")
-                            #     codes_list.append(_c2)
-                            # audio_code_string = codes_list
-                        else:
-                            audio_code_string = codes
+                        # Always expose LM metas when we invoked LM (even if user already set some fields).
+                        lm_fields = {
+                            "metas": _normalize_metas(meta),
+                            **_extract_lm_fields(meta),
+                        }
 
-                    lm_fields = {
-                        "metas": _normalize_metas(meta),
-                        **_extract_lm_fields(meta),
-                    }
-                    bpm_val, key_scale_val, time_sig_val, audio_duration_val = _maybe_fill_from_metadata(req, meta)
+                        # Fill only missing fields (user-provided values win)
+                        bpm_val, key_scale_val, time_sig_val, audio_duration_val = _maybe_fill_from_metadata(req, meta)
 
-                    # If user provided long lyrics but LM didn't provide a usable duration, estimate a longer duration.
-                    if infer_type == "llm_dit" and audio_duration_val is None and (req.audio_duration is None):
-                        est = _estimate_duration_from_lyrics(req.lyrics)
-                        if est is not None:
-                            audio_duration_val = est
+                        # If user provided lyrics but LM didn't provide a usable duration, estimate a longer duration.
+                        if audio_duration_val is None and (req.audio_duration is None):
+                            est = _estimate_duration_from_lyrics(req.lyrics)
+                            if est is not None:
+                                audio_duration_val = est
 
-                    # Optional: auto-tune LM cover strength (opt-in) to avoid suppressing lyric/vocal conditioning.
-                    if infer_type == "llm_dit" and audio_cover_strength_val >= 0.999 and (req.lyrics or "").strip():
-                        tuned = os.getenv("ACESTEP_LM_COVER_STRENGTH")
-                        if tuned is not None and tuned.strip() != "":
-                            audio_cover_strength_val = float(tuned)
+                        # Optional: auto-tune LM cover strength (opt-in) to avoid suppressing lyric/vocal conditioning.
+                        if thinking and audio_cover_strength_val >= 0.999 and (req.lyrics or "").strip():
+                            tuned = os.getenv("ACESTEP_LM_COVER_STRENGTH")
+                            if tuned is not None and tuned.strip() != "":
+                                audio_cover_strength_val = float(tuned)
 
-                # Align behavior with feishu bot:
-                # - dit: metas only (ignore audio codes), keep text2music.
-                # - llm_dit: metas + audio codes, run in cover mode with LM instruction.
+                # Align behavior:
+                # - thinking=False: metas only (ignore audio codes), keep text2music.
+                # - thinking=True: metas + audio codes, run in cover mode with LM instruction.
                 instruction_val = req.instruction
                 task_type_val = (req.task_type or "").strip() or "text2music"
 
-                if infer_type == "dit":
+                if not thinking:
                     audio_code_string = ""
                     if task_type_val == "cover":
                         task_type_val = "text2music"
                     if (instruction_val or "").strip() in {"", _DEFAULT_LM_INSTRUCTION}:
                         instruction_val = _DEFAULT_DIT_INSTRUCTION
 
-                if infer_type == "llm_dit":
+                if thinking:
                     task_type_val = "cover"
                     if (instruction_val or "").strip() in {"", _DEFAULT_DIT_INSTRUCTION}:
                         instruction_val = _DEFAULT_LM_INSTRUCTION
 
                     if not (audio_code_string and str(audio_code_string).strip()):
-                        if explicit_infer or req.use_5hz_lm:
-                            raise RuntimeError("llm_dit requires non-empty audio codes: provide 'audio_code_string' or set 'use_5hz_lm=true'.")
-                        # If not explicitly requested, fall back to dit semantics.
-                        infer_type = "dit"
-                        task_type_val = "text2music"
-                        instruction_val = _DEFAULT_DIT_INSTRUCTION
+                        # thinking=True requires codes generation.
+                        raise RuntimeError("thinking=true requires non-empty audio codes (LM generation failed).")
 
                 first, second, paths, gen_info, status_msg, seed_value, *_ = h.generate_music(
                     captions=req.caption,
@@ -779,7 +769,7 @@ def create_app() -> FastAPI:
             return GenerateMusicRequest(
                 caption=str(get("caption", "") or ""),
                 lyrics=str(get("lyrics", "") or ""),
-                infer_type=_normalize_infer_type(get("infer_type")),
+                thinking=_to_bool(get("thinking"), False),
                 bpm=_to_int(get("bpm"), None),
                 key_scale=str(get("key_scale", "") or ""),
                 time_signature=str(get("time_signature", "") or ""),
@@ -803,8 +793,6 @@ def create_app() -> FastAPI:
                 cfg_interval_end=_to_float(get("cfg_interval_end"), 1.0) or 1.0,
                 audio_format=str(get("audio_format", "mp3") or "mp3"),
                 use_tiled_decode=_to_bool(get("use_tiled_decode"), True),
-
-                use_5hz_lm=_to_bool(get("use_5hz_lm"), False),
                 lm_model_path=str(get("lm_model_path") or "").strip() or None,
                 lm_backend=str(get("lm_backend", "vllm") or "vllm"),
                 lm_temperature=_to_float(get("lm_temperature"), _LM_DEFAULT_TEMPERATURE) or _LM_DEFAULT_TEMPERATURE,
