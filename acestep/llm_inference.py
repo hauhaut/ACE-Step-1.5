@@ -72,18 +72,35 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         tokenizer: AutoTokenizer,
         enabled: bool = True,
         debug: bool = False,
+        genres_vocab_path: Optional[str] = None,
+        skip_genres: bool = True,
     ):
         """
         Initialize the constrained logits processor.
+        
+        This processor should be initialized once when loading the LLM and reused
+        for all generations. Use update_caption() before each generation to update
+        the caption-based genre filtering.
         
         Args:
             tokenizer: The tokenizer to use for encoding/decoding
             enabled: Whether to enable constrained decoding
             debug: Whether to print debug information
+            genres_vocab_path: Path to genres vocabulary file (one genre per line)
+                              If None, defaults to "acestep/genres_vocab.txt"
+            skip_genres: Whether to skip genres generation in metadata (default True)
         """
         self.tokenizer = tokenizer
         self.enabled = enabled
         self.debug = debug
+        self.skip_genres = skip_genres
+        self.caption: Optional[str] = None  # Set via update_caption() before each generation
+        
+        # Temperature settings for different generation phases (set per-generation)
+        # If set, the processor will apply temperature scaling (divide logits by temperature)
+        # Note: Set base sampler temperature to 1.0 when using processor-based temperature
+        self.metadata_temperature: Optional[float] = None
+        self.codes_temperature: Optional[float] = None
         
         # Current state
         self.state = FSMState.THINK_TAG
@@ -92,6 +109,23 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         
         # Pre-compute token IDs for efficiency
         self._precompute_tokens()
+        
+        # Genres vocabulary for constrained decoding
+        self.genres_vocab_path = genres_vocab_path or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "genres_vocab.txt"
+        )
+        self.genres_vocab: List[str] = []  # Full vocab
+        self.genres_vocab_mtime: float = 0.0
+        self.genres_trie: Dict = {}  # Trie for full vocab (fallback)
+        self.caption_genres_trie: Dict = {}  # Trie for caption-matched genres (priority)
+        self.caption_matched_genres: List[str] = []  # Genres matched from caption
+        self._char_to_tokens: Dict[str, set] = {}  # Precomputed char -> token IDs mapping
+        
+        # Precompute token mappings once (O(vocab_size), runs once at init)
+        self._precompute_char_token_mapping()
+        self._load_genres_vocab()
+        
+        # Note: Caption-based genre filtering is initialized via update_caption() before each generation
         
         # Field definitions
         self.field_specs = {
@@ -117,7 +151,11 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             FSMState.THINK_END_TAG: "</think>",
         }
         
-        # State transitions
+        # State transitions - build dynamically based on skip_genres
+        self._build_state_transitions()
+    
+    def _build_state_transitions(self):
+        """Build state transition map based on skip_genres setting."""
         self.next_state = {
             FSMState.THINK_TAG: FSMState.NEWLINE_AFTER_THINK,
             FSMState.NEWLINE_AFTER_THINK: FSMState.BPM_NAME,
@@ -126,10 +164,6 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             FSMState.NEWLINE_AFTER_BPM: FSMState.DURATION_NAME,
             FSMState.DURATION_NAME: FSMState.DURATION_VALUE,
             FSMState.DURATION_VALUE: FSMState.NEWLINE_AFTER_DURATION,
-            FSMState.NEWLINE_AFTER_DURATION: FSMState.GENRES_NAME,
-            FSMState.GENRES_NAME: FSMState.GENRES_VALUE,
-            FSMState.GENRES_VALUE: FSMState.NEWLINE_AFTER_GENRES,
-            FSMState.NEWLINE_AFTER_GENRES: FSMState.KEYSCALE_NAME,
             FSMState.KEYSCALE_NAME: FSMState.KEYSCALE_VALUE,
             FSMState.KEYSCALE_VALUE: FSMState.NEWLINE_AFTER_KEYSCALE,
             FSMState.NEWLINE_AFTER_KEYSCALE: FSMState.TIMESIG_NAME,
@@ -139,6 +173,21 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             FSMState.THINK_END_TAG: FSMState.CODES_GENERATION,
             FSMState.CODES_GENERATION: FSMState.COMPLETED,
         }
+        
+        if self.skip_genres:
+            # Skip genres: NEWLINE_AFTER_DURATION -> KEYSCALE_NAME directly
+            self.next_state[FSMState.NEWLINE_AFTER_DURATION] = FSMState.KEYSCALE_NAME
+        else:
+            # Include genres in the flow
+            self.next_state[FSMState.NEWLINE_AFTER_DURATION] = FSMState.GENRES_NAME
+            self.next_state[FSMState.GENRES_NAME] = FSMState.GENRES_VALUE
+            self.next_state[FSMState.GENRES_VALUE] = FSMState.NEWLINE_AFTER_GENRES
+            self.next_state[FSMState.NEWLINE_AFTER_GENRES] = FSMState.KEYSCALE_NAME
+    
+    def set_skip_genres(self, skip: bool):
+        """Set whether to skip genres generation and rebuild state transitions."""
+        self.skip_genres = skip
+        self._build_state_transitions()
     
     def _precompute_tokens(self):
         """Pre-compute commonly used token IDs for efficiency."""
@@ -189,12 +238,355 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         
         # Vocab size
         self.vocab_size = len(self.tokenizer)
+        
+        # Comma token for multi-genre support
+        comma_tokens = self.tokenizer.encode(",", add_special_tokens=False)
+        self.comma_token = comma_tokens[-1] if comma_tokens else None
+    
+    def _load_genres_vocab(self):
+        """
+        Load genres vocabulary from file. Supports hot reload by checking file mtime.
+        File format: one genre per line, lines starting with # are comments.
+        """
+        if not os.path.exists(self.genres_vocab_path):
+            if self.debug:
+                logger.debug(f"Genres vocab file not found: {self.genres_vocab_path}")
+            return
+        
+        try:
+            mtime = os.path.getmtime(self.genres_vocab_path)
+            if mtime <= self.genres_vocab_mtime:
+                return  # File hasn't changed
+            
+            with open(self.genres_vocab_path, 'r', encoding='utf-8') as f:
+                genres = []
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        genres.append(line.lower())
+                
+                self.genres_vocab = genres
+                self.genres_vocab_mtime = mtime
+                self._build_genres_trie()
+                
+                if self.debug:
+                    logger.debug(f"Loaded {len(self.genres_vocab)} genres from {self.genres_vocab_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load genres vocab: {e}")
+    
+    def _build_genres_trie(self):
+        """
+        Build a trie (prefix tree) from genres vocabulary for efficient prefix matching.
+        Each node is a dict with:
+          - '_end': True if this node represents a complete genre
+          - other keys: next characters in the trie
+        """
+        self.genres_trie = {}
+        
+        for genre in self.genres_vocab:
+            node = self.genres_trie
+            for char in genre:
+                if char not in node:
+                    node[char] = {}
+                node = node[char]
+            node['_end'] = True  # Mark end of a complete genre
+        
+        if self.debug:
+            logger.debug(f"Built genres trie with {len(self.genres_vocab)} entries")
+    
+    def _extract_caption_genres(self, caption: str):
+        """
+        Extract genres from the user's caption that match entries in the vocabulary.
+        This creates a smaller trie for faster and more relevant genre generation.
+        
+        Strategy (optimized - O(words * max_genre_len) instead of O(vocab_size)):
+        1. Extract words/phrases from caption
+        2. For each word, use trie to find all vocab entries that START with this word
+        3. Build a separate trie from matched genres
+        """
+        if not caption or not self.genres_vocab:
+            return
+        
+        caption_lower = caption.lower()
+        matched_genres = set()
+        
+        # Extract words from caption (split by common delimiters)
+        import re
+        words = re.split(r'[,\s\-_/\\|]+', caption_lower)
+        words = [w.strip() for w in words if w.strip() and len(w.strip()) >= 2]
+        
+        # For each word, find genres in trie that start with this word
+        for word in words:
+            # Find all genres starting with this word using trie traversal
+            node = self._get_genres_trie_node(word)
+            if node is not None:
+                # Collect all complete genres under this node
+                self._collect_complete_genres(node, word, matched_genres)
+        
+        # Also check if any word appears as a substring in short genres (< 20 chars)
+        # This is a quick check for common single-word genres
+        genres_set = set(self.genres_vocab)
+        for word in words:
+            if word in genres_set:
+                matched_genres.add(word)
+        
+        if not matched_genres:
+            if self.debug:
+                logger.debug(f"No genres matched in caption, using full vocab")
+            return
+        
+        # Build a trie from matched genres
+        self.caption_matched_genres = list(matched_genres)
+        self.caption_genres_trie = {}
+        
+        for genre in matched_genres:
+            node = self.caption_genres_trie
+            for char in genre:
+                if char not in node:
+                    node[char] = {}
+                node = node[char]
+            node['_end'] = True
+        
+        if self.debug:
+            logger.debug(f"Matched {len(matched_genres)} genres from caption: {list(matched_genres)[:5]}...")
+    
+    def _collect_complete_genres(self, node: Dict, prefix: str, result: set, max_depth: int = 50):
+        """
+        Recursively collect all complete genres under a trie node.
+        Limited depth to avoid too many matches.
+        """
+        if max_depth <= 0:
+            return
+        
+        if node.get('_end', False):
+            result.add(prefix)
+        
+        # Limit total collected genres to avoid slowdown
+        if len(result) >= 100:
+            return
+        
+        for char, child_node in node.items():
+            if char not in ('_end', '_tokens'):
+                self._collect_complete_genres(child_node, prefix + char, result, max_depth - 1)
+    
+    def _precompute_char_token_mapping(self):
+        """
+        Precompute mapping from characters to token IDs and token decoded texts.
+        This allows O(1) lookup instead of calling tokenizer.encode()/decode() at runtime.
+        
+        Time complexity: O(vocab_size) - runs once during initialization
+        
+        Note: Many subword tokenizers (like Qwen) add space prefixes to tokens.
+        We need to handle both the raw first char and the first non-space char.
+        """
+        self._char_to_tokens: Dict[str, set] = {}
+        self._token_to_text: Dict[int, str] = {}  # Precomputed decoded text for each token
+        
+        # For each token in vocabulary, get its decoded text
+        for token_id in range(self.vocab_size):
+            try:
+                text = self.tokenizer.decode([token_id])
+                
+                if not text:
+                    continue
+                
+                # Store the decoded text (normalized to lowercase)
+                # Keep leading spaces for proper concatenation (e.g., " rock" in "pop rock")
+                # Only rstrip trailing whitespace, unless it's a pure whitespace token
+                text_lower = text.lower()
+                if text_lower.strip():  # Has non-whitespace content
+                    normalized_text = text_lower.rstrip()
+                else:  # Pure whitespace token
+                    normalized_text = " "  # Normalize to single space
+                self._token_to_text[token_id] = normalized_text
+                
+                # Map first character (including space) to this token
+                first_char = text[0].lower()
+                if first_char not in self._char_to_tokens:
+                    self._char_to_tokens[first_char] = set()
+                self._char_to_tokens[first_char].add(token_id)
+                
+                # Also map first non-space character to this token
+                # This handles tokenizers that add space prefixes (e.g., " pop" -> maps to 'p')
+                stripped_text = text.lstrip()
+                if stripped_text and stripped_text != text:
+                    first_nonspace_char = stripped_text[0].lower()
+                    if first_nonspace_char not in self._char_to_tokens:
+                        self._char_to_tokens[first_nonspace_char] = set()
+                    self._char_to_tokens[first_nonspace_char].add(token_id)
+                    
+            except Exception:
+                continue
+        
+        if self.debug:
+            logger.debug(f"Precomputed char->token mapping for {len(self._char_to_tokens)} unique characters")
+    
+    def _try_reload_genres_vocab(self):
+        """Check if genres vocab file has been updated and reload if necessary."""
+        if not os.path.exists(self.genres_vocab_path):
+            return
+        
+        try:
+            mtime = os.path.getmtime(self.genres_vocab_path)
+            if mtime > self.genres_vocab_mtime:
+                self._load_genres_vocab()
+        except Exception:
+            pass  # Ignore errors during hot reload check
+    
+    def _get_genres_trie_node(self, prefix: str) -> Optional[Dict]:
+        """
+        Get the trie node for a given prefix.
+        Returns None if the prefix is not valid (no genres start with this prefix).
+        """
+        node = self.genres_trie
+        for char in prefix.lower():
+            if char not in node:
+                return None
+            node = node[char]
+        return node
+    
+    def _is_complete_genre(self, text: str) -> bool:
+        """Check if the given text is a complete genre in the vocabulary."""
+        node = self._get_genres_trie_node(text.strip())
+        return node is not None and node.get('_end', False)
+    
+    def _get_trie_node_from_trie(self, trie: Dict, prefix: str) -> Optional[Dict]:
+        """Get a trie node from a specific trie (helper for caption vs full trie)."""
+        node = trie
+        for char in prefix.lower():
+            if char not in node:
+                return None
+            node = node[char]
+        return node
+    
+    def _get_allowed_genres_tokens(self) -> List[int]:
+        """
+        Get allowed tokens for genres field based on trie matching.
+        
+        The entire genres string (including commas) must match a complete entry in the vocab.
+        For example, if vocab contains "pop, rock, jazz", the generated string must exactly
+        match that entry - we don't treat commas as separators for individual genres.
+        
+        Strategy:
+        1. If caption-matched genres exist, use that smaller trie first (faster + more relevant)
+        2. If no caption matches or prefix not in caption trie, fallback to full vocab trie
+        3. Get valid next characters from current trie node
+        4. For each candidate token, verify the full decoded text forms a valid trie prefix
+        """
+        if not self.genres_vocab:
+            # No vocab loaded, allow all except newline if empty
+            return []
+        
+        # Use the full accumulated value (don't split by comma - treat as single entry)
+        accumulated = self.accumulated_value.lower()
+        current_genre_prefix = accumulated.strip()
+        
+        # Determine which trie to use: caption-matched (priority) or full vocab (fallback)
+        use_caption_trie = False
+        current_node = None
+        
+        # Try caption-matched trie first if available
+        if self.caption_genres_trie:
+            if current_genre_prefix == "":
+                current_node = self.caption_genres_trie
+                use_caption_trie = True
+            else:
+                current_node = self._get_trie_node_from_trie(self.caption_genres_trie, current_genre_prefix)
+                if current_node is not None:
+                    use_caption_trie = True
+        
+        # Fallback to full vocab trie
+        if current_node is None:
+            if current_genre_prefix == "":
+                current_node = self.genres_trie
+            else:
+                current_node = self._get_genres_trie_node(current_genre_prefix)
+        
+        if current_node is None:
+            # Invalid prefix, force newline to end
+            if self.newline_token:
+                return [self.newline_token]
+            return []
+        
+        # Get valid next characters from trie node
+        valid_next_chars = set(k for k in current_node.keys() if k not in ('_end', '_tokens'))
+        
+        # If current value is a complete genre, allow newline to end
+        is_complete = current_node.get('_end', False)
+        
+        if not valid_next_chars:
+            # No more characters to match, only allow newline if complete
+            allowed = set()
+            if is_complete and self.newline_token:
+                allowed.add(self.newline_token)
+            return list(allowed)
+        
+        # Collect candidate tokens based on first character
+        candidate_tokens = set()
+        for char in valid_next_chars:
+            if char in self._char_to_tokens:
+                candidate_tokens.update(self._char_to_tokens[char])
+        
+        # Select the appropriate trie for validation
+        active_trie = self.caption_genres_trie if use_caption_trie else self.genres_trie
+        
+        # Validate each candidate token: check if prefix + decoded_token is a valid trie prefix
+        allowed = set()
+        for token_id in candidate_tokens:
+            # Use precomputed decoded text (already normalized)
+            decoded_normalized = self._token_to_text.get(token_id, "")
+            
+            if not decoded_normalized or not decoded_normalized.strip():
+                # Token decodes to empty or only whitespace - allow if space/comma is a valid next char
+                if ' ' in valid_next_chars or ',' in valid_next_chars:
+                    allowed.add(token_id)
+                continue
+            
+            # Build new prefix by appending decoded token
+            # Handle space-prefixed tokens (e.g., " rock" from "pop rock")
+            if decoded_normalized.startswith(' ') or decoded_normalized.startswith(','):
+                # Token has leading space/comma - append directly
+                new_prefix = current_genre_prefix + decoded_normalized
+            else:
+                new_prefix = current_genre_prefix + decoded_normalized
+            
+            # Check if new_prefix is a valid prefix in the active trie
+            new_node = self._get_trie_node_from_trie(active_trie, new_prefix)
+            if new_node is not None:
+                allowed.add(token_id)
+        
+        # If current value is a complete genre, also allow newline
+        if is_complete and self.newline_token:
+            allowed.add(self.newline_token)
+        
+        return list(allowed)
     
     def reset(self):
         """Reset the processor state for a new generation."""
         self.state = FSMState.THINK_TAG
         self.position_in_state = 0
         self.accumulated_value = ""
+    
+    def update_caption(self, caption: Optional[str]):
+        """
+        Update the caption and rebuild the caption-matched genres trie.
+        Call this before each generation to prioritize genres from the new caption.
+        
+        Args:
+            caption: User's input caption. If None or empty, clears caption matching.
+        """
+        # Check for hot reload of genres vocabulary
+        self._try_reload_genres_vocab()
+        
+        self.caption = caption
+        self.caption_genres_trie = {}
+        self.caption_matched_genres = []
+        
+        if caption:
+            self._extract_caption_genres(caption)
+        
+        # Also reset FSM state for new generation
+        self.reset()
     
     def _get_allowed_tokens_for_fixed_string(self, fixed_str: str) -> List[int]:
         """
@@ -400,13 +792,14 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             scores: [batch_size, vocab_size] logits for next token
             
         Returns:
-            Modified scores with invalid tokens masked to -inf
+            Modified scores with invalid tokens masked to -inf and temperature scaling applied
         """
         if not self.enabled:
-            return scores
+            return self._apply_temperature_scaling(scores)
         
         if self.state == FSMState.COMPLETED or self.state == FSMState.CODES_GENERATION:
-            return scores  # No constraints in codes generation phase
+            # No constraints in codes generation phase, but still apply temperature
+            return self._apply_temperature_scaling(scores)
         
         batch_size = scores.shape[0]
         
@@ -414,7 +807,39 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         for b in range(batch_size):
             scores[b] = self._process_single_sequence(input_ids[b], scores[b:b+1])
         
-        return scores
+        # Apply temperature scaling after constraint masking
+        return self._apply_temperature_scaling(scores)
+    
+    def _apply_temperature_scaling(self, scores: torch.FloatTensor) -> torch.FloatTensor:
+        """
+        Apply temperature scaling based on current generation phase.
+        
+        Temperature scaling: logits = logits / temperature
+        - Lower temperature (< 1.0) makes distribution sharper (more deterministic)
+        - Higher temperature (> 1.0) makes distribution flatter (more diverse)
+        
+        Args:
+            scores: [batch_size, vocab_size] logits
+            
+        Returns:
+            Temperature-scaled logits
+        """
+        # Determine which temperature to use based on current state
+        if self.state == FSMState.CODES_GENERATION or self.state == FSMState.COMPLETED:
+            temperature = self.codes_temperature
+        else:
+            temperature = self.metadata_temperature
+        
+        # If no temperature is set for this phase, return scores unchanged
+        if temperature is None:
+            return scores
+        
+        # Avoid division by zero
+        if temperature <= 0:
+            temperature = 1e-6
+        
+        # Apply temperature scaling
+        return scores / temperature
     
     def _process_single_sequence(
         self,
@@ -482,17 +907,38 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             scores = scores + mask
         
         elif self.state == FSMState.GENRES_VALUE:
-            if self._should_end_text_field(scores):
+            # Try to hot-reload genres vocab if file has changed
+            self._try_reload_genres_vocab()
+            
+            # Get allowed tokens based on genres vocabulary
+            allowed = self._get_allowed_genres_tokens()
+            
+            if allowed:
+                # Use vocabulary-constrained decoding
+                for t in allowed:
+                    mask[0, t] = 0
+                scores = scores + mask
+            elif self.genres_vocab:
+                # Vocab is loaded but no valid continuation found
+                # Force newline to end the field
                 if self.newline_token:
                     mask[0, self.newline_token] = 0
-                    self._transition_to_next_state()
+                    if self.debug:
+                        logger.debug(f"No valid genre continuation for '{self.accumulated_value}', forcing newline")
                 scores = scores + mask
             else:
-                # Allow any token except newline if we don't have content yet
-                if not self.accumulated_value.strip():
+                # Fallback: no vocab loaded, use probability-based ending
+                if self._should_end_text_field(scores):
                     if self.newline_token:
-                        scores[0, self.newline_token] = float('-inf')
-                # Otherwise, don't constrain (allow any token including newline)
+                        mask[0, self.newline_token] = 0
+                        self._transition_to_next_state()
+                    scores = scores + mask
+                else:
+                    # Allow any token except newline if we don't have content yet
+                    if not self.accumulated_value.strip():
+                        if self.newline_token:
+                            scores[0, self.newline_token] = float('-inf')
+                    # Otherwise, don't constrain (fallback behavior)
         
         elif self.state == FSMState.KEYSCALE_VALUE:
             if self._is_keyscale_complete():
@@ -591,6 +1037,8 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
 
 class LLMHandler:
     """5Hz LM Handler for audio code generation"""
+
+    STOP_REASONING_TAG = "</think>"
     
     def __init__(self):
         """Initialize LLMHandler with default values"""
@@ -602,6 +1050,9 @@ class LLMHandler:
         self.device = "cpu"
         self.dtype = torch.float32
         self.offload_to_cpu = False
+        
+        # Shared constrained decoding processor (initialized once when LLM is loaded)
+        self.constrained_processor: Optional[MetadataConstrainedLogitsProcessor] = None
     
     def get_available_5hz_lm_models(self) -> List[str]:
         """Scan and return all model directory names starting with 'acestep-5Hz-lm-'"""
@@ -689,6 +1140,16 @@ class LLMHandler:
             llm_tokenizer = AutoTokenizer.from_pretrained(full_lm_model_path, use_fast=True)
             logger.info(f"5Hz LM tokenizer loaded successfully in {time.time() - start_time:.2f} seconds")
             self.llm_tokenizer = llm_tokenizer
+            
+            # Initialize shared constrained decoding processor (one-time initialization)
+            logger.info("Initializing constrained decoding processor...")
+            processor_start = time.time()
+            self.constrained_processor = MetadataConstrainedLogitsProcessor(
+                tokenizer=self.llm_tokenizer,
+                enabled=True,
+                debug=False,
+            )
+            logger.info(f"Constrained processor initialized in {time.time() - processor_start:.2f} seconds")
             
             # Initialize based on user-selected backend
             if backend == "vllm":
@@ -795,13 +1256,15 @@ class LLMHandler:
         repetition_penalty: float = 1.0,
         use_constrained_decoding: bool = True,
         constrained_decoding_debug: bool = False,
+        metadata_temperature: Optional[float] = 0.85,
+        codes_temperature: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM with vllm backend
         
         Args:
             caption: Text caption for music generation
             lyrics: Lyrics for music generation
-            temperature: Sampling temperature
+            temperature: Base sampling temperature (used if phase-specific temps not set)
             cfg_scale: CFG scale (>1.0 enables CFG)
             negative_prompt: Negative prompt for CFG
             top_k: Top-k sampling parameter
@@ -809,6 +1272,10 @@ class LLMHandler:
             repetition_penalty: Repetition penalty
             use_constrained_decoding: Whether to use FSM-based constrained decoding
             constrained_decoding_debug: Whether to print debug info for constrained decoding
+            metadata_temperature: Temperature for metadata generation (lower = more accurate)
+                                  If None, uses base temperature
+            codes_temperature: Temperature for audio codes generation (higher = more diverse)
+                               If None, uses base temperature
         """
         try:
             from nanovllm import SamplingParams
@@ -816,20 +1283,28 @@ class LLMHandler:
             formatted_prompt = self.build_formatted_prompt(caption, lyrics)
             logger.debug(f"[debug] formatted_prompt: {formatted_prompt}")
             
-            # Create constrained decoding processor if enabled
+            # Determine effective temperature for sampler
+            # If using phase-specific temperatures, set sampler temp to 1.0 (processor handles it)
+            use_phase_temperatures = metadata_temperature is not None or codes_temperature is not None
+            effective_sampler_temp = 1.0 if use_phase_temperatures else temperature
+            
+            # Use shared constrained decoding processor if enabled
             constrained_processor = None
             update_state_fn = None
-            if use_constrained_decoding:
-                constrained_processor = MetadataConstrainedLogitsProcessor(
-                    tokenizer=self.llm_tokenizer,
-                    enabled=True,
-                    debug=constrained_decoding_debug,
-                )
+            if use_constrained_decoding or use_phase_temperatures:
+                # Use shared processor, just update caption and settings
+                self.constrained_processor.enabled = use_constrained_decoding
+                self.constrained_processor.debug = constrained_decoding_debug
+                self.constrained_processor.metadata_temperature = metadata_temperature if use_phase_temperatures else None
+                self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
+                self.constrained_processor.update_caption(caption)
+                
+                constrained_processor = self.constrained_processor
                 update_state_fn = constrained_processor.update_state
             
             sampling_params = SamplingParams(
                 max_tokens=self.max_model_len-64, 
-                temperature=temperature, 
+                temperature=effective_sampler_temp, 
                 cfg_scale=cfg_scale,
                 top_k=top_k,
                 top_p=top_p,
@@ -880,21 +1355,31 @@ class LLMHandler:
         repetition_penalty: float,
         use_constrained_decoding: bool = True,
         constrained_decoding_debug: bool = False,
+        metadata_temperature: Optional[float] = 0.85,
+        codes_temperature: Optional[float] = None,
     ) -> str:
         """Shared vllm path: accept prebuilt formatted prompt and return text."""
         from nanovllm import SamplingParams
 
-        # Create constrained processor if enabled
+        # Determine effective temperature for sampler
+        use_phase_temperatures = metadata_temperature is not None or codes_temperature is not None
+        effective_sampler_temp = 1.0 if use_phase_temperatures else temperature
+
+        # Use shared constrained processor if enabled
         constrained_processor = None
-        if use_constrained_decoding:
-            constrained_processor = MetadataConstrainedLogitsProcessor(
-                tokenizer=self.llm_tokenizer,
-                debug=constrained_decoding_debug,
-            )
+        if use_constrained_decoding or use_phase_temperatures:
+            # Use shared processor, just update caption and settings
+            self.constrained_processor.enabled = use_constrained_decoding
+            self.constrained_processor.debug = constrained_decoding_debug
+            self.constrained_processor.metadata_temperature = metadata_temperature if use_phase_temperatures else None
+            self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
+            self.constrained_processor.update_caption(formatted_prompt)  # Use formatted prompt for genre extraction
+            
+            constrained_processor = self.constrained_processor
 
         sampling_params = SamplingParams(
             max_tokens=self.max_model_len - 64,
-            temperature=temperature,
+            temperature=effective_sampler_temp,
             cfg_scale=cfg_scale,
             top_k=top_k,
             top_p=top_p,
@@ -940,13 +1425,15 @@ class LLMHandler:
         repetition_penalty: float = 1.0,
         use_constrained_decoding: bool = True,
         constrained_decoding_debug: bool = False,
+        metadata_temperature: Optional[float] = 0.85,
+        codes_temperature: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM with PyTorch backend
         
         Args:
             caption: Text caption for music generation
             lyrics: Lyrics for music generation
-            temperature: Sampling temperature
+            temperature: Base sampling temperature (used if phase-specific temps not set)
             cfg_scale: CFG scale (>1.0 enables CFG)
             negative_prompt: Negative prompt for CFG
             top_k: Top-k sampling parameter
@@ -954,6 +1441,10 @@ class LLMHandler:
             repetition_penalty: Repetition penalty
             use_constrained_decoding: Whether to use FSM-based constrained decoding
             constrained_decoding_debug: Whether to print debug info for constrained decoding
+            metadata_temperature: Temperature for metadata generation (lower = more accurate)
+                                  If None, uses base temperature
+            codes_temperature: Temperature for audio codes generation (higher = more diverse)
+                               If None, uses base temperature
         """
         try:
             formatted_prompt = self.build_formatted_prompt(caption, lyrics)
@@ -992,14 +1483,21 @@ class LLMHandler:
 
                 streamer = TqdmTokenStreamer(total=max_new_tokens)
 
-                # Create constrained decoding processor if enabled
+                # Determine if using phase-specific temperatures
+                use_phase_temperatures = metadata_temperature is not None or codes_temperature is not None
+                effective_temperature = 1.0 if use_phase_temperatures else temperature
+
+                # Use shared constrained decoding processor if enabled
                 constrained_processor = None
-                if use_constrained_decoding:
-                    constrained_processor = MetadataConstrainedLogitsProcessor(
-                        tokenizer=self.llm_tokenizer,
-                        enabled=True,
-                        debug=constrained_decoding_debug,
-                    )
+                if use_constrained_decoding or use_phase_temperatures:
+                    # Use shared processor, just update caption and settings
+                    self.constrained_processor.enabled = use_constrained_decoding
+                    self.constrained_processor.debug = constrained_decoding_debug
+                    self.constrained_processor.metadata_temperature = metadata_temperature if use_phase_temperatures else None
+                    self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
+                    self.constrained_processor.update_caption(caption)
+                    
+                    constrained_processor = self.constrained_processor
 
                 # Build logits processor list (only for CFG and repetition penalty)
                 logits_processor = LogitsProcessorList()
@@ -1036,7 +1534,7 @@ class LLMHandler:
                         batch_input_ids=batch_input_ids,
                         batch_attention_mask=batch_attention_mask,
                         max_new_tokens=max_new_tokens,
-                        temperature=temperature,
+                        temperature=effective_temperature,
                         cfg_scale=cfg_scale,
                         top_k=top_k,
                         top_p=top_p,
@@ -1048,8 +1546,8 @@ class LLMHandler:
                     
                     # Extract only the conditional output (first in batch)
                     outputs = outputs[0:1]  # Keep only conditional output
-                elif use_constrained_decoding:
-                    # Use custom generation loop for constrained decoding (non-CFG)
+                elif use_constrained_decoding or use_phase_temperatures:
+                    # Use custom generation loop for constrained decoding or phase temperatures (non-CFG)
                     input_ids = inputs['input_ids']
                     attention_mask = inputs.get('attention_mask', None)
                     
@@ -1057,7 +1555,7 @@ class LLMHandler:
                         input_ids=input_ids,
                         attention_mask=attention_mask,
                         max_new_tokens=max_new_tokens,
-                        temperature=temperature,
+                        temperature=effective_temperature,
                         top_k=top_k,
                         top_p=top_p,
                         repetition_penalty=repetition_penalty,
@@ -1071,8 +1569,8 @@ class LLMHandler:
                         outputs = self.llm.generate(
                             **inputs,
                             max_new_tokens=max_new_tokens,
-                            temperature=temperature if temperature > 0 else 1.0,
-                            do_sample=True if temperature > 0 else False,
+                            temperature=effective_temperature if effective_temperature > 0 else 1.0,
+                            do_sample=True if effective_temperature > 0 else False,
                             top_k=top_k if top_k is not None and top_k > 0 else None,
                             top_p=top_p if top_p is not None and 0.0 < top_p < 1.0 else None,
                             logits_processor=logits_processor if len(logits_processor) > 0 else None,
@@ -1134,13 +1632,15 @@ class LLMHandler:
             truncation=True,
         )
 
-        # Create constrained processor if enabled
+        # Use shared constrained processor if enabled
         constrained_processor = None
         if use_constrained_decoding:
-            constrained_processor = MetadataConstrainedLogitsProcessor(
-                tokenizer=self.llm_tokenizer,
-                debug=constrained_decoding_debug,
-            )
+            # Use shared processor, just update caption and settings
+            self.constrained_processor.enabled = use_constrained_decoding
+            self.constrained_processor.debug = constrained_decoding_debug
+            self.constrained_processor.update_caption(formatted_prompt)  # Use formatted prompt for genre extraction
+            
+            constrained_processor = self.constrained_processor
 
         with self._load_model_context():
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
@@ -1262,13 +1762,15 @@ class LLMHandler:
         repetition_penalty: float = 1.0,
         use_constrained_decoding: bool = True,
         constrained_decoding_debug: bool = False,
+        metadata_temperature: Optional[float] = 0.85,
+        codes_temperature: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM
         
         Args:
             caption: Text caption for music generation
             lyrics: Lyrics for music generation
-            temperature: Sampling temperature
+            temperature: Base sampling temperature (used if phase-specific temps not set)
             cfg_scale: CFG scale (>1.0 enables CFG)
             negative_prompt: Negative prompt for CFG
             top_k: Top-k sampling parameter
@@ -1276,6 +1778,10 @@ class LLMHandler:
             repetition_penalty: Repetition penalty
             use_constrained_decoding: Whether to use FSM-based constrained decoding for metadata
             constrained_decoding_debug: Whether to print debug info for constrained decoding
+            metadata_temperature: Temperature for metadata generation (lower = more accurate)
+                                  Recommended: 0.3-0.5 for accurate metadata
+            codes_temperature: Temperature for audio codes generation (higher = more diverse)
+                               Recommended: 0.7-1.0 for diverse codes
         """
         # Check if 5Hz LM is initialized
         if not hasattr(self, 'llm_initialized') or not self.llm_initialized:
@@ -1293,16 +1799,100 @@ class LLMHandler:
         
         if self.llm_backend == "vllm":
             return self.generate_with_5hz_lm_vllm(
-                caption, lyrics, temperature, cfg_scale, negative_prompt,
-                top_k, top_p, repetition_penalty,
-                use_constrained_decoding, constrained_decoding_debug
+                caption=caption, 
+                lyrics=lyrics, 
+                temperature=temperature, 
+                cfg_scale=cfg_scale, 
+                negative_prompt=negative_prompt,
+                top_k=top_k, 
+                top_p=top_p, 
+                repetition_penalty=repetition_penalty,
+                use_constrained_decoding=use_constrained_decoding, 
+                constrained_decoding_debug=constrained_decoding_debug,
+                metadata_temperature=metadata_temperature,
+                codes_temperature=codes_temperature,
             )
         else:
             return self.generate_with_5hz_lm_pt(
-                caption, lyrics, temperature, cfg_scale, negative_prompt,
-                top_k, top_p, repetition_penalty,
-                use_constrained_decoding, constrained_decoding_debug
+                caption=caption, 
+                lyrics=lyrics, 
+                temperature=temperature, 
+                cfg_scale=cfg_scale, 
+                negative_prompt=negative_prompt,
+                top_k=top_k, 
+                top_p=top_p, 
+                repetition_penalty=repetition_penalty,
+                use_constrained_decoding=use_constrained_decoding, 
+                constrained_decoding_debug=constrained_decoding_debug,
+                metadata_temperature=metadata_temperature,
+                codes_temperature=codes_temperature,
             )
+
+    def generate_with_stop_condition(
+        self,
+        caption: str,
+        lyrics: str,
+        infer_type: str,
+        temperature: float = 0.6,
+        cfg_scale: float = 1.0,
+        negative_prompt: str = "NO USER INPUT",
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        repetition_penalty: float = 1.0,
+        use_constrained_decoding: bool = True,
+        constrained_decoding_debug: bool = False,
+        metadata_temperature: Optional[float] = 0.85,
+        codes_temperature: Optional[float] = None,
+    ) -> Tuple[Dict[str, Any], str, str]:
+        """Feishu-compatible LM generation.
+
+        - infer_type='dit': stop at </think> and return metas only (no audio codes)
+        - infer_type='llm_dit': normal generation (metas + audio codes)
+        """
+        infer_type = (infer_type or "").strip().lower()
+        if infer_type not in {"dit", "llm_dit"}:
+            return {}, "", f"❌ invalid infer_type: {infer_type!r} (expected 'dit' or 'llm_dit')"
+
+        if infer_type == "llm_dit":
+            return self.generate_with_5hz_lm(
+                caption=caption,
+                lyrics=lyrics,
+                temperature=temperature,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                use_constrained_decoding=use_constrained_decoding,
+                constrained_decoding_debug=constrained_decoding_debug,
+                metadata_temperature=metadata_temperature,
+                codes_temperature=codes_temperature,
+            )
+
+        # dit: generate and truncate at reasoning end tag
+        formatted_prompt = self.build_formatted_prompt(caption, lyrics)
+        output_text, status = self.generate_from_formatted_prompt(
+            formatted_prompt,
+            cfg={
+                "temperature": temperature,
+                "cfg_scale": cfg_scale,
+                "negative_prompt": negative_prompt,
+                "top_k": top_k,
+                "top_p": top_p,
+                "repetition_penalty": repetition_penalty,
+            },
+            use_constrained_decoding=use_constrained_decoding,
+            constrained_decoding_debug=constrained_decoding_debug,
+        )
+        if not output_text:
+            return {}, "", status
+
+        if self.STOP_REASONING_TAG in output_text:
+            stop_idx = output_text.find(self.STOP_REASONING_TAG)
+            output_text = output_text[: stop_idx + len(self.STOP_REASONING_TAG)]
+
+        metadata, _audio_codes = self.parse_lm_output(output_text)
+        return metadata, "", status
 
     def build_formatted_prompt(self, caption: str, lyrics: str = "", is_negative_prompt: bool = False) -> str:
         """

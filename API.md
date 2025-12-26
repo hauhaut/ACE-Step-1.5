@@ -61,6 +61,22 @@ Suitable for passing only text parameters, or referencing audio file paths that 
 | `seed` | int | `-1` | Specify seed (when use_random_seed=false) |
 | `batch_size` | int | null | Batch generation count |
 
+**5Hz LM Parameters (Optional, server-side codes generation)**:
+
+If you want the server to generate `audio_code_string` using the 5Hz LM (equivalent to Gradio's **Generate LM Hints** button), set `use_5hz_lm=true`.
+
+| Parameter Name | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `use_5hz_lm` | bool | `false` | Enable server-side 5Hz LM code generation |
+| `lm_model_path` | string | null | 5Hz LM checkpoint dir name (e.g. `acestep-5Hz-lm-0.6B`) |
+| `lm_backend` | string | `"vllm"` | `vllm` or `pt` |
+| `lm_temperature` | float | `0.6` | Sampling temperature |
+| `lm_cfg_scale` | float | `1.0` | CFG scale (>1 enables CFG) |
+| `lm_negative_prompt` | string | `"NO USER INPUT"` | Negative prompt used by CFG |
+| `lm_top_k` | int | null | Top-k (0/null disables) |
+| `lm_top_p` | float | null | Top-p (>=1/null disables) |
+| `lm_repetition_penalty` | float | `1.0` | Repetition penalty |
+
 **Edit/Reference Audio Parameters** (requires absolute path on server):
 
 | Parameter Name | Type | Default | Description |
@@ -107,6 +123,31 @@ curl -X POST http://localhost:8001/v1/music/generate \
     "inference_steps": 16
   }'
 ```
+
+**JSON Method (server-side 5Hz LM)**:
+
+```bash
+curl -X POST http://localhost:8001/v1/music/generate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "caption": "upbeat pop song",
+    "lyrics": "Hello world",
+    "use_5hz_lm": true,
+    "lm_temperature": 0.6,
+    "lm_cfg_scale": 1.0,
+    "lm_top_k": 0,
+    "lm_top_p": 1.0,
+    "lm_repetition_penalty": 1.0
+  }'
+```
+
+When `use_5hz_lm=true` and the server generates LM codes, the job `result` will also include the following optional fields:
+
+- `bpm`
+- `duration`
+- `genres`
+- `keyscale`
+- `timesignature`
 
 > Note: If you use `curl -d` but **forget** to add `-H 'Content-Type: application/json'`, curl will default to sending `application/x-www-form-urlencoded`, and older server versions will return 415.
 

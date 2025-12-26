@@ -218,3 +218,5 @@ checkpoints.7z
 README_old.md
 discord_bot/
 feishu_bot/
+tmp*
+torchinductor_root/
