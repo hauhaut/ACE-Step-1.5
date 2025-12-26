@@ -7,7 +7,7 @@ import re
 import traceback
 import time
 from enum import Enum, auto
-from typing import Optional, Dict, Any, Tuple, List, Callable
+from typing import Optional, Dict, Any, Tuple, List, Callable, Set
 from contextlib import contextmanager
 
 import torch
@@ -101,6 +101,12 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         # Note: Set base sampler temperature to 1.0 when using processor-based temperature
         self.metadata_temperature: Optional[float] = None
         self.codes_temperature: Optional[float] = None
+        
+        # Duration constraint for codes generation
+        # 5 codes = 1 second, so target_codes = target_duration * 5
+        self.target_duration: Optional[float] = None  # User-specified duration in seconds
+        self.target_codes: Optional[int] = None  # Computed target codes count
+        self.codes_count: int = 0  # Counter for generated codes
         
         # Current state
         self.state = FSMState.THINK_TAG
@@ -242,6 +248,54 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         # Comma token for multi-genre support
         comma_tokens = self.tokenizer.encode(",", add_special_tokens=False)
         self.comma_token = comma_tokens[-1] if comma_tokens else None
+        
+        # EOS token for duration-constrained codes generation
+        self.eos_token_id = self.tokenizer.eos_token_id
+        
+        # Build valid keyscales set and prefix tree for constrained decoding
+        # 7 notes × 5 accidentals (none, #, b, ♯, ♭) × 2 modes = 70 valid combinations
+        notes = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
+        accidentals = ['', '#', 'b', '♯', '♭']  # empty + ASCII sharp/flat + Unicode sharp/flat
+        modes = ['major', 'minor']
+        
+        self.valid_keyscales = set()
+        for note in notes:
+            for acc in accidentals:
+                for mode in modes:
+                    self.valid_keyscales.add(f"{note}{acc} {mode}")
+        
+        # Build prefix tree for keyscale constrained decoding
+        self.keyscale_prefix_tree = self._build_keyscale_prefix_tree()
+    
+    def _build_keyscale_prefix_tree(self) -> Dict[str, Set[int]]:
+        """
+        Build keyscale prefix to allowed tokens mapping.
+        For each prefix of each valid keyscale, we store the set of tokens
+        that can continue to form a valid keyscale.
+        """
+        prefix_to_tokens: Dict[str, Set[int]] = {}
+        
+        for keyscale in self.valid_keyscales:
+            for i in range(len(keyscale)):
+                prefix = keyscale[:i]
+                next_char = keyscale[i]
+                # Encode the next character
+                tokens = self.tokenizer.encode(next_char, add_special_tokens=False)
+                if prefix not in prefix_to_tokens:
+                    prefix_to_tokens[prefix] = set()
+                prefix_to_tokens[prefix].update(tokens)
+        
+        # For complete keyscales, allow newline token
+        for keyscale in self.valid_keyscales:
+            if keyscale not in prefix_to_tokens:
+                prefix_to_tokens[keyscale] = set()
+            if self.newline_token:
+                prefix_to_tokens[keyscale].add(self.newline_token)
+        
+        if self.debug:
+            logger.debug(f"Built keyscale prefix tree with {len(prefix_to_tokens)} prefixes for {len(self.valid_keyscales)} valid keyscales")
+        
+        return prefix_to_tokens
     
     def _load_genres_vocab(self):
         """
@@ -566,6 +620,25 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.state = FSMState.THINK_TAG
         self.position_in_state = 0
         self.accumulated_value = ""
+        self.codes_count = 0  # Reset codes counter
+    
+    def set_target_duration(self, duration: Optional[float]):
+        """
+        Set the target duration for codes generation.
+        
+        Args:
+            duration: Target duration in seconds. If None, no duration constraint is applied.
+                     5 codes = 1 second, so target_codes = duration * 5.
+        """
+        self.target_duration = duration
+        if duration is not None and duration > 0:
+            self.target_codes = int(duration * 5)
+            if self.debug:
+                logger.debug(f"Set target duration: {duration}s -> {self.target_codes} codes")
+        else:
+            self.target_codes = None
+            if self.debug:
+                logger.debug("Target duration cleared, no duration constraint")
     
     def update_caption(self, caption: Optional[str]):
         """
@@ -702,71 +775,23 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         return newline_prob > max_other_prob
     
     def _get_allowed_keyscale_tokens(self) -> List[int]:
-        """Get allowed tokens for keyscale field based on accumulated value."""
-        # Don't use strip() - we need to track spaces properly
+        """
+        Get allowed tokens for keyscale field using prefix tree.
+        Only allows tokens that can lead to valid keyscales like:
+        - "A major", "A minor", "A# major", "Ab minor", etc.
+        """
         acc = self.accumulated_value
-        acc_stripped = acc.strip()
         
-        if not acc_stripped:
-            # First character: must be a note (A-G)
-            return list(self.note_tokens.values())
+        if acc in self.keyscale_prefix_tree:
+            return list(self.keyscale_prefix_tree[acc])
         
-        # Check if we already have a space
-        has_space = " " in acc
-        
-        # Parse what we have
-        if not has_space:
-            # No space yet
-            if len(acc_stripped) == 1 and acc_stripped.upper() in "ABCDEFG":
-                # After note: can be # ♯ b ♭ or space (for major/minor)
-                allowed = self.sharp_tokens + self.flat_tokens
-                if self.space_token:
-                    allowed.append(self.space_token)
-                return allowed
-            
-            if len(acc_stripped) >= 2 and acc_stripped[-1] in "#♯b♭":
-                # After accidental: must be space
-                return [self.space_token] if self.space_token else []
-        
-        if has_space:
-            # After space: should be major or minor
-            after_space = acc.split(" ", 1)[-1].lower()
-            
-            # Allow tokens that continue "major" or "minor"
-            allowed = []
-            for word in ["major", "minor"]:
-                if word.startswith(after_space):
-                    remaining = word[len(after_space):]
-                    if remaining:
-                        # Try to encode the next character
-                        tokens = self.tokenizer.encode(remaining[0], add_special_tokens=False)
-                        allowed.extend(tokens)
-                        # Also try encoding the whole remaining part
-                        tokens = self.tokenizer.encode(remaining, add_special_tokens=False)
-                        if tokens:
-                            allowed.append(tokens[0])
-            
-            # If after_space is exactly "major" or "minor", allow newline
-            if after_space in ["major", "minor"]:
-                if self.newline_token:
-                    allowed.append(self.newline_token)
-            
-            # If no tokens found but we have incomplete word, this is an error state
-            # Force newline if we've tried enough
-            if not allowed and len(after_space) > 5:
-                if self.newline_token:
-                    allowed.append(self.newline_token)
-            
-            return list(set(allowed))
-        
+        # No valid continuation found - return empty list
+        # The caller will handle this by forcing newline to end the field
         return []
     
     def _is_keyscale_complete(self) -> bool:
-        """Check if keyscale value is complete and valid."""
-        acc = self.accumulated_value.strip().lower()
-        # Pattern: [A-G][#♯b♭]? (major|minor)
-        pattern = r'^[a-g][#♯b♭]?\s*(major|minor)$'
-        return bool(re.match(pattern, acc, re.IGNORECASE))
+        """Check if keyscale value is complete and valid by checking against valid_keyscales set."""
+        return self.accumulated_value in self.valid_keyscales
     
     def _get_allowed_timesig_tokens(self) -> List[int]:
         """Get allowed tokens for timesignature field."""
@@ -797,8 +822,24 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         if not self.enabled:
             return self._apply_temperature_scaling(scores)
         
-        if self.state == FSMState.COMPLETED or self.state == FSMState.CODES_GENERATION:
-            # No constraints in codes generation phase, but still apply temperature
+        if self.state == FSMState.COMPLETED:
+            return self._apply_temperature_scaling(scores)
+        
+        if self.state == FSMState.CODES_GENERATION:
+            # Apply duration constraint in codes generation phase
+            if self.target_codes is not None and self.eos_token_id is not None:
+                if self.codes_count < self.target_codes:
+                    # Block EOS token until target codes count is reached
+                    scores[:, self.eos_token_id] = float('-inf')
+                    if self.debug:
+                        logger.debug(f"Codes generation: {self.codes_count}/{self.target_codes}, blocking EOS")
+                else:
+                    # Force EOS token when target codes count is reached
+                    mask = torch.full_like(scores, float('-inf'))
+                    mask[:, self.eos_token_id] = 0
+                    scores = scores + mask
+                    if self.debug:
+                        logger.debug(f"Codes generation: {self.codes_count}/{self.target_codes}, forcing EOS")
             return self._apply_temperature_scaling(scores)
         
         batch_size = scores.shape[0]
@@ -890,21 +931,40 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             scores = scores + mask
         
         elif self.state == FSMState.DURATION_VALUE:
-            min_val, max_val = self.field_specs["duration"]["min"], self.field_specs["duration"]["max"]
-            
-            if self._should_end_numeric_field(scores, min_val, max_val):
-                if self.newline_token:
-                    mask[0, self.newline_token] = 0
-                    self._transition_to_next_state()
+            # If target_duration is set, force generate that exact value
+            if self.target_duration is not None:
+                target_str = str(int(self.target_duration))
+                current_pos = len(self.accumulated_value)
+                
+                if current_pos < len(target_str):
+                    # Force the next digit
+                    next_digit = int(target_str[current_pos])
+                    if next_digit in self.digit_tokens:
+                        mask[0, self.digit_tokens[next_digit]] = 0
+                else:
+                    # All digits generated, force newline
+                    if self.newline_token:
+                        mask[0, self.newline_token] = 0
+                        self._transition_to_next_state()
+                
+                scores = scores + mask
             else:
-                allowed = self._get_allowed_digit_tokens(min_val, max_val)
-                for t in allowed:
-                    mask[0, t] = 0
-                current = int(self.accumulated_value) if self.accumulated_value else 0
-                if min_val <= current <= max_val and self.newline_token:
-                    mask[0, self.newline_token] = 0
-            
-            scores = scores + mask
+                # Normal duration generation with range constraint
+                min_val, max_val = self.field_specs["duration"]["min"], self.field_specs["duration"]["max"]
+                
+                if self._should_end_numeric_field(scores, min_val, max_val):
+                    if self.newline_token:
+                        mask[0, self.newline_token] = 0
+                        self._transition_to_next_state()
+                else:
+                    allowed = self._get_allowed_digit_tokens(min_val, max_val)
+                    for t in allowed:
+                        mask[0, t] = 0
+                    current = int(self.accumulated_value) if self.accumulated_value else 0
+                    if min_val <= current <= max_val and self.newline_token:
+                        mask[0, self.newline_token] = 0
+                
+                scores = scores + mask
         
         elif self.state == FSMState.GENRES_VALUE:
             # Try to hot-reload genres vocab if file has changed
@@ -997,7 +1057,14 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         if not self.enabled:
             return
         
-        if self.state == FSMState.COMPLETED or self.state == FSMState.CODES_GENERATION:
+        if self.state == FSMState.COMPLETED:
+            return
+        
+        if self.state == FSMState.CODES_GENERATION:
+            # Count generated codes for duration constraint
+            self.codes_count += 1
+            if self.debug and self.target_codes is not None:
+                logger.debug(f"Codes count: {self.codes_count}/{self.target_codes}")
             return
         
         token_str = self.tokenizer.decode([generated_token_id])
@@ -1258,6 +1325,7 @@ class LLMHandler:
         constrained_decoding_debug: bool = False,
         metadata_temperature: Optional[float] = 0.85,
         codes_temperature: Optional[float] = None,
+        target_duration: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM with vllm backend
         
@@ -1276,6 +1344,8 @@ class LLMHandler:
                                   If None, uses base temperature
             codes_temperature: Temperature for audio codes generation (higher = more diverse)
                                If None, uses base temperature
+            target_duration: Target duration in seconds for codes generation constraint.
+                            5 codes = 1 second. If specified, blocks EOS until target reached.
         """
         try:
             from nanovllm import SamplingParams
@@ -1298,6 +1368,7 @@ class LLMHandler:
                 self.constrained_processor.metadata_temperature = metadata_temperature if use_phase_temperatures else None
                 self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
                 self.constrained_processor.update_caption(caption)
+                self.constrained_processor.set_target_duration(target_duration)
                 
                 constrained_processor = self.constrained_processor
                 update_state_fn = constrained_processor.update_state
@@ -1357,6 +1428,7 @@ class LLMHandler:
         constrained_decoding_debug: bool = False,
         metadata_temperature: Optional[float] = 0.85,
         codes_temperature: Optional[float] = None,
+        target_duration: Optional[float] = None,
     ) -> str:
         """Shared vllm path: accept prebuilt formatted prompt and return text."""
         from nanovllm import SamplingParams
@@ -1374,6 +1446,7 @@ class LLMHandler:
             self.constrained_processor.metadata_temperature = metadata_temperature if use_phase_temperatures else None
             self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
             self.constrained_processor.update_caption(formatted_prompt)  # Use formatted prompt for genre extraction
+            self.constrained_processor.set_target_duration(target_duration)
             
             constrained_processor = self.constrained_processor
 
@@ -1427,6 +1500,7 @@ class LLMHandler:
         constrained_decoding_debug: bool = False,
         metadata_temperature: Optional[float] = 0.85,
         codes_temperature: Optional[float] = None,
+        target_duration: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM with PyTorch backend
         
@@ -1445,6 +1519,8 @@ class LLMHandler:
                                   If None, uses base temperature
             codes_temperature: Temperature for audio codes generation (higher = more diverse)
                                If None, uses base temperature
+            target_duration: Target duration in seconds for codes generation constraint.
+                            5 codes = 1 second. If specified, blocks EOS until target reached.
         """
         try:
             formatted_prompt = self.build_formatted_prompt(caption, lyrics)
@@ -1496,6 +1572,7 @@ class LLMHandler:
                     self.constrained_processor.metadata_temperature = metadata_temperature if use_phase_temperatures else None
                     self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
                     self.constrained_processor.update_caption(caption)
+                    self.constrained_processor.set_target_duration(target_duration)
                     
                     constrained_processor = self.constrained_processor
 
@@ -1623,6 +1700,7 @@ class LLMHandler:
         repetition_penalty: float,
         use_constrained_decoding: bool = True,
         constrained_decoding_debug: bool = False,
+        target_duration: Optional[float] = None,
     ) -> str:
         """Shared PyTorch path: accept prebuilt formatted prompt and return text."""
         inputs = self.llm_tokenizer(
@@ -1639,6 +1717,7 @@ class LLMHandler:
             self.constrained_processor.enabled = use_constrained_decoding
             self.constrained_processor.debug = constrained_decoding_debug
             self.constrained_processor.update_caption(formatted_prompt)  # Use formatted prompt for genre extraction
+            self.constrained_processor.set_target_duration(target_duration)
             
             constrained_processor = self.constrained_processor
 
@@ -1764,6 +1843,7 @@ class LLMHandler:
         constrained_decoding_debug: bool = False,
         metadata_temperature: Optional[float] = 0.85,
         codes_temperature: Optional[float] = None,
+        target_duration: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM
         
@@ -1782,6 +1862,8 @@ class LLMHandler:
                                   Recommended: 0.3-0.5 for accurate metadata
             codes_temperature: Temperature for audio codes generation (higher = more diverse)
                                Recommended: 0.7-1.0 for diverse codes
+            target_duration: Target duration in seconds for codes generation constraint.
+                            5 codes = 1 second. If specified, blocks EOS until target reached.
         """
         # Check if 5Hz LM is initialized
         if not hasattr(self, 'llm_initialized') or not self.llm_initialized:
@@ -1811,6 +1893,7 @@ class LLMHandler:
                 constrained_decoding_debug=constrained_decoding_debug,
                 metadata_temperature=metadata_temperature,
                 codes_temperature=codes_temperature,
+                target_duration=target_duration,
             )
         else:
             return self.generate_with_5hz_lm_pt(
@@ -1826,6 +1909,7 @@ class LLMHandler:
                 constrained_decoding_debug=constrained_decoding_debug,
                 metadata_temperature=metadata_temperature,
                 codes_temperature=codes_temperature,
+                target_duration=target_duration,
             )
 
     def generate_with_stop_condition(
@@ -1843,11 +1927,16 @@ class LLMHandler:
         constrained_decoding_debug: bool = False,
         metadata_temperature: Optional[float] = 0.85,
         codes_temperature: Optional[float] = None,
+        target_duration: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Feishu-compatible LM generation.
 
         - infer_type='dit': stop at </think> and return metas only (no audio codes)
         - infer_type='llm_dit': normal generation (metas + audio codes)
+        
+        Args:
+            target_duration: Target duration in seconds for codes generation constraint.
+                            5 codes = 1 second. If specified, blocks EOS until target reached.
         """
         infer_type = (infer_type or "").strip().lower()
         if infer_type not in {"dit", "llm_dit"}:
@@ -1867,6 +1956,7 @@ class LLMHandler:
                 constrained_decoding_debug=constrained_decoding_debug,
                 metadata_temperature=metadata_temperature,
                 codes_temperature=codes_temperature,
+                target_duration=target_duration,
             )
 
         # dit: generate and truncate at reasoning end tag
@@ -1934,6 +2024,7 @@ class LLMHandler:
                 - cfg_scale (float)
                 - negative_prompt (str) used when cfg_scale > 1
                 - top_k (int), top_p (float), repetition_penalty (float)
+                - target_duration (float): Target duration in seconds for codes generation
             use_constrained_decoding: Whether to use FSM-based constrained decoding
             constrained_decoding_debug: Whether to enable debug logging for constrained decoding
 
@@ -1956,6 +2047,7 @@ class LLMHandler:
         top_k = cfg.get("top_k")
         top_p = cfg.get("top_p")
         repetition_penalty = cfg.get("repetition_penalty", 1.0)
+        target_duration = cfg.get("target_duration")
 
         try:
             if self.llm_backend == "vllm":
@@ -1969,6 +2061,7 @@ class LLMHandler:
                     repetition_penalty=repetition_penalty,
                     use_constrained_decoding=use_constrained_decoding,
                     constrained_decoding_debug=constrained_decoding_debug,
+                    target_duration=target_duration,
                 )
                 return output_text, f"✅ Generated successfully (vllm) | length={len(output_text)}"
 
@@ -1983,6 +2076,7 @@ class LLMHandler:
                 repetition_penalty=repetition_penalty,
                 use_constrained_decoding=use_constrained_decoding,
                 constrained_decoding_debug=constrained_decoding_debug,
+                target_duration=target_duration,
             )
             return output_text, f"✅ Generated successfully (pt) | length={len(output_text)}"
 
