@@ -9,10 +9,21 @@ import sys
 for proxy_var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
     os.environ.pop(proxy_var, None)
 
-from .handler import AceStepHandler
-from .llm_inference import LLMHandler
-from .dataset_handler import DatasetHandler
-from .gradio_ui import create_gradio_interface
+try:
+    # When executed as a module: `python -m acestep.acestep_v15_pipeline`
+    from .handler import AceStepHandler
+    from .llm_inference import LLMHandler
+    from .dataset_handler import DatasetHandler
+    from .gradio_ui import create_gradio_interface
+except ImportError:
+    # When executed as a script: `python acestep/acestep_v15_pipeline.py`
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    from acestep.handler import AceStepHandler
+    from acestep.llm_inference import LLMHandler
+    from acestep.dataset_handler import DatasetHandler
+    from acestep.gradio_ui import create_gradio_interface
 
 
 def create_demo(init_params=None):

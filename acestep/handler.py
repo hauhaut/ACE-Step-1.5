@@ -932,7 +932,14 @@ class AceStepHandler:
         is_repaint_task = (task_type == "repaint")
         is_lego_task = (task_type == "lego")
         is_cover_task = (task_type == "cover")
-        if audio_code_string and str(audio_code_string).strip():
+
+        has_codes = False
+        if isinstance(audio_code_string, list):
+            has_codes = any((c or "").strip() for c in audio_code_string)
+        else:
+            has_codes = bool(audio_code_string and str(audio_code_string).strip())
+
+        if has_codes:
             is_cover_task = True
         # Both repaint and lego tasks can use repainting parameters for chunk mask
         can_use_repainting = is_repaint_task or is_lego_task
@@ -1371,10 +1378,16 @@ class AceStepHandler:
                     # Pad or crop to match max_latent_length
                     if hints.shape[1] < max_latent_length:
                         pad_length = max_latent_length - hints.shape[1]
-                        hints = torch.cat([
-                            hints,
-                            self.silence_latent[0, :pad_length, :]
-                        ], dim=1)
+                        pad = self.silence_latent
+                        # Match dims: hints is usually [1, T, D], silence_latent is [1, T, D]
+                        if pad.dim() == 2:
+                            pad = pad.unsqueeze(0)
+                        if hints.dim() == 2:
+                            hints = hints.unsqueeze(0)
+                        pad_chunk = pad[:, :pad_length, :]
+                        if pad_chunk.device != hints.device or pad_chunk.dtype != hints.dtype:
+                            pad_chunk = pad_chunk.to(device=hints.device, dtype=hints.dtype)
+                        hints = torch.cat([hints, pad_chunk], dim=1)
                     elif hints.shape[1] > max_latent_length:
                         hints = hints[:, :max_latent_length, :]
                     precomputed_lm_hints_25Hz_list.append(hints[0])  # Remove batch dimension
@@ -1553,19 +1566,45 @@ class AceStepHandler:
     def infer_refer_latent(self, refer_audioss):
         refer_audio_order_mask = []
         refer_audio_latents = []
+
+        def _normalize_audio_2d(a: torch.Tensor) -> torch.Tensor:
+            """Normalize audio tensor to [2, T] on current device."""
+            if not isinstance(a, torch.Tensor):
+                raise TypeError(f"refer_audio must be a torch.Tensor, got {type(a)!r}")
+            # Accept [T], [1, T], [2, T], [1, 2, T]
+            if a.dim() == 3 and a.shape[0] == 1:
+                a = a.squeeze(0)
+            if a.dim() == 1:
+                a = a.unsqueeze(0)
+            if a.dim() != 2:
+                raise ValueError(f"refer_audio must be 1D/2D/3D(1,2,T); got shape={tuple(a.shape)}")
+            if a.shape[0] == 1:
+                a = torch.cat([a, a], dim=0)
+            a = a[:2]
+            return a
+
+        def _ensure_latent_3d(z: torch.Tensor) -> torch.Tensor:
+            """Ensure latent is [N, T, D] (3D) for packing."""
+            if z.dim() == 4 and z.shape[0] == 1:
+                z = z.squeeze(0)
+            if z.dim() == 2:
+                z = z.unsqueeze(0)
+            return z
+
         for batch_idx, refer_audios in enumerate(refer_audioss):
             if len(refer_audios) == 1 and torch.all(refer_audios[0] == 0.0):
-                refer_audio_latent = self.silence_latent[:, :750, :]
+                refer_audio_latent = _ensure_latent_3d(self.silence_latent[:, :750, :])
                 refer_audio_latents.append(refer_audio_latent)
                 refer_audio_order_mask.append(batch_idx)
             else:
                 for refer_audio in refer_audios:
+                    refer_audio = _normalize_audio_2d(refer_audio)
                     # Ensure input is in VAE's dtype
                     vae_input = refer_audio.unsqueeze(0).to(self.vae.dtype)
                     refer_audio_latent = self.vae.encode(vae_input).latent_dist.sample()
                     # Cast back to model dtype
                     refer_audio_latent = refer_audio_latent.to(self.dtype)
-                    refer_audio_latents.append(refer_audio_latent.transpose(1, 2))
+                    refer_audio_latents.append(_ensure_latent_3d(refer_audio_latent.transpose(1, 2)))
                     refer_audio_order_mask.append(batch_idx)
 
         refer_audio_latents = torch.cat(refer_audio_latents, dim=0)
@@ -1949,7 +1988,7 @@ class AceStepHandler:
         audio_duration: Optional[float] = None,
         batch_size: Optional[int] = None,
         src_audio=None,
-        audio_code_string: str = "",
+        audio_code_string: Union[str, List[str]] = "",
         repainting_start: float = 0.0,
         repainting_end: Optional[float] = None,
         instruction: str = "Fill the audio semantic mask based on the given conditions:",
@@ -1978,11 +2017,16 @@ class AceStepHandler:
         if self.model is None or self.vae is None or self.text_tokenizer is None or self.text_encoder is None:
             return None, None, [], "", "❌ Model not fully initialized. Please initialize all components first.", "-1", "", "", None, "", "", None
 
+        def _has_audio_codes(v: Union[str, List[str]]) -> bool:
+            if isinstance(v, list):
+                return any((x or "").strip() for x in v)
+            return bool(v and str(v).strip())
+
         # Auto-detect task type based on audio_code_string
         # If audio_code_string is provided and not empty, use cover task
         # Otherwise, use text2music task (or keep current task_type if not text2music)
         if task_type == "text2music":
-            if audio_code_string and str(audio_code_string).strip():
+            if _has_audio_codes(audio_code_string):
                 # User has provided audio codes, switch to cover task
                 task_type = "cover"
                 # Update instruction for cover task
@@ -2031,7 +2075,7 @@ class AceStepHandler:
             processed_src_audio = None
             if src_audio is not None:
                 # Check if audio codes are provided - if so, ignore src_audio
-                if audio_code_string and str(audio_code_string).strip():
+                if _has_audio_codes(audio_code_string):
                     logger.info("[generate_music] Audio codes provided, ignoring src_audio and using codes instead")
                 else:
                     logger.info("[generate_music] Processing source audio...")
@@ -2070,9 +2114,11 @@ class AceStepHandler:
             # Prepare audio_code_hints - use if audio_code_string is provided
             # This works for both text2music (auto-switched to cover) and cover tasks
             audio_code_hints_batch = None
-            if audio_code_string and str(audio_code_string).strip():
-                # Audio codes provided, use as hints (will trigger cover mode in inference service)
-                audio_code_hints_batch = [audio_code_string] * actual_batch_size
+            if _has_audio_codes(audio_code_string):
+                if isinstance(audio_code_string, list):
+                    audio_code_hints_batch = audio_code_string
+                else:
+                    audio_code_hints_batch = [audio_code_string] * actual_batch_size
 
             should_return_intermediate = (task_type == "text2music")
             outputs = self.service_generate(

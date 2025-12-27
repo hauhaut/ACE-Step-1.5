@@ -51,8 +51,9 @@ class GenerateMusicRequest(BaseModel):
     thinking: bool = False
 
     bpm: Optional[int] = None
-    key_scale: str = ""
-    time_signature: str = ""
+    # Accept common client keys while keeping internal field names stable.
+    key_scale: str = Field(default="", alias="keyscale")
+    time_signature: str = Field(default="", alias="timesignature")
     vocal_language: str = "en"
     inference_steps: int = 8
     guidance_scale: float = 7.0
@@ -61,7 +62,7 @@ class GenerateMusicRequest(BaseModel):
 
     reference_audio_path: Optional[str] = None
     src_audio_path: Optional[str] = None
-    audio_duration: Optional[float] = None
+    audio_duration: Optional[float] = Field(default=None, alias="duration")
     batch_size: Optional[int] = None
 
     audio_code_string: str = ""
@@ -92,6 +93,10 @@ class GenerateMusicRequest(BaseModel):
     lm_top_p: Optional[float] = 0.9
     lm_repetition_penalty: float = 1.0
     lm_negative_prompt: str = "NO USER INPUT"
+
+    class Config:
+        allow_population_by_field_name = True
+        allow_population_by_alias = True
 
 
 _LM_DEFAULT_TEMPERATURE = 0.85
@@ -501,62 +506,6 @@ def create_app() -> FastAPI:
                     max_dur = float(os.getenv("ACESTEP_LYRICS_MAX_DURATION_SECONDS", "180"))
                     return float(min(max(est, min_dur), max_dur))
 
-                def _extract_lm_fields(meta: Dict[str, Any]) -> Dict[str, Any]:
-                    def _parse_first_float(v: Any) -> Optional[float]:
-                        if v is None:
-                            return None
-                        if isinstance(v, (int, float)):
-                            return float(v)
-                        s = str(v).strip()
-                        if not s or s.upper() == "N/A":
-                            return None
-                        try:
-                            return float(s)
-                        except Exception:
-                            pass
-                        m = re.search(r"[-+]?\d*\.?\d+", s)
-                        if not m:
-                            return None
-                        try:
-                            return float(m.group(0))
-                        except Exception:
-                            return None
-
-                    def _parse_first_int(v: Any) -> Optional[int]:
-                        fv = _parse_first_float(v)
-                        if fv is None:
-                            return None
-                        try:
-                            return int(round(fv))
-                        except Exception:
-                            return None
-
-                    def _none_if_na(v: Any) -> Any:
-                        if v is None:
-                            return None
-                        if isinstance(v, str) and v.strip() in {"", "N/A"}:
-                            return None
-                        return v
-
-                    out: Dict[str, Any] = {}
-
-                    bpm_raw = _none_if_na(meta.get("bpm"))
-                    out["bpm"] = _parse_first_int(bpm_raw)
-
-                    dur_raw = _none_if_na(meta.get("duration"))
-                    out["duration"] = _parse_first_float(dur_raw)
-
-                    genres_raw = _none_if_na(meta.get("genres"))
-                    out["genres"] = str(genres_raw) if genres_raw is not None else None
-
-                    keyscale_raw = _none_if_na(meta.get("keyscale", meta.get("key_scale")))
-                    out["keyscale"] = str(keyscale_raw) if keyscale_raw is not None else None
-
-                    ts_raw = _none_if_na(meta.get("timesignature", meta.get("time_signature")))
-                    out["timesignature"] = str(ts_raw) if ts_raw is not None else None
-
-                    return out
-
                 def _normalize_metas(meta: Dict[str, Any]) -> Dict[str, Any]:
                     """Ensure a stable `metas` dict (keys always present)."""
                     meta = meta or {}
@@ -587,7 +536,7 @@ def create_app() -> FastAPI:
                 # We keep backward compatibility: only auto-adjust when user didn't override (still at default 1.0).
                 audio_cover_strength_val = float(req.audio_cover_strength)
 
-                lm_fields: Dict[str, Any] = {}
+                lm_meta: Optional[Dict[str, Any]] = None
 
                 # Determine effective batch size (used for per-sample LM code diversity)
                 effective_batch_size = req.batch_size
@@ -656,6 +605,7 @@ def create_app() -> FastAPI:
                             )
 
                         meta, codes, status = _lm_call()
+                        lm_meta = meta
 
                         if need_lm_codes:
                             if not codes:
@@ -667,12 +617,6 @@ def create_app() -> FastAPI:
                                 audio_code_string = [codes] * effective_batch_size
                             else:
                                 audio_code_string = codes
-
-                        # Always expose LM metas when we invoked LM (even if user already set some fields).
-                        lm_fields = {
-                            "metas": _normalize_metas(meta),
-                            **_extract_lm_fields(meta),
-                        }
 
                         # Fill only missing fields (user-provided values win)
                         bpm_val, key_scale_val, time_sig_val, audio_duration_val = _maybe_fill_from_metadata(req, meta)
@@ -711,6 +655,25 @@ def create_app() -> FastAPI:
                         # thinking=True requires codes generation.
                         raise RuntimeError("thinking=true requires non-empty audio codes (LM generation failed).")
 
+                # Response metas MUST reflect the actual values used by DiT.
+                metas_out = _normalize_metas(lm_meta or {})
+                if bpm_val is not None and int(bpm_val) > 0:
+                    metas_out["bpm"] = int(bpm_val)
+                if audio_duration_val is not None and float(audio_duration_val) > 0:
+                    metas_out["duration"] = float(audio_duration_val)
+                if (key_scale_val or "").strip():
+                    metas_out["keyscale"] = str(key_scale_val)
+                if (time_sig_val or "").strip():
+                    metas_out["timesignature"] = str(time_sig_val)
+
+                def _none_if_na_str(v: Any) -> Optional[str]:
+                    if v is None:
+                        return None
+                    s = str(v).strip()
+                    if s in {"", "N/A"}:
+                        return None
+                    return s
+
                 first, second, paths, gen_info, status_msg, seed_value, *_ = h.generate_music(
                     captions=req.caption,
                     lyrics=req.lyrics,
@@ -746,7 +709,12 @@ def create_app() -> FastAPI:
                     "generation_info": gen_info,
                     "status_message": status_msg,
                     "seed_value": seed_value,
-                    **lm_fields,
+                    "metas": metas_out,
+                    "bpm": int(bpm_val) if bpm_val is not None else None,
+                    "duration": float(audio_duration_val) if audio_duration_val is not None else None,
+                    "genres": _none_if_na_str(metas_out.get("genres")),
+                    "keyscale": _none_if_na_str(metas_out.get("keyscale")),
+                    "timesignature": _none_if_na_str(metas_out.get("timesignature")),
                 }
 
             t0 = time.time()
@@ -815,13 +783,20 @@ def create_app() -> FastAPI:
             if not callable(get):
                 raise HTTPException(status_code=400, detail="Invalid request payload")
 
+            def _get_any(*keys: str, default: Any = None) -> Any:
+                for k in keys:
+                    v = get(k, None)
+                    if v is not None:
+                        return v
+                return default
+
             return GenerateMusicRequest(
                 caption=str(get("caption", "") or ""),
                 lyrics=str(get("lyrics", "") or ""),
                 thinking=_to_bool(get("thinking"), False),
                 bpm=_to_int(get("bpm"), None),
-                key_scale=str(get("key_scale", "") or ""),
-                time_signature=str(get("time_signature", "") or ""),
+                key_scale=str(_get_any("key_scale", "keyscale", default="") or ""),
+                time_signature=str(_get_any("time_signature", "timesignature", default="") or ""),
                 vocal_language=str(get("vocal_language", "en") or "en"),
                 inference_steps=_to_int(get("inference_steps"), 8) or 8,
                 guidance_scale=_to_float(get("guidance_scale"), 7.0) or 7.0,
@@ -829,7 +804,7 @@ def create_app() -> FastAPI:
                 seed=_to_int(get("seed"), -1) or -1,
                 reference_audio_path=reference_audio_path,
                 src_audio_path=src_audio_path,
-                audio_duration=_to_float(get("audio_duration"), None),
+                audio_duration=_to_float(_get_any("audio_duration", "duration"), None),
                 batch_size=_to_int(get("batch_size"), None),
                 audio_code_string=str(get("audio_code_string", "") or ""),
                 repainting_start=_to_float(get("repainting_start"), 0.0) or 0.0,
