@@ -245,6 +245,7 @@ class LLMHandler:
         metadata_temperature: Optional[float] = 0.85,
         codes_temperature: Optional[float] = None,
         target_duration: Optional[float] = None,
+        user_metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM with vllm backend
         
@@ -288,6 +289,8 @@ class LLMHandler:
                 self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
                 self.constrained_processor.update_caption(caption)
                 self.constrained_processor.set_target_duration(target_duration)
+                # Always call set_user_metadata to ensure previous settings are cleared if None
+                self.constrained_processor.set_user_metadata(user_metadata)
                 
                 constrained_processor = self.constrained_processor
                 update_state_fn = constrained_processor.update_state
@@ -423,6 +426,7 @@ class LLMHandler:
         metadata_temperature: Optional[float] = 0.85,
         codes_temperature: Optional[float] = None,
         target_duration: Optional[float] = None,
+        user_metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM with PyTorch backend
         
@@ -495,6 +499,8 @@ class LLMHandler:
                     self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
                     self.constrained_processor.update_caption(caption)
                     self.constrained_processor.set_target_duration(target_duration)
+                    # Always call set_user_metadata to ensure previous settings are cleared if None
+                    self.constrained_processor.set_user_metadata(user_metadata)
                     
                     constrained_processor = self.constrained_processor
 
@@ -769,6 +775,7 @@ class LLMHandler:
         metadata_temperature: Optional[float] = 0.85,
         codes_temperature: Optional[float] = None,
         target_duration: Optional[float] = None,
+        user_metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Generate metadata and audio codes using 5Hz LM
         
@@ -819,6 +826,7 @@ class LLMHandler:
                 metadata_temperature=metadata_temperature,
                 codes_temperature=codes_temperature,
                 target_duration=target_duration,
+                user_metadata=user_metadata,
             )
         else:
             return self.generate_with_5hz_lm_pt(
@@ -835,6 +843,7 @@ class LLMHandler:
                 metadata_temperature=metadata_temperature,
                 codes_temperature=codes_temperature,
                 target_duration=target_duration,
+                user_metadata=user_metadata,
             )
 
     def generate_with_stop_condition(
@@ -853,6 +862,7 @@ class LLMHandler:
         metadata_temperature: Optional[float] = 0.85,
         codes_temperature: Optional[float] = None,
         target_duration: Optional[float] = None,
+        user_metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Feishu-compatible LM generation.
 
@@ -862,6 +872,8 @@ class LLMHandler:
         Args:
             target_duration: Target duration in seconds for codes generation constraint.
                             5 codes = 1 second. If specified, blocks EOS until target reached.
+            user_metadata: User-provided metadata fields (e.g. bpm/duration/keyscale/timesignature).
+                           If specified, constrained decoding will inject these values directly.
         """
         infer_type = (infer_type or "").strip().lower()
         if infer_type not in {"dit", "llm_dit"}:
@@ -882,6 +894,7 @@ class LLMHandler:
                 metadata_temperature=metadata_temperature,
                 codes_temperature=codes_temperature,
                 target_duration=target_duration,
+                user_metadata=user_metadata,
             )
 
         # dit: generate and truncate at reasoning end tag
@@ -895,6 +908,7 @@ class LLMHandler:
                 "top_k": top_k,
                 "top_p": top_p,
                 "repetition_penalty": repetition_penalty,
+                "user_metadata": user_metadata,
             },
             use_constrained_decoding=use_constrained_decoding,
             constrained_decoding_debug=constrained_decoding_debug,

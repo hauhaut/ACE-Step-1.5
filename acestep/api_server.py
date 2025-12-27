@@ -51,9 +51,9 @@ class GenerateMusicRequest(BaseModel):
     thinking: bool = False
 
     bpm: Optional[int] = None
-    # Accept common client keys while keeping internal field names stable.
-    key_scale: str = Field(default="", alias="keyscale")
-    time_signature: str = Field(default="", alias="timesignature")
+    # Accept common client keys via manual parsing (see _build_req_from_mapping).
+    key_scale: str = ""
+    time_signature: str = ""
     vocal_language: str = "en"
     inference_steps: int = 8
     guidance_scale: float = 7.0
@@ -62,7 +62,7 @@ class GenerateMusicRequest(BaseModel):
 
     reference_audio_path: Optional[str] = None
     src_audio_path: Optional[str] = None
-    audio_duration: Optional[float] = Field(default=None, alias="duration")
+    audio_duration: Optional[float] = None
     batch_size: Optional[int] = None
 
     audio_code_string: str = ""
@@ -532,6 +532,12 @@ def create_app() -> FastAPI:
 
                 thinking = bool(getattr(req, "thinking", False))
 
+                print(
+                    "[api_server] parsed req: "
+                    f"thinking={thinking}, caption_len={len((req.caption or '').strip())}, lyrics_len={len((req.lyrics or '').strip())}, "
+                    f"bpm={req.bpm}, audio_duration={req.audio_duration}, key_scale={req.key_scale!r}, time_signature={req.time_signature!r}"
+                )
+
                 # If LM-generated code hints are used, a too-strong cover strength can suppress lyric/vocal conditioning.
                 # We keep backward compatibility: only auto-adjust when user didn't override (still at default 1.0).
                 audio_cover_strength_val = float(req.audio_cover_strength)
@@ -555,6 +561,27 @@ def create_app() -> FastAPI:
                     or (not (time_sig_val or "").strip())
                     or (audio_duration_val is None)
                 )
+
+                # Feishu-compatible: if user explicitly provided some metadata fields,
+                # pass them into constrained decoding so LM injects them directly
+                # (i.e. does not re-infer / override those fields).
+                user_metadata: Dict[str, Optional[str]] = {}
+                if bpm_val is not None:
+                    user_metadata["bpm"] = str(int(bpm_val))
+                if audio_duration_val is not None:
+                    user_metadata["duration"] = str(float(audio_duration_val))
+                if (key_scale_val or "").strip():
+                    user_metadata["keyscale"] = str(key_scale_val)
+                if (time_sig_val or "").strip():
+                    user_metadata["timesignature"] = str(time_sig_val)
+
+                lm_target_duration: Optional[float] = None
+                if need_lm_codes:
+                    # If user specified a duration, constrain codes generation length accordingly.
+                    if audio_duration_val is not None and float(audio_duration_val) > 0:
+                        lm_target_duration = float(audio_duration_val)
+
+                print(f"[api_server] LM调用参数: user_metadata={user_metadata}, target_duration={lm_target_duration}, need_lm_codes={need_lm_codes}, need_lm_metas={need_lm_metas}")
 
                 if need_lm_metas or need_lm_codes:
                     # Lazy init 5Hz LM once
@@ -602,6 +629,8 @@ def create_app() -> FastAPI:
                                 top_k=_normalize_optional_int(req.lm_top_k),
                                 top_p=_normalize_optional_float(req.lm_top_p),
                                 repetition_penalty=float(req.lm_repetition_penalty),
+                                target_duration=lm_target_duration,
+                                user_metadata=(user_metadata or None),
                             )
 
                         meta, codes, status = _lm_call()
@@ -784,39 +813,122 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=400, detail="Invalid request payload")
 
             def _get_any(*keys: str, default: Any = None) -> Any:
+                # 1) Top-level keys
                 for k in keys:
                     v = get(k, None)
                     if v is not None:
                         return v
+
+                # 2) Nested metas/metadata/user_metadata (dict or JSON string)
+                nested = (
+                    get("metas", None)
+                    or get("meta", None)
+                    or get("metadata", None)
+                    or get("user_metadata", None)
+                    or get("userMetadata", None)
+                )
+
+                if isinstance(nested, str):
+                    s = nested.strip()
+                    if s.startswith("{") and s.endswith("}"):
+                        try:
+                            nested = json.loads(s)
+                        except Exception:
+                            nested = None
+
+                if isinstance(nested, dict):
+                    g2 = nested.get
+                    for k in keys:
+                        v = g2(k, None)
+                        if v is not None:
+                            return v
+
                 return default
+
+            # Debug: print what keys we actually received (helps explain empty parsed values)
+            try:
+                top_keys = list(getattr(mapping, "keys", lambda: [])())
+            except Exception:
+                top_keys = []
+            try:
+                nested_probe = (
+                    get("metas", None)
+                    or get("meta", None)
+                    or get("metadata", None)
+                    or get("user_metadata", None)
+                    or get("userMetadata", None)
+                )
+                if isinstance(nested_probe, str):
+                    sp = nested_probe.strip()
+                    if sp.startswith("{") and sp.endswith("}"):
+                        try:
+                            nested_probe = json.loads(sp)
+                        except Exception:
+                            nested_probe = None
+                nested_keys = list(nested_probe.keys()) if isinstance(nested_probe, dict) else []
+            except Exception:
+                nested_keys = []
+            print(f"[api_server] request keys: top={sorted(top_keys)}, nested={sorted(nested_keys)}")
+
+            # Debug: print raw values/types for common meta fields (top-level + common aliases)
+            try:
+                probe_keys = [
+                    "thinking",
+                    "bpm",
+                    "audio_duration",
+                    "duration",
+                    "audioDuration",
+                    "key_scale",
+                    "keyscale",
+                    "keyScale",
+                    "time_signature",
+                    "timesignature",
+                    "timeSignature",
+                ]
+                raw = {k: get(k, None) for k in probe_keys}
+                raw_types = {k: (type(v).__name__ if v is not None else None) for k, v in raw.items()}
+                print(f"[api_server] request raw: {raw}")
+                print(f"[api_server] request raw types: {raw_types}")
+            except Exception:
+                pass
+
+            normalized_audio_duration = _to_float(_get_any("audio_duration", "duration", "audioDuration"), None)
+            normalized_bpm = _to_int(_get_any("bpm"), None)
+            normalized_keyscale = str(_get_any("key_scale", "keyscale", "keyScale", default="") or "")
+            normalized_timesig = str(_get_any("time_signature", "timesignature", "timeSignature", default="") or "")
+            print(
+                "[api_server] normalized: "
+                f"thinking={_to_bool(get('thinking'), False)}, bpm={normalized_bpm}, "
+                f"audio_duration={normalized_audio_duration}, key_scale={normalized_keyscale!r}, time_signature={normalized_timesig!r}"
+            )
 
             return GenerateMusicRequest(
                 caption=str(get("caption", "") or ""),
                 lyrics=str(get("lyrics", "") or ""),
                 thinking=_to_bool(get("thinking"), False),
-                bpm=_to_int(get("bpm"), None),
-                key_scale=str(_get_any("key_scale", "keyscale", default="") or ""),
-                time_signature=str(_get_any("time_signature", "timesignature", default="") or ""),
-                vocal_language=str(get("vocal_language", "en") or "en"),
-                inference_steps=_to_int(get("inference_steps"), 8) or 8,
-                guidance_scale=_to_float(get("guidance_scale"), 7.0) or 7.0,
-                use_random_seed=_to_bool(get("use_random_seed"), True),
+                bpm=normalized_bpm,
+                key_scale=normalized_keyscale,
+                time_signature=normalized_timesig,
+                vocal_language=str(_get_any("vocal_language", "vocalLanguage", default="en") or "en"),
+                inference_steps=_to_int(_get_any("inference_steps", "inferenceSteps"), 8) or 8,
+                guidance_scale=_to_float(_get_any("guidance_scale", "guidanceScale"), 7.0) or 7.0,
+                use_random_seed=_to_bool(_get_any("use_random_seed", "useRandomSeed"), True),
                 seed=_to_int(get("seed"), -1) or -1,
                 reference_audio_path=reference_audio_path,
                 src_audio_path=src_audio_path,
-                audio_duration=_to_float(_get_any("audio_duration", "duration"), None),
+                audio_duration=normalized_audio_duration,
                 batch_size=_to_int(get("batch_size"), None),
-                audio_code_string=str(get("audio_code_string", "") or ""),
+                audio_code_string=str(_get_any("audio_code_string", "audioCodeString", default="") or ""),
                 repainting_start=_to_float(get("repainting_start"), 0.0) or 0.0,
                 repainting_end=_to_float(get("repainting_end"), None),
                 instruction=str(get("instruction", _DEFAULT_DIT_INSTRUCTION) or ""),
-                audio_cover_strength=_to_float(get("audio_cover_strength"), 1.0) or 1.0,
-                task_type=str(get("task_type", "text2music") or "text2music"),
+                audio_cover_strength=_to_float(_get_any("audio_cover_strength", "audioCoverStrength"), 1.0) or 1.0,
+                task_type=str(_get_any("task_type", "taskType", default="text2music") or "text2music"),
                 use_adg=_to_bool(get("use_adg"), False),
                 cfg_interval_start=_to_float(get("cfg_interval_start"), 0.0) or 0.0,
                 cfg_interval_end=_to_float(get("cfg_interval_end"), 1.0) or 1.0,
                 audio_format=str(get("audio_format", "mp3") or "mp3"),
-                use_tiled_decode=_to_bool(get("use_tiled_decode"), True),
+                use_tiled_decode=_to_bool(_get_any("use_tiled_decode", "useTiledDecode"), True),
                 lm_model_path=str(get("lm_model_path") or "").strip() or None,
                 lm_backend=str(get("lm_backend", "vllm") or "vllm"),
                 lm_temperature=_to_float(get("lm_temperature"), _LM_DEFAULT_TEMPERATURE) or _LM_DEFAULT_TEMPERATURE,
@@ -834,11 +946,15 @@ def create_app() -> FastAPI:
 
         if content_type.startswith("application/json"):
             body = await request.json()
-            req = GenerateMusicRequest(**body)
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="JSON payload must be an object")
+            req = _build_req_from_mapping(body, reference_audio_path=None, src_audio_path=None)
 
         elif content_type.endswith("+json"):
             body = await request.json()
-            req = GenerateMusicRequest(**body)
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="JSON payload must be an object")
+            req = _build_req_from_mapping(body, reference_audio_path=None, src_audio_path=None)
 
         elif content_type.startswith("multipart/form-data"):
             form = await request.form()
@@ -877,7 +993,7 @@ def create_app() -> FastAPI:
                 try:
                     body = json.loads(raw.decode("utf-8"))
                     if isinstance(body, dict):
-                        req = GenerateMusicRequest(**body)
+                        req = _build_req_from_mapping(body, reference_audio_path=None, src_audio_path=None)
                     else:
                         raise HTTPException(status_code=400, detail="JSON payload must be an object")
                 except HTTPException:
