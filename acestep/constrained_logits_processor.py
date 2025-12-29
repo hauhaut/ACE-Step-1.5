@@ -1662,16 +1662,16 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         elif self.state in [FSMState.BPM_VALUE, FSMState.DURATION_VALUE, FSMState.TIMESIG_VALUE]:
             # Accumulate numeric value using token ID sequence
             if generated_token_id == self.newline_token:
-                if self.state == FSMState.DURATION_VALUE and self.accumulated_value:
-                    try:
-                        generated_duration = int(self.accumulated_value)
-                        if self.target_codes is None and generated_duration > 0:
-                            self.target_codes = int(generated_duration * 5)
-                            if self.debug:
-                                logger.debug(f"Synced duration: {generated_duration}s -> Set target_codes limit to {self.target_codes}")
-                    except ValueError:
-                        if self.debug:
-                            logger.warning(f"Could not parse duration value: {self.accumulated_value}")
+                # if self.state == FSMState.DURATION_VALUE and self.accumulated_value:
+                #     try:
+                #         generated_duration = int(self.accumulated_value)
+                #         if self.target_codes is None and generated_duration > 0:
+                #             self.target_codes = int(generated_duration * 5)
+                #             if self.debug:
+                #                 logger.debug(f"Synced duration: {generated_duration}s -> Set target_codes limit to {self.target_codes}")
+                #     except ValueError:
+                #         if self.debug:
+                #             logger.warning(f"Could not parse duration value: {self.accumulated_value}")
                 # Newline ends the field
                 # Save old state before transition
                 old_state = self.state

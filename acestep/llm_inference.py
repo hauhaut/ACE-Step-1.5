@@ -448,6 +448,14 @@ class LLMHandler:
         
         output_text = self.llm_tokenizer.decode(generated_ids, skip_special_tokens=False)
         return output_text
+    
+    def has_all_metas(self, user_metadata: Optional[Dict[str, Optional[str]]]) -> bool:
+        """Check if all required metadata are present."""
+        if user_metadata is None:
+            return False
+        if 'bpm' in user_metadata and 'keyscale' in user_metadata and 'timesignature' in user_metadata and 'duration' in user_metadata and 'genres' in user_metadata:
+            return True
+        return False
 
     def generate_with_stop_condition(
         self,
@@ -485,28 +493,32 @@ class LLMHandler:
 
         # Determine stop condition
         stop_at_reasoning = (infer_type == "dit")
-        # For llm_dit mode: use normal generation (stops at EOS)
-        output_text, status = self.generate_from_formatted_prompt(
-            formatted_prompt=formatted_prompt,
-            cfg={
-                "temperature": temperature,
-                "cfg_scale": cfg_scale,
-                "negative_prompt": negative_prompt,
-                "top_k": top_k,
-                "top_p": top_p,
-                "repetition_penalty": repetition_penalty,
-                "target_duration": target_duration,
-                "user_metadata": user_metadata,
-            },
-            use_constrained_decoding=use_constrained_decoding,
-            constrained_decoding_debug=constrained_decoding_debug,
-            stop_at_reasoning=stop_at_reasoning,
-        )
-        if not output_text:
-            return {}, "", status
+        has_all_metas = self.has_all_metas(user_metadata)
+        audio_codes = ""
+        
+        if not has_all_metas or not stop_at_reasoning:
+            # For llm_dit mode: use normal generation (stops at EOS)
+            output_text, status = self.generate_from_formatted_prompt(
+                formatted_prompt=formatted_prompt,
+                cfg={
+                    "temperature": temperature,
+                    "cfg_scale": cfg_scale,
+                    "negative_prompt": negative_prompt,
+                    "top_k": top_k,
+                    "top_p": top_p,
+                    "repetition_penalty": repetition_penalty,
+                    "target_duration": target_duration,
+                    "user_metadata": user_metadata,
+                },
+                use_constrained_decoding=use_constrained_decoding,
+                constrained_decoding_debug=constrained_decoding_debug,
+                stop_at_reasoning=stop_at_reasoning,
+            )
+            if not output_text:
+                return {}, "", status
 
-        # Parse output
-        metadata, audio_codes = self.parse_lm_output(output_text)
+            # Parse output
+            metadata, audio_codes = self.parse_lm_output(output_text)
 
         codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
         status_msg = f"✅ Generated successfully\nOutput length: {len(output_text)} chars\nCodes count: {codes_count}"
