@@ -9,14 +9,12 @@ from typing import Optional, Dict, Any, Tuple, List
 from contextlib import contextmanager
 
 import torch
-from tqdm import tqdm
 from loguru import logger
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.generation.streamers import BaseStreamer
 from transformers.generation.logits_process import (
     LogitsProcessorList,
     RepetitionPenaltyLogitsProcessor,
-    LogitsProcessor,
 )
 from .constrained_logits_processor import MetadataConstrainedLogitsProcessor
 
@@ -229,114 +227,7 @@ class LLMHandler:
             self.llm_initialized = False
             error_msg = f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             return error_msg
-    
-    def generate_with_5hz_lm_vllm(
-        self, 
-        caption: str, 
-        lyrics: str, 
-        temperature: float = 0.6, 
-        cfg_scale: float = 1.0, 
-        negative_prompt: str = "NO USER INPUT",
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
-        repetition_penalty: float = 1.0,
-        use_constrained_decoding: bool = True,
-        constrained_decoding_debug: bool = False,
-        metadata_temperature: Optional[float] = 0.85,
-        codes_temperature: Optional[float] = None,
-        target_duration: Optional[float] = None,
-        user_metadata: Optional[Dict[str, Optional[str]]] = None,
-    ) -> Tuple[Dict[str, Any], str, str]:
-        """Generate metadata and audio codes using 5Hz LM with vllm backend
-        
-        Args:
-            caption: Text caption for music generation
-            lyrics: Lyrics for music generation
-            temperature: Base sampling temperature (used if phase-specific temps not set)
-            cfg_scale: CFG scale (>1.0 enables CFG)
-            negative_prompt: Negative prompt for CFG
-            top_k: Top-k sampling parameter
-            top_p: Top-p (nucleus) sampling parameter
-            repetition_penalty: Repetition penalty
-            use_constrained_decoding: Whether to use FSM-based constrained decoding
-            constrained_decoding_debug: Whether to print debug info for constrained decoding
-            metadata_temperature: Temperature for metadata generation (lower = more accurate)
-                                  If None, uses base temperature
-            codes_temperature: Temperature for audio codes generation (higher = more diverse)
-                               If None, uses base temperature
-            target_duration: Target duration in seconds for codes generation constraint.
-                            5 codes = 1 second. If specified, blocks EOS until target reached.
-        """
-        try:
-            from nanovllm import SamplingParams
-            
-            formatted_prompt = self.build_formatted_prompt(caption, lyrics)
-            logger.debug(f"[debug] formatted_prompt: {formatted_prompt}")
-            
-            # Determine effective temperature for sampler
-            # If using phase-specific temperatures, set sampler temp to 1.0 (processor handles it)
-            use_phase_temperatures = metadata_temperature is not None or codes_temperature is not None
-            effective_sampler_temp = 1.0 if use_phase_temperatures else temperature
-            
-            # Use shared constrained decoding processor if enabled
-            constrained_processor = None
-            update_state_fn = None
-            if use_constrained_decoding or use_phase_temperatures:
-                # Use shared processor, just update caption and settings
-                self.constrained_processor.enabled = use_constrained_decoding
-                self.constrained_processor.debug = constrained_decoding_debug
-                self.constrained_processor.metadata_temperature = metadata_temperature if use_phase_temperatures else None
-                self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
-                self.constrained_processor.update_caption(caption)
-                self.constrained_processor.set_target_duration(target_duration)
-                # Always call set_user_metadata to ensure previous settings are cleared if None
-                self.constrained_processor.set_user_metadata(user_metadata)
-                
-                constrained_processor = self.constrained_processor
-                update_state_fn = constrained_processor.update_state
-            
-            sampling_params = SamplingParams(
-                max_tokens=self.max_model_len-64, 
-                temperature=effective_sampler_temp, 
-                cfg_scale=cfg_scale,
-                top_k=top_k,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-                logits_processor=constrained_processor,
-                logits_processor_update_state=update_state_fn,
-            )
-            # Use CFG if cfg_scale > 1.0
-            if cfg_scale > 1.0:
-                # Build unconditional prompt (user input replaced with "NO USER INPUT")
-                formatted_unconditional_prompt = self.build_formatted_prompt(negative_prompt, is_negative_prompt=True)
-                outputs = self.llm.generate(
-                    [formatted_prompt], 
-                    sampling_params,
-                    unconditional_prompts=[formatted_unconditional_prompt]
-                )
-            else:
-                outputs = self.llm.generate([formatted_prompt], sampling_params)
-            # Extract text from output - handle different output formats
-            if isinstance(outputs, list) and len(outputs) > 0:
-                if hasattr(outputs[0], 'outputs') and len(outputs[0].outputs) > 0:
-                    output_text = outputs[0].outputs[0].text
-                elif hasattr(outputs[0], 'text'):
-                    output_text = outputs[0].text
-                elif isinstance(outputs[0], dict) and 'text' in outputs[0]:
-                    output_text = outputs[0]['text']
-                else:
-                    output_text = str(outputs[0])
-            else:
-                output_text = str(outputs)
-            metadata, audio_codes = self.parse_lm_output(output_text)
-            print(f"[debug]output_text: {output_text}")
-            codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
-            return metadata, audio_codes, f"✅ Generated successfully\nOutput length: {len(output_text)} chars\nCodes count: {codes_count}"
-            
-        except Exception as e:
-            error_msg = f"❌ Error generating with 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-            return {}, "", error_msg
-    
+
     def _run_vllm_from_formatted(
         self,
         formatted_prompt: str,
@@ -352,6 +243,7 @@ class LLMHandler:
         codes_temperature: Optional[float] = None,
         target_duration: Optional[float] = None,
         user_metadata: Optional[Dict[str, Optional[str]]] = None,
+        stop_at_reasoning: bool = False,
     ) -> str:
         """Shared vllm path: accept prebuilt formatted prompt and return text."""
         from nanovllm import SamplingParams
@@ -372,6 +264,7 @@ class LLMHandler:
             self.constrained_processor.set_target_duration(target_duration)
             # Always call set_user_metadata to ensure previous settings are cleared if None
             self.constrained_processor.set_user_metadata(user_metadata)
+            self.constrained_processor.set_stop_at_reasoning(stop_at_reasoning)
             
             constrained_processor = self.constrained_processor
 
@@ -410,213 +303,7 @@ class LLMHandler:
             output_text = str(outputs)
 
         return output_text
-    
-    def generate_with_5hz_lm_pt(
-        self, 
-        caption: str, 
-        lyrics: str, 
-        temperature: float = 0.6,
-        cfg_scale: float = 1.0,
-        negative_prompt: str = "NO USER INPUT",
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
-        repetition_penalty: float = 1.0,
-        use_constrained_decoding: bool = True,
-        constrained_decoding_debug: bool = False,
-        metadata_temperature: Optional[float] = 0.85,
-        codes_temperature: Optional[float] = None,
-        target_duration: Optional[float] = None,
-        user_metadata: Optional[Dict[str, Optional[str]]] = None,
-    ) -> Tuple[Dict[str, Any], str, str]:
-        """Generate metadata and audio codes using 5Hz LM with PyTorch backend
-        
-        Args:
-            caption: Text caption for music generation
-            lyrics: Lyrics for music generation
-            temperature: Base sampling temperature (used if phase-specific temps not set)
-            cfg_scale: CFG scale (>1.0 enables CFG)
-            negative_prompt: Negative prompt for CFG
-            top_k: Top-k sampling parameter
-            top_p: Top-p (nucleus) sampling parameter
-            repetition_penalty: Repetition penalty
-            use_constrained_decoding: Whether to use FSM-based constrained decoding
-            constrained_decoding_debug: Whether to print debug info for constrained decoding
-            metadata_temperature: Temperature for metadata generation (lower = more accurate)
-                                  If None, uses base temperature
-            codes_temperature: Temperature for audio codes generation (higher = more diverse)
-                               If None, uses base temperature
-            target_duration: Target duration in seconds for codes generation constraint.
-                            5 codes = 1 second. If specified, blocks EOS until target reached.
-        """
-        try:
-            formatted_prompt = self.build_formatted_prompt(caption, lyrics)
-            
-            # Tokenize the prompt
-            inputs = self.llm_tokenizer(
-                formatted_prompt,
-                return_tensors="pt",
-                padding=False,
-            )
-            
-            # Generate with the model
-            with self._load_model_context():
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                
-                # Get max_new_tokens from model config or use a default
-                max_new_tokens = getattr(self.llm.config, 'max_new_tokens', 4096)
-                if hasattr(self, 'max_model_len'):
-                    max_new_tokens = min(max_new_tokens, self.max_model_len - 64)
-                
-                # Define custom streamer for tqdm
-                class TqdmTokenStreamer(BaseStreamer):
-                    def __init__(self, total):
-                        self.pbar = tqdm(total=total, desc="Generating 5Hz tokens", unit="token", maxinterval=1)
-                        
-                    def put(self, value):
-                        # value is tensor of token ids
-                        if value.dim() > 1:
-                            num_tokens = value.numel()
-                        else:
-                            num_tokens = len(value)
-                        self.pbar.update(num_tokens)
-                        
-                    def end(self):
-                        self.pbar.close()
 
-                streamer = TqdmTokenStreamer(total=max_new_tokens)
-
-                # Determine if using phase-specific temperatures
-                use_phase_temperatures = metadata_temperature is not None or codes_temperature is not None
-                effective_temperature = 1.0 if use_phase_temperatures else temperature
-
-                # Use shared constrained decoding processor if enabled
-                constrained_processor = None
-                if use_constrained_decoding or use_phase_temperatures:
-                    # Use shared processor, just update caption and settings
-                    self.constrained_processor.enabled = use_constrained_decoding
-                    self.constrained_processor.debug = constrained_decoding_debug
-                    self.constrained_processor.metadata_temperature = metadata_temperature if use_phase_temperatures else None
-                    self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
-                    self.constrained_processor.update_caption(caption)
-                    self.constrained_processor.set_target_duration(target_duration)
-                    # Always call set_user_metadata to ensure previous settings are cleared if None
-                    self.constrained_processor.set_user_metadata(user_metadata)
-                    
-                    constrained_processor = self.constrained_processor
-
-                # Build logits processor list (only for CFG and repetition penalty)
-                logits_processor = LogitsProcessorList()
-                
-                # Add repetition penalty if needed (generate() doesn't support it natively in all versions)
-                if repetition_penalty != 1.0:
-                    logits_processor.append(RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty))
-                
-                # Handle CFG if cfg_scale > 1.0
-                if cfg_scale > 1.0:
-                    # Build unconditional prompt
-                    formatted_unconditional_prompt = self.build_formatted_prompt(negative_prompt, is_negative_prompt=True)
-                    
-                    # Tokenize both prompts together to ensure same length (with left padding)
-                    # Left padding is important for generation tasks
-                    batch_texts = [formatted_prompt, formatted_unconditional_prompt]
-                    original_padding_side = self.llm_tokenizer.padding_side
-                    self.llm_tokenizer.padding_side = 'left'
-                    batch_inputs = self.llm_tokenizer(
-                        batch_texts,
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=True,
-                    )
-                    self.llm_tokenizer.padding_side = original_padding_side
-                    batch_inputs = {k: v.to(self.device) for k, v in batch_inputs.items()}
-                    
-                    # Extract conditional and unconditional inputs
-                    batch_input_ids = batch_inputs['input_ids']  # [2, seq_len]
-                    batch_attention_mask = batch_inputs.get('attention_mask', None)
-                    
-                    # Use custom CFG generation loop
-                    outputs = self._generate_with_cfg_custom(
-                        batch_input_ids=batch_input_ids,
-                        batch_attention_mask=batch_attention_mask,
-                        max_new_tokens=max_new_tokens,
-                        temperature=effective_temperature,
-                        cfg_scale=cfg_scale,
-                        top_k=top_k,
-                        top_p=top_p,
-                        repetition_penalty=repetition_penalty,
-                        pad_token_id=self.llm_tokenizer.pad_token_id or self.llm_tokenizer.eos_token_id,
-                        streamer=streamer,
-                        constrained_processor=constrained_processor,
-                    )
-                    
-                    # Extract only the conditional output (first in batch)
-                    outputs = outputs[0:1]  # Keep only conditional output
-                elif use_constrained_decoding or use_phase_temperatures:
-                    # Use custom generation loop for constrained decoding or phase temperatures (non-CFG)
-                    input_ids = inputs['input_ids']
-                    attention_mask = inputs.get('attention_mask', None)
-                    
-                    outputs = self._generate_with_constrained_decoding(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        max_new_tokens=max_new_tokens,
-                        temperature=effective_temperature,
-                        top_k=top_k,
-                        top_p=top_p,
-                        repetition_penalty=repetition_penalty,
-                        pad_token_id=self.llm_tokenizer.pad_token_id or self.llm_tokenizer.eos_token_id,
-                        streamer=streamer,
-                        constrained_processor=constrained_processor,
-                    )
-                else:
-                    # Generate without CFG using native generate() parameters
-                    with torch.no_grad():
-                        outputs = self.llm.generate(
-                            **inputs,
-                            max_new_tokens=max_new_tokens,
-                            temperature=effective_temperature if effective_temperature > 0 else 1.0,
-                            do_sample=True if effective_temperature > 0 else False,
-                            top_k=top_k if top_k is not None and top_k > 0 else None,
-                            top_p=top_p if top_p is not None and 0.0 < top_p < 1.0 else None,
-                            logits_processor=logits_processor if len(logits_processor) > 0 else None,
-                            pad_token_id=self.llm_tokenizer.pad_token_id or self.llm_tokenizer.eos_token_id,
-                            streamer=streamer,
-                        )
-            
-            # Decode the generated tokens
-            # outputs is a tensor with shape [batch_size, seq_len], extract first sequence
-            if isinstance(outputs, torch.Tensor):
-                if outputs.dim() == 2:
-                    generated_ids = outputs[0]
-                else:
-                    generated_ids = outputs
-            else:
-                generated_ids = outputs[0]
-            
-            # Only decode the newly generated tokens (skip the input prompt)
-            # Use the correct input length based on whether CFG was used
-            if cfg_scale > 1.0:
-                # In CFG case, use batch_inputs length (both sequences have same length due to padding)
-                input_length = batch_inputs['input_ids'].shape[1]
-            else:
-                input_length = inputs['input_ids'].shape[1]
-            generated_ids = generated_ids[input_length:]
-            
-            # Move to CPU for decoding
-            if generated_ids.is_cuda:
-                generated_ids = generated_ids.cpu()
-            
-            output_text = self.llm_tokenizer.decode(generated_ids, skip_special_tokens=False)
-            
-            metadata, audio_codes = self.parse_lm_output(output_text)
-            codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
-            return metadata, audio_codes, f"✅ Generated successfully\nOutput length: {len(output_text)} chars\nCodes count: {codes_count}"
-            
-        except Exception as e:
-            error_msg = f"❌ Error generating with 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-            logger.error(error_msg)
-            return {}, "", error_msg
-    
     def _run_pt_from_formatted(
         self,
         formatted_prompt: str,
@@ -630,6 +317,7 @@ class LLMHandler:
         constrained_decoding_debug: bool = False,
         target_duration: Optional[float] = None,
         user_metadata: Optional[Dict[str, Optional[str]]] = None,
+        stop_at_reasoning: bool = False,
     ) -> str:
         """Shared PyTorch path: accept prebuilt formatted prompt and return text."""
         inputs = self.llm_tokenizer(
@@ -649,6 +337,7 @@ class LLMHandler:
             self.constrained_processor.set_target_duration(target_duration)
             # Always call set_user_metadata to ensure previous settings are cleared if None
             self.constrained_processor.set_user_metadata(user_metadata)
+            self.constrained_processor.set_stop_at_reasoning(stop_at_reasoning)
             
             constrained_processor = self.constrained_processor
 
@@ -759,99 +448,13 @@ class LLMHandler:
         
         output_text = self.llm_tokenizer.decode(generated_ids, skip_special_tokens=False)
         return output_text
-    
-    def generate_with_5hz_lm(
-        self, 
-        caption: str, 
-        lyrics: str, 
-        temperature: float = 0.6, 
-        cfg_scale: float = 1.0, 
-        negative_prompt: str = "NO USER INPUT",
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
-        repetition_penalty: float = 1.0,
-        use_constrained_decoding: bool = True,
-        constrained_decoding_debug: bool = False,
-        metadata_temperature: Optional[float] = 0.85,
-        codes_temperature: Optional[float] = None,
-        target_duration: Optional[float] = None,
-        user_metadata: Optional[Dict[str, Optional[str]]] = None,
-    ) -> Tuple[Dict[str, Any], str, str]:
-        """Generate metadata and audio codes using 5Hz LM
-        
-        Args:
-            caption: Text caption for music generation
-            lyrics: Lyrics for music generation
-            temperature: Base sampling temperature (used if phase-specific temps not set)
-            cfg_scale: CFG scale (>1.0 enables CFG)
-            negative_prompt: Negative prompt for CFG
-            top_k: Top-k sampling parameter
-            top_p: Top-p (nucleus) sampling parameter
-            repetition_penalty: Repetition penalty
-            use_constrained_decoding: Whether to use FSM-based constrained decoding for metadata
-            constrained_decoding_debug: Whether to print debug info for constrained decoding
-            metadata_temperature: Temperature for metadata generation (lower = more accurate)
-                                  Recommended: 0.3-0.5 for accurate metadata
-            codes_temperature: Temperature for audio codes generation (higher = more diverse)
-                               Recommended: 0.7-1.0 for diverse codes
-            target_duration: Target duration in seconds for codes generation constraint.
-                            5 codes = 1 second. If specified, blocks EOS until target reached.
-        """
-        # Check if 5Hz LM is initialized
-        if not hasattr(self, 'llm_initialized') or not self.llm_initialized:
-            debug_info = f"llm_initialized={getattr(self, 'llm_initialized', 'not set')}, "
-            debug_info += f"has_llm={hasattr(self, 'llm')}, "
-            debug_info += f"llm_is_none={getattr(self, 'llm', None) is None}, "
-            debug_info += f"llm_backend={getattr(self, 'llm_backend', 'not set')}"
-            return {}, "", f"❌ 5Hz LM not initialized. Please initialize it first. Debug: {debug_info}"
-        
-        if not hasattr(self, 'llm') or self.llm is None:
-            return {}, "", "❌ 5Hz LM model not loaded. Please initialize it first."
-        
-        if not hasattr(self, 'llm_backend'):
-            return {}, "", "❌ 5Hz LM backend not set. Please initialize it first."
-        
-        if self.llm_backend == "vllm":
-            return self.generate_with_5hz_lm_vllm(
-                caption=caption, 
-                lyrics=lyrics, 
-                temperature=temperature, 
-                cfg_scale=cfg_scale, 
-                negative_prompt=negative_prompt,
-                top_k=top_k, 
-                top_p=top_p, 
-                repetition_penalty=repetition_penalty,
-                use_constrained_decoding=use_constrained_decoding, 
-                constrained_decoding_debug=constrained_decoding_debug,
-                metadata_temperature=metadata_temperature,
-                codes_temperature=codes_temperature,
-                target_duration=target_duration,
-                user_metadata=user_metadata,
-            )
-        else:
-            return self.generate_with_5hz_lm_pt(
-                caption=caption, 
-                lyrics=lyrics, 
-                temperature=temperature, 
-                cfg_scale=cfg_scale, 
-                negative_prompt=negative_prompt,
-                top_k=top_k, 
-                top_p=top_p, 
-                repetition_penalty=repetition_penalty,
-                use_constrained_decoding=use_constrained_decoding, 
-                constrained_decoding_debug=constrained_decoding_debug,
-                metadata_temperature=metadata_temperature,
-                codes_temperature=codes_temperature,
-                target_duration=target_duration,
-                user_metadata=user_metadata,
-            )
 
     def generate_with_stop_condition(
         self,
         caption: str,
         lyrics: str,
         infer_type: str,
-        temperature: float = 0.6,
+        temperature: float = 0.85,
         cfg_scale: float = 1.0,
         negative_prompt: str = "NO USER INPUT",
         top_k: Optional[int] = None,
@@ -859,8 +462,6 @@ class LLMHandler:
         repetition_penalty: float = 1.0,
         use_constrained_decoding: bool = True,
         constrained_decoding_debug: bool = False,
-        metadata_temperature: Optional[float] = 0.85,
-        codes_temperature: Optional[float] = None,
         target_duration: Optional[float] = None,
         user_metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Tuple[Dict[str, Any], str, str]:
@@ -879,28 +480,14 @@ class LLMHandler:
         if infer_type not in {"dit", "llm_dit"}:
             return {}, "", f"❌ invalid infer_type: {infer_type!r} (expected 'dit' or 'llm_dit')"
 
-        if infer_type == "llm_dit":
-            return self.generate_with_5hz_lm(
-                caption=caption,
-                lyrics=lyrics,
-                temperature=temperature,
-                cfg_scale=cfg_scale,
-                negative_prompt=negative_prompt,
-                top_k=top_k,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-                use_constrained_decoding=use_constrained_decoding,
-                constrained_decoding_debug=constrained_decoding_debug,
-                metadata_temperature=metadata_temperature,
-                codes_temperature=codes_temperature,
-                target_duration=target_duration,
-                user_metadata=user_metadata,
-            )
-
-        # dit: generate and truncate at reasoning end tag
+        # Build formatted prompt
         formatted_prompt = self.build_formatted_prompt(caption, lyrics)
+
+        # Determine stop condition
+        stop_at_reasoning = (infer_type == "dit")
+        # For llm_dit mode: use normal generation (stops at EOS)
         output_text, status = self.generate_from_formatted_prompt(
-            formatted_prompt,
+            formatted_prompt=formatted_prompt,
             cfg={
                 "temperature": temperature,
                 "cfg_scale": cfg_scale,
@@ -908,20 +495,22 @@ class LLMHandler:
                 "top_k": top_k,
                 "top_p": top_p,
                 "repetition_penalty": repetition_penalty,
+                "target_duration": target_duration,
                 "user_metadata": user_metadata,
             },
             use_constrained_decoding=use_constrained_decoding,
             constrained_decoding_debug=constrained_decoding_debug,
+            stop_at_reasoning=stop_at_reasoning,
         )
         if not output_text:
             return {}, "", status
 
-        if self.STOP_REASONING_TAG in output_text:
-            stop_idx = output_text.find(self.STOP_REASONING_TAG)
-            output_text = output_text[: stop_idx + len(self.STOP_REASONING_TAG)]
+        # Parse output
+        metadata, audio_codes = self.parse_lm_output(output_text)
 
-        metadata, _audio_codes = self.parse_lm_output(output_text)
-        return metadata, "", status
+        codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
+        status_msg = f"✅ Generated successfully\nOutput length: {len(output_text)} chars\nCodes count: {codes_count}"
+        return metadata, audio_codes, status_msg
 
     def build_formatted_prompt(self, caption: str, lyrics: str = "", is_negative_prompt: bool = False) -> str:
         """
@@ -952,6 +541,7 @@ class LLMHandler:
         cfg: Optional[Dict[str, Any]] = None,
         use_constrained_decoding: bool = True,
         constrained_decoding_debug: bool = False,
+        stop_at_reasoning: bool = False,
     ) -> Tuple[str, str]:
         """
         Generate raw LM text output from a pre-built formatted prompt.
@@ -966,6 +556,7 @@ class LLMHandler:
                 - target_duration (float): Target duration in seconds for codes generation
             use_constrained_decoding: Whether to use FSM-based constrained decoding
             constrained_decoding_debug: Whether to enable debug logging for constrained decoding
+            stop_at_reasoning: If True, stop generation immediately after </think> tag (no audio codes)
 
         Returns:
             (output_text, status_message)
@@ -1003,6 +594,7 @@ class LLMHandler:
                     constrained_decoding_debug=constrained_decoding_debug,
                     target_duration=target_duration,
                     user_metadata=user_metadata,
+                    stop_at_reasoning=stop_at_reasoning,
                 )
                 return output_text, f"✅ Generated successfully (vllm) | length={len(output_text)}"
 
@@ -1019,6 +611,7 @@ class LLMHandler:
                 constrained_decoding_debug=constrained_decoding_debug,
                 target_duration=target_duration,
                 user_metadata=user_metadata,
+                stop_at_reasoning=stop_at_reasoning,
             )
             return output_text, f"✅ Generated successfully (pt) | length={len(output_text)}"
 
@@ -1436,4 +1029,3 @@ class LLMHandler:
             torch.cuda.empty_cache()
             offload_time = time.time() - start_time
             logger.info(f"Offloaded LLM to CPU in {offload_time:.4f}s")
-

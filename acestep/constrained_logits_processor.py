@@ -105,6 +105,9 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.target_codes: Optional[int] = None  # Computed target codes count
         self.codes_count: int = 0  # Counter for generated codes
         
+        # Stop at reasoning flag - if True, stop generation after </think> tag
+        self.stop_at_reasoning: bool = False
+        
         # Current state
         self.state = FSMState.THINK_TAG
         self.position_in_state = 0  # Position within current state's fixed string
@@ -265,6 +268,16 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         """Set whether to skip genres generation and rebuild state transitions."""
         self.skip_genres = skip
         self._build_state_transitions()
+    
+    def set_stop_at_reasoning(self, stop: bool):
+        """
+        Set whether to stop generation after </think> tag.
+        
+        Args:
+            stop: If True, generation will stop immediately after </think> tag is generated.
+                  If False, generation continues to codes generation phase.
+        """
+        self.stop_at_reasoning = stop
     
     def set_user_metadata(self, metadata: Optional[Dict[str, Optional[str]]] = None):
         """
@@ -957,29 +970,73 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         """
         Get the token IDs that can continue the fixed string from current position.
         Returns list of allowed token IDs.
+        
+        Strategy: Find the longest prefix that encodes to a single token, and return that token.
+        This ensures we generate by tokens, not character-by-character.
         """
         remaining = fixed_str[self.position_in_state:]
         if not remaining:
             return []
         
-        # Try to find tokens that match the beginning of remaining string
-        allowed = []
+        if self.debug:
+            logger.debug(f"_get_allowed_tokens_for_fixed_string: fixed_str={repr(fixed_str)}, position_in_state={self.position_in_state}, remaining={repr(remaining)}")
         
-        # Try encoding progressively longer prefixes
-        for end in range(1, len(remaining) + 1):
+        # Try encoding progressively longer prefixes, from longest to shortest
+        # We want to find the longest prefix that encodes to a single token
+        best_token = None
+        best_prefix_len = 0
+        
+        # First pass: find the longest prefix that encodes to exactly one token
+        for end in range(len(remaining), 0, -1):  # Start from longest prefix
+            prefix = remaining[:end]
+            tokens = self.tokenizer.encode(prefix, add_special_tokens=False)
+            if tokens and len(tokens) == 1:
+                # Found a prefix that encodes to a single token
+                # Use this one (longest match)
+                best_token = tokens[0]
+                best_prefix_len = end
+                if self.debug:
+                    logger.debug(f"Found single-token match: prefix={repr(prefix)}, token_id={best_token}, token_text={repr(self.tokenizer.decode([best_token]))}")
+                break
+        
+        # If we found a single-token match, return it (this is the preferred case)
+        if best_token is not None:
+            return [best_token]
+        
+        # Fallback: if no single-token match found, collect all possible first tokens
+        # This handles edge cases where the string might need multiple tokens
+        # But we still want to prefer longer matches
+        # IMPORTANT: Only consider tokens that actually match the beginning of remaining string
+        # Decode each candidate token and verify it matches the prefix
+        allowed_tokens = {}
+        for end in range(1, min(len(remaining) + 1, 20)):  # Limit search to avoid too many iterations
             prefix = remaining[:end]
             tokens = self.tokenizer.encode(prefix, add_special_tokens=False)
             if tokens:
-                # The first token that matches is valid
-                allowed.append(tokens[0])
+                first_token = tokens[0]
+                # Verify: decode the token and check it matches the prefix start
+                decoded_token = self.tokenizer.decode([first_token])
+                # Normalize both for comparison (strip and lower)
+                normalized_prefix = prefix.lstrip().lower()
+                normalized_decoded = decoded_token.lstrip().lower()
+                
+                # Check if decoded token matches the prefix start (allowing for space prefixes)
+                if normalized_decoded.startswith(normalized_prefix) or normalized_prefix.startswith(normalized_decoded):
+                    # Store the longest prefix length for each token
+                    if first_token not in allowed_tokens or end > allowed_tokens[first_token]:
+                        allowed_tokens[first_token] = end
         
-        # Also check single character encoding
-        first_char = remaining[0]
-        char_tokens = self.tokenizer.encode(first_char, add_special_tokens=False)
-        if char_tokens:
-            allowed.extend(char_tokens)
+        # Return tokens sorted by prefix length (longest first)
+        # This ensures we prefer longer matches
+        sorted_tokens = sorted(allowed_tokens.items(), key=lambda x: x[1], reverse=True)
+        result = [token for token, _ in sorted_tokens] if sorted_tokens else []
         
-        return list(set(allowed))
+        if self.debug:
+            logger.debug(f"Fallback: returning {len(result)} tokens: {[(t, repr(self.tokenizer.decode([t]))) for t in result[:5]]}")
+            if result:
+                logger.debug(f"Fixed string: {repr(fixed_str)}, position: {self.position_in_state}, remaining: {repr(remaining)}")
+        
+        return result
     
     def _get_allowed_digit_tokens(self, min_val: int, max_val: int) -> List[int]:
         """
@@ -1271,8 +1328,28 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         
         if self.state in self.fixed_strings:
             # Fixed string state: force specific tokens
-            allowed = self._get_allowed_tokens_for_fixed_string(self.fixed_strings[self.state])
+            fixed_str = self.fixed_strings[self.state]
+            allowed = self._get_allowed_tokens_for_fixed_string(fixed_str)
+            
             if allowed:
+                # Check if we should stop at reasoning (after </think> tag)
+                # This happens when we're about to complete the </think> tag
+                if self.state == FSMState.THINK_END_TAG and self.stop_at_reasoning:
+                    # Check if the next token would complete the fixed string
+                    # We check if position_in_state + length of next token would complete it
+                    # Since we don't know which token will be selected, we check if we're close to completion
+                    # Actually, a better approach: check if this is the last character(s) of the fixed string
+                    remaining_chars = len(fixed_str) - self.position_in_state
+                    # If remaining is small (<= 10 chars, which is typically 1-2 tokens), force EOS
+                    if remaining_chars <= 10:
+                        # Force EOS token to stop generation
+                        if self.eos_token_id is not None:
+                            mask[0, self.eos_token_id] = 0
+                            scores = scores + mask
+                            if self.debug:
+                                logger.debug(f"stop_at_reasoning=True: forcing EOS near end of </think> tag (remaining: {remaining_chars} chars)")
+                            return scores
+                
                 for t in allowed:
                     mask[0, t] = 0
                 # Apply mask
@@ -1283,6 +1360,17 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 # This will be done in update_state() after token selection
             else:
                 # Position exceeds string, move to next state
+                # If stop_at_reasoning is True and we're transitioning from THINK_END_TAG,
+                # force EOS before transitioning
+                if self.state == FSMState.THINK_END_TAG and self.stop_at_reasoning:
+                    # Force EOS token to stop generation
+                    if self.eos_token_id is not None:
+                        mask[0, self.eos_token_id] = 0
+                        scores = scores + mask
+                        if self.debug:
+                            logger.debug(f"stop_at_reasoning=True: forcing EOS after completing </think> tag")
+                        return scores
+                
                 old_state = self.state
                 self._transition_to_next_state()
                 # Avoid infinite recursion: if we're still in a fixed_strings state, just return scores
@@ -1351,7 +1439,6 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     # All digits generated, force newline
                     if self.newline_token:
                         mask[0, self.newline_token] = 0
-                        self._transition_to_next_state()
                 
                 scores = scores + mask
             else:
@@ -1487,7 +1574,16 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         """Transition to the next FSM state."""
         if self.state in self.next_state:
             old_state = self.state
-            self.state = self.next_state[self.state]
+            next_state = self.next_state[self.state]
+            
+            # If stop_at_reasoning is True and we're transitioning from THINK_END_TAG,
+            # skip CODES_GENERATION and go directly to COMPLETED
+            if self.stop_at_reasoning and old_state == FSMState.THINK_END_TAG:
+                next_state = FSMState.COMPLETED
+                if self.debug:
+                    logger.debug(f"stop_at_reasoning=True: skipping CODES_GENERATION, going directly to COMPLETED")
+            
+            self.state = next_state
             self.position_in_state = 0
             self.accumulated_value = ""  # Legacy, kept for compatibility
             self.accumulated_token_ids = []  # Reset token ID sequence for new field
@@ -1566,8 +1662,26 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         elif self.state in [FSMState.BPM_VALUE, FSMState.DURATION_VALUE, FSMState.TIMESIG_VALUE]:
             # Accumulate numeric value using token ID sequence
             if generated_token_id == self.newline_token:
+                if self.state == FSMState.DURATION_VALUE and self.accumulated_value:
+                    try:
+                        generated_duration = int(self.accumulated_value)
+                        if self.target_codes is None and generated_duration > 0:
+                            self.target_codes = int(generated_duration * 5)
+                            if self.debug:
+                                logger.debug(f"Synced duration: {generated_duration}s -> Set target_codes limit to {self.target_codes}")
+                    except ValueError:
+                        if self.debug:
+                            logger.warning(f"Could not parse duration value: {self.accumulated_value}")
                 # Newline ends the field
+                # Save old state before transition
+                old_state = self.state
                 self._transition_to_next_state()
+                # IMPORTANT: After state transition, if new state is a fixed_strings state,
+                # we should NOT update position_in_state with the newline token length,
+                # because that token belongs to the old state, not the new state.
+                # Return early to avoid the fixed_strings update logic below.
+                if self.state in self.fixed_strings:
+                    return
             else:
                 # Add token ID to sequence (for prefix tree lookup)
                 self.accumulated_token_ids.append(generated_token_id)
@@ -1577,14 +1691,28 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         
         elif self.state == FSMState.GENRES_VALUE:
             if generated_token_id == self.newline_token:
+                # Newline ends the field
                 self._transition_to_next_state()
+                # IMPORTANT: After state transition, if new state is a fixed_strings state,
+                # we should NOT update position_in_state with the newline token length,
+                # because that token belongs to the old state, not the new state.
+                # Return early to avoid the fixed_strings update logic below.
+                if self.state in self.fixed_strings:
+                    return
             else:
                 # Genres still uses string-based trie, so keep accumulated_value
                 self.accumulated_value += token_str
         
         elif self.state == FSMState.KEYSCALE_VALUE:
             if generated_token_id == self.newline_token:
+                # Newline ends the field
                 self._transition_to_next_state()
+                # IMPORTANT: After state transition, if new state is a fixed_strings state,
+                # we should NOT update position_in_state with the newline token length,
+                # because that token belongs to the old state, not the new state.
+                # Return early to avoid the fixed_strings update logic below.
+                if self.state in self.fixed_strings:
+                    return
             else:
                 # Add token ID to sequence (for prefix tree lookup)
                 self.accumulated_token_ids.append(generated_token_id)
