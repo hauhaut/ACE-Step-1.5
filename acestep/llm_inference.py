@@ -16,7 +16,7 @@ from transformers.generation.logits_process import (
     LogitsProcessorList,
     RepetitionPenaltyLogitsProcessor,
 )
-from .constrained_logits_processor import MetadataConstrainedLogitsProcessor
+from acestep.constrained_logits_processor import MetadataConstrainedLogitsProcessor
 
 
 class LLMHandler:

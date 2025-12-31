@@ -6,9 +6,17 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = {text = "Apache-2.0"}
 dependencies = [
-    "torch>=2.9.1",
-    "torchvision",
-    "torchaudio>=2.9.1",
+    # PyTorch for Linux/Windows with CUDA
+    "torch>=2.9.1; sys_platform != 'darwin'",
+    "torchvision; sys_platform != 'darwin'",
+    "torchaudio>=2.9.1; sys_platform != 'darwin'",
+    
+    # PyTorch for macOS (CPU / MPS)
+    "torch>=2.9.1; sys_platform == 'darwin'",
+    "torchvision; sys_platform == 'darwin'",
+    "torchaudio>=2.9.1; sys_platform == 'darwin'",
+
+    # Common dependencies
     "transformers",
     "diffusers",
     "gradio",

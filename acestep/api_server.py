@@ -33,8 +33,8 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from .handler import AceStepHandler
-from .llm_inference import LLMHandler
+from acestep.handler import AceStepHandler
+from acestep.llm_inference import LLMHandler
 
 
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
@@ -1069,6 +1069,15 @@ def create_app() -> FastAPI:
             error=rec.error,
         )
 
+    @app.get("/health")
+    async def health_check():
+        """Health check endpoint for service status."""
+        return {
+            "status": "ok",
+            "service": "ACE-Step API",
+            "version": "1.0",
+        }
+
     return app
 
 
@@ -1076,13 +1085,31 @@ app = create_app()
 
 
 def main() -> None:
+    import argparse
     import uvicorn
 
-    host = os.getenv("ACESTEP_API_HOST", "127.0.0.1")
-    port = int(os.getenv("ACESTEP_API_PORT", "8001"))
+    parser = argparse.ArgumentParser(description="ACE-Step API server")
+    parser.add_argument(
+        "--host",
+        default=os.getenv("ACESTEP_API_HOST", "127.0.0.1"),
+        help="Bind host (default from ACESTEP_API_HOST or 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("ACESTEP_API_PORT", "8001")),
+        help="Bind port (default from ACESTEP_API_PORT or 8001)",
+    )
+    args = parser.parse_args()
 
     # IMPORTANT: in-memory queue/store -> workers MUST be 1
-    uvicorn.run("acestep.api_server:app", host=host, port=port, reload=False, workers=1)
+    uvicorn.run(
+        "acestep.api_server:app",
+        host=str(args.host),
+        port=int(args.port),
+        reload=False,
+        workers=1,
+    )
 
 
 if __name__ == "__main__":
