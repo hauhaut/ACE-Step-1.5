@@ -3,7 +3,7 @@ name = "ace-step"
 version = "1.5.0"
 description = "ACE-Step 1.5"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.11, <3.12"
 license = {text = "Apache-2.0"}
 dependencies = [
     # PyTorch for Linux/Windows with CUDA

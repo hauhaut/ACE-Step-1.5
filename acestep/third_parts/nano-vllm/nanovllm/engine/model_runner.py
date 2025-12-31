@@ -3,6 +3,7 @@ import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
+import sys
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
@@ -55,7 +56,9 @@ class ModelRunner:
         self.event = event
         dist_port = find_available_port()
         print(f"[debug]dist_port: {dist_port}")
-        dist.init_process_group("nccl", f"tcp://localhost:{dist_port}", world_size=self.world_size, rank=rank)
+        # Use gloo backend on Windows, nccl on Linux/other platforms
+        backend = "gloo" if sys.platform == "win32" else "nccl"
+        dist.init_process_group(backend, f"tcp://localhost:{dist_port}", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         # Use dtype instead of deprecated torch_dtype
