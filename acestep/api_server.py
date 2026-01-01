@@ -1091,6 +1091,25 @@ def create_app() -> FastAPI:
             "version": "1.0",
         }
 
+    @app.get("/v1/audio")
+    async def get_audio(path: str):
+        """Serve audio file by path."""
+        from fastapi.responses import FileResponse
+
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail=f"Audio file not found: {path}")
+
+        ext = os.path.splitext(path)[1].lower()
+        media_types = {
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".flac": "audio/flac",
+            ".ogg": "audio/ogg",
+        }
+        media_type = media_types.get(ext, "audio/mpeg")
+
+        return FileResponse(path, media_type=media_type)
+
     return app
 
 
