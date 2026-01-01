@@ -276,6 +276,19 @@ def create_app() -> FastAPI:
     INITIAL_AVG_JOB_SECONDS = float(os.getenv("ACESTEP_AVG_JOB_SECONDS", "5.0"))
     AVG_WINDOW = int(os.getenv("ACESTEP_AVG_WINDOW", "50"))
 
+    # 服务器配置，用于生成音频下载 URL
+    SERVER_HOST = os.getenv("ACESTEP_API_HOST", "127.0.0.1")
+    SERVER_PORT = int(os.getenv("ACESTEP_API_PORT", "8001"))
+
+    def _path_to_audio_url(path: str) -> str:
+        """将本地文件路径转换为可下载的 HTTP URL"""
+        if not path:
+            return path
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        encoded_path = urllib.parse.quote(path, safe="")
+        return f"http://{SERVER_HOST}:{SERVER_PORT}/v1/audio?path={encoded_path}"
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Clear proxy env that may affect downstream libs
@@ -732,9 +745,9 @@ def create_app() -> FastAPI:
                     progress=None,
                 )
                 return {
-                    "first_audio_path": first,
-                    "second_audio_path": second,
-                    "audio_paths": paths,
+                    "first_audio_path": _path_to_audio_url(first) if first else None,
+                    "second_audio_path": _path_to_audio_url(second) if second else None,
+                    "audio_paths": [_path_to_audio_url(p) for p in (paths or [])],
                     "generation_info": gen_info,
                     "status_message": status_msg,
                     "seed_value": seed_value,
