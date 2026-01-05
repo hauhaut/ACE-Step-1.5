@@ -6,6 +6,18 @@ from transformers import AutoTokenizer
 from transformers.generation.logits_process import LogitsProcessor
 import os
 import torch
+from acestep.constants import (
+    VALID_LANGUAGES,
+    KEYSCALE_NOTES,
+    KEYSCALE_ACCIDENTALS,
+    KEYSCALE_MODES,
+    VALID_KEYSCALES,
+    BPM_MIN,
+    BPM_MAX,
+    DURATION_MIN,
+    DURATION_MAX,
+    VALID_TIME_SIGNATURES,
+)
 
 
 # ==============================================================================
@@ -18,6 +30,8 @@ class FSMState(Enum):
     BPM_NAME = auto()            # Generating "bpm: "
     BPM_VALUE = auto()           # Generating numeric value 30-300
     NEWLINE_AFTER_BPM = auto()   # Generating "\n" after bpm value
+    CAPTION_NAME = auto()        # Generating "caption: "
+    CAPTION_VALUE = auto()       # Generating caption text (no code blocks/newlines)
     DURATION_NAME = auto()       # Generating "duration: "
     DURATION_VALUE = auto()      # Generating numeric value 10-600
     NEWLINE_AFTER_DURATION = auto()
@@ -27,6 +41,8 @@ class FSMState(Enum):
     KEYSCALE_NAME = auto()       # Generating "keyscale: "
     KEYSCALE_VALUE = auto()      # Generating keyscale pattern
     NEWLINE_AFTER_KEYSCALE = auto()
+    LANGUAGE_NAME = auto()       # Generating "language: "
+    LANGUAGE_VALUE = auto()      # Generating language code (en, zh, ja, etc.)
     TIMESIG_NAME = auto()        # Generating "timesignature: "
     TIMESIG_VALUE = auto()       # Generating 2, 3, 4, or 6
     NEWLINE_AFTER_TIMESIG = auto()
@@ -42,15 +58,18 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
     This processor enforces the following format:
     <think>
     bpm: [30-300]
+    caption: [text without code blocks, ends with period + newline]
     duration: [10-600]
-    genres: [any non-empty string]
     keyscale: [A-G][#/♭]? [major/minor]
+    language: [en/zh/ja/ko/es/fr/de/uk/ru/...]
     timesignature: [2/3/4/6]
     </think>
     
     It uses token masking (setting invalid token logits to -inf) to enforce constraints.
     For numeric fields, it uses early-blocking to prevent out-of-range values.
     For field transitions (e.g., end of numeric value), it compares P(newline) vs P(digit).
+    For caption field, it blocks code blocks and newlines, and only transitions when
+    the previous token was a period and newline has the highest probability.
     """
     
     def __init__(
@@ -80,15 +99,19 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.enabled = enabled
         self.debug = debug
         self.skip_genres = skip_genres
+        self.skip_caption = False  # Set to True to skip caption field generation
+        self.skip_language = False  # Set to True to skip language field generation
         self.caption: Optional[str] = None  # Set via update_caption() before each generation
         
         # User-provided metadata fields (optional)
         # If provided, these fields will be used directly instead of generating
-        # Format: {"bpm": "120", "duration": "234", "keyscale": "G major", "timesignature": "4", "genres": "Pop Rock"}
+        # Format: {"bpm": "120", "caption": "...", "duration": "234", "keyscale": "G major", "language": "en", "timesignature": "4", "genres": "Pop Rock"}
         self.user_provided_metadata: Dict[str, Optional[str]] = {
             "bpm": None,
+            "caption": None,
             "duration": None,
             "keyscale": None,
+            "language": None,
             "timesignature": None,
             "genres": None,
         }
@@ -114,6 +137,10 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.accumulated_value = ""  # For numeric/text value accumulation (legacy, for compatibility)
         self.accumulated_token_ids: List[int] = []  # Token ID sequence for keyscale (and other fields)
         
+        # Caption generation state tracking
+        self.caption_after_newline = False  # Track if we're right after a newline in caption
+        self.caption_token_count = 0  # Track token count for caption (max 512)
+        
         # Token queue for user-provided fields (injected directly without generation)
         self.user_field_token_queue: List[int] = []
         self.current_user_field: Optional[str] = None  # Current field being injected
@@ -137,9 +164,9 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         
         # Field definitions (needed before building prefix trees)
         self.field_specs = {
-            "bpm": {"min": 30, "max": 300},
-            "duration": {"min": 10, "max": 600},
-            "timesignature": {"valid_values": [2, 3, 4, 6]},
+            "bpm": {"min": BPM_MIN, "max": BPM_MAX},
+            "duration": {"min": DURATION_MIN, "max": DURATION_MAX},
+            "timesignature": {"valid_values": VALID_TIME_SIGNATURES},
         }
         
         # Build valid numeric values for BPM, Duration, Timesignature
@@ -170,6 +197,9 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             context_prefix_for_tokenization="timesignature: "
         )
         
+        # Build language prefix tree (similar to keyscale but for language codes)
+        self.language_prefix_tree = self._build_language_prefix_tree()
+        
         self._load_genres_vocab()
         
         # Note: Caption-based genre filtering is initialized via update_caption() before each generation
@@ -182,9 +212,11 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             FSMState.THINK_TAG: "<think>",
             FSMState.NEWLINE_AFTER_THINK: "\n",
             FSMState.BPM_NAME: "bpm:",
+            FSMState.CAPTION_NAME: "caption:",
             FSMState.DURATION_NAME: "duration:",
             FSMState.GENRES_NAME: "genres:",
             FSMState.KEYSCALE_NAME: "keyscale:",
+            FSMState.LANGUAGE_NAME: "language:",
             FSMState.TIMESIG_NAME: "timesignature:",
             FSMState.THINK_END_TAG: "</think>",
         }
@@ -198,17 +230,21 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         even if the field is user-provided (we still need to generate the field name).
         
         Args:
-            current_field: Current field name ("bpm", "duration", "genres", "keyscale", "timesignature")
+            current_field: Current field name ("bpm", "caption", "duration", "genres", "keyscale", "language", "timesignature")
             
         Returns:
             Next FSMState (NAME state of next field), or THINK_END_TAG if no more fields
         """
-        field_order = ["bpm", "duration", "genres", "keyscale", "timesignature"]
+        # New field order: bpm -> caption -> duration -> keyscale -> language -> timesignature
+        # genres is optional and can be skipped
+        field_order = ["bpm", "caption", "duration", "genres", "keyscale", "language", "timesignature"]
         field_to_state = {
             "bpm": FSMState.BPM_NAME,
+            "caption": FSMState.CAPTION_NAME,
             "duration": FSMState.DURATION_NAME,
             "genres": FSMState.GENRES_NAME,
             "keyscale": FSMState.KEYSCALE_NAME,
+            "language": FSMState.LANGUAGE_NAME,
             "timesignature": FSMState.TIMESIG_NAME,
         }
         
@@ -221,8 +257,12 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         for i in range(current_idx + 1, len(field_order)):
             field = field_order[i]
             
-            # Skip genres if skip_genres is True
+            # Skip fields based on flags
             if field == "genres" and self.skip_genres:
+                continue
+            if field == "caption" and self.skip_caption:
+                continue
+            if field == "language" and self.skip_language:
                 continue
             
             # Return the next field's NAME state (even if user-provided, we still generate field name)
@@ -241,11 +281,16 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         }
         
         # Build transitions for all fields (even if user-provided, we still need to generate field name)
-        # Field order: bpm -> duration -> genres -> keyscale -> timesignature
+        # Field order: bpm -> caption -> duration -> genres -> keyscale -> language -> timesignature
         
-        # BPM field: NAME -> VALUE -> next field
+        # BPM field: NAME -> VALUE -> next field (caption or duration)
         self.next_state[FSMState.BPM_NAME] = FSMState.BPM_VALUE
         self.next_state[FSMState.BPM_VALUE] = self._get_next_field_state("bpm")
+        
+        # Caption field (only if not skipped): NAME -> VALUE -> next field (duration)
+        if not self.skip_caption:
+            self.next_state[FSMState.CAPTION_NAME] = FSMState.CAPTION_VALUE
+            self.next_state[FSMState.CAPTION_VALUE] = self._get_next_field_state("caption")
         
         # Duration field: NAME -> VALUE -> next field
         self.next_state[FSMState.DURATION_NAME] = FSMState.DURATION_VALUE
@@ -256,9 +301,14 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             self.next_state[FSMState.GENRES_NAME] = FSMState.GENRES_VALUE
             self.next_state[FSMState.GENRES_VALUE] = self._get_next_field_state("genres")
         
-        # Keyscale field: NAME -> VALUE -> next field
+        # Keyscale field: NAME -> VALUE -> next field (language or timesignature)
         self.next_state[FSMState.KEYSCALE_NAME] = FSMState.KEYSCALE_VALUE
         self.next_state[FSMState.KEYSCALE_VALUE] = self._get_next_field_state("keyscale")
+        
+        # Language field (only if not skipped): NAME -> VALUE -> next field (timesignature)
+        if not self.skip_language:
+            self.next_state[FSMState.LANGUAGE_NAME] = FSMState.LANGUAGE_VALUE
+            self.next_state[FSMState.LANGUAGE_VALUE] = self._get_next_field_state("language")
         
         # Timesignature field: NAME -> VALUE -> THINK_END_TAG
         self.next_state[FSMState.TIMESIG_NAME] = FSMState.TIMESIG_VALUE
@@ -268,6 +318,49 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         """Set whether to skip genres generation and rebuild state transitions."""
         self.skip_genres = skip
         self._build_state_transitions()
+    
+    def set_skip_caption(self, skip: bool):
+        """Set whether to skip caption generation and rebuild state transitions."""
+        self.skip_caption = skip
+        self._build_state_transitions()
+    
+    def set_skip_language(self, skip: bool):
+        """Set whether to skip language generation and rebuild state transitions."""
+        self.skip_language = skip
+        self._build_state_transitions()
+    
+    @staticmethod
+    def postprocess_caption(caption: str) -> str:
+        """
+        Post-process caption to remove YAML multi-line formatting.
+        Converts YAML-style multi-line text (with newlines and leading spaces) 
+        to a single-line string.
+        
+        Example:
+            Input:  "An emotional ballad.\\n  The track opens with piano.\\n  More text."
+            Output: "An emotional ballad. The track opens with piano. More text."
+        
+        Args:
+            caption: Raw caption text with possible YAML formatting
+            
+        Returns:
+            Clean single-line caption
+        """
+        if not caption:
+            return caption
+        
+        # Split by newlines
+        lines = caption.split('\n')
+        
+        # Process each line: strip leading/trailing whitespace
+        cleaned_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped:
+                cleaned_lines.append(stripped)
+        
+        # Join with single space
+        return ' '.join(cleaned_lines)
     
     def set_stop_at_reasoning(self, stop: bool):
         """
@@ -287,8 +380,10 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         Args:
             metadata: Dictionary with optional fields:
                 - "bpm": Optional[str] - e.g., "120"
+                - "caption": Optional[str] - e.g., "A melodic piano piece..."
                 - "duration": Optional[str] - e.g., "234"
                 - "keyscale": Optional[str] - e.g., "G major"
+                - "language": Optional[str] - e.g., "en"
                 - "timesignature": Optional[str] - e.g., "4"
                 - "genres": Optional[str] - e.g., "Pop Rock"
                 If None, clears all user-provided metadata.
@@ -297,7 +392,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             metadata = {}
         
         # Update user-provided metadata
-        for field in ["bpm", "duration", "keyscale", "timesignature", "genres"]:
+        for field in ["bpm", "caption", "duration", "keyscale", "language", "timesignature", "genres"]:
             if field in metadata:
                 self.user_provided_metadata[field] = metadata[field]
             else:
@@ -328,7 +423,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         
         # Note tokens for keyscale (A-G)
         self.note_tokens = {}
-        for note in "ABCDEFG":
+        for note in KEYSCALE_NOTES:
             tokens = self.tokenizer.encode(note, add_special_tokens=False)
             if tokens:
                 self.note_tokens[note] = tokens[-1]
@@ -370,20 +465,79 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         # EOS token for duration-constrained codes generation
         self.eos_token_id = self.tokenizer.eos_token_id
         
+        # Period token for caption field transition logic
+        period_tokens = self.tokenizer.encode(".", add_special_tokens=False)
+        self.period_token = period_tokens[-1] if period_tokens else None
+        
+        # Backtick tokens for blocking code blocks in caption
+        backtick_tokens = self.tokenizer.encode("`", add_special_tokens=False)
+        self.backtick_token = backtick_tokens[-1] if backtick_tokens else None
+        
+        # Valid language codes (ISO 639-1 and common variants)
+        self.valid_languages = VALID_LANGUAGES
+        
+        # Precompute audio code token IDs (tokens matching <|audio_code_\d+|>)
+        # These should be blocked during caption generation
+        self.audio_code_token_ids: Set[int] = set()
+        self._precompute_audio_code_tokens()
+        
+        # Precompute audio code mask for efficient blocking (O(1) instead of O(n))
+        # This mask will be added to scores during caption generation
+        self.audio_code_mask: Optional[torch.Tensor] = None
+        self._build_audio_code_mask()
+        
         # Build valid keyscales set (prefix tree will be built after _char_to_tokens is initialized)
         # 7 notes × 5 accidentals (none, #, b, ♯, ♭) × 2 modes = 70 valid combinations
-        notes = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
-        accidentals = ['', '#', 'b', '♯', '♭']  # empty + ASCII sharp/flat + Unicode sharp/flat
-        modes = ['major', 'minor']
-        
-        self.valid_keyscales = set()
-        for note in notes:
-            for acc in accidentals:
-                for mode in modes:
-                    self.valid_keyscales.add(f"{note}{acc} {mode}")
+        self.valid_keyscales = VALID_KEYSCALES.copy()
         
         # keyscale_prefix_tree will be built in _precompute_char_token_mapping() after _char_to_tokens is ready
         # Numeric prefix trees will be built after field_specs is defined
+    
+    def _precompute_audio_code_tokens(self):
+        """
+        Precompute audio code token IDs (tokens matching <|audio_code_\\d+|>).
+        These tokens should be blocked during caption generation.
+        """
+        import re
+        audio_code_pattern = re.compile(r'^<\|audio_code_\d+\|>$')
+        
+        # Iterate through vocabulary to find audio code tokens
+        for token_id in range(self.vocab_size):
+            try:
+                token_text = self.tokenizer.decode([token_id])
+                if audio_code_pattern.match(token_text):
+                    self.audio_code_token_ids.add(token_id)
+            except Exception:
+                continue
+        
+        if self.debug:
+            logger.debug(f"Found {len(self.audio_code_token_ids)} audio code tokens")
+    
+    def _build_audio_code_mask(self):
+        """
+        Build a precomputed mask tensor for blocking audio code tokens.
+        This mask can be added to scores in O(1) time instead of O(n) loop.
+        
+        The mask is [1, vocab_size] tensor with -inf at audio code token positions.
+        """
+        if not self.audio_code_token_ids:
+            self.audio_code_mask = None
+            return
+        
+        # Create mask tensor: 0 everywhere, -inf at audio code positions
+        # Use float32 for compatibility with most model dtypes
+        mask = torch.zeros(1, self.vocab_size, dtype=torch.float32)
+        
+        # Convert set to list for indexing
+        audio_code_indices = list(self.audio_code_token_ids)
+        
+        # Set -inf at audio code token positions
+        mask[0, audio_code_indices] = float('-inf')
+        
+        self.audio_code_mask = mask
+        
+        if self.debug:
+            logger.debug(f"Built audio code mask for {len(self.audio_code_token_ids)} tokens")
     
     def _build_keyscale_prefix_tree(self) -> Dict[Tuple[int, ...], Set[int]]:
         """
@@ -557,6 +711,68 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     # Complete value should allow newline
                     if self.newline_token:
                         prefix_to_tokens[token_prefix].add(self.newline_token)
+        
+        return prefix_to_tokens
+    
+    def _build_language_prefix_tree(self) -> Dict[Tuple[int, ...], Set[int]]:
+        """
+        Build language prefix to allowed tokens mapping based on ACTUAL tokenization.
+        Similar to keyscale prefix tree but for language codes.
+        
+        Uses token ID sequences as keys, NOT strings, to avoid tokenization mismatches.
+        """
+        prefix_to_tokens: Dict[Tuple[int, ...], Set[int]] = {}
+        
+        context_prefix_for_matching = "language:"
+        context_prefix_for_tokenization = "language: "
+        
+        context_token_ids = self.tokenizer.encode(context_prefix_for_matching, add_special_tokens=False)
+        
+        if self.debug:
+            context_tokens_str = [self.tokenizer.decode([t]) for t in context_token_ids]
+            logger.debug(f"Context for matching 'language:' tokenizes to {context_token_ids} -> {context_tokens_str}")
+        
+        for lang in self.valid_languages:
+            full_text = context_prefix_for_tokenization + lang
+            full_token_ids = self.tokenizer.encode(full_text, add_special_tokens=False)
+            
+            context_end_idx = None
+            if len(full_token_ids) >= len(context_token_ids):
+                if full_token_ids[:len(context_token_ids)] == context_token_ids:
+                    context_end_idx = len(context_token_ids)
+            
+            if context_end_idx is None:
+                if self.debug:
+                    logger.warning(f"Could not find context prefix in full tokenization of '{full_text}', skipping")
+                continue
+            
+            lang_token_ids = full_token_ids[context_end_idx:]
+            
+            if not lang_token_ids:
+                if self.debug:
+                    logger.warning(f"No tokens extracted for language '{lang}', skipping")
+                continue
+            
+            for i in range(len(lang_token_ids) + 1):
+                token_prefix = tuple(lang_token_ids[:i])
+                
+                if token_prefix not in prefix_to_tokens:
+                    prefix_to_tokens[token_prefix] = set()
+                
+                if i < len(lang_token_ids):
+                    next_token_id = lang_token_ids[i]
+                    prefix_to_tokens[token_prefix].add(next_token_id)
+                else:
+                    if self.newline_token:
+                        prefix_to_tokens[token_prefix].add(self.newline_token)
+        
+        if self.debug:
+            logger.debug(f"Built language prefix tree with {len(prefix_to_tokens)} token sequence prefixes")
+            empty_prefix = tuple()
+            if empty_prefix in prefix_to_tokens:
+                first_tokens = prefix_to_tokens[empty_prefix]
+                decoded_first = [(t, repr(self.tokenizer.decode([t]))) for t in sorted(first_tokens)]
+                logger.debug(f"First tokens allowed for language (empty prefix): {decoded_first}")
         
         return prefix_to_tokens
     
@@ -926,6 +1142,8 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.codes_count = 0  # Reset codes counter
         self.user_field_token_queue = []  # Reset user field token queue
         self.current_user_field = None  # Reset current user field
+        self.caption_after_newline = False  # Reset caption newline tracking
+        self.caption_token_count = 0  # Reset caption token count
     
     def set_target_duration(self, duration: Optional[float]):
         """
@@ -1170,6 +1388,20 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             return self.newline_token in self.keyscale_prefix_tree[token_prefix]
         return False
     
+    def _get_allowed_language_tokens(self) -> List[int]:
+        """
+        Get allowed tokens for language field using the precomputed prefix tree.
+        Uses token ID sequence as key (not string) to avoid tokenization mismatches.
+        Similar to keyscale.
+        """
+        token_prefix = tuple(self.accumulated_token_ids)
+        
+        if token_prefix in self.language_prefix_tree:
+            return list(self.language_prefix_tree[token_prefix])
+        
+        # Fallback: no valid continuation found
+        return []
+    
     def _get_allowed_timesig_tokens(self) -> List[int]:
         """
         Get allowed tokens for timesignature field using the precomputed prefix tree.
@@ -1269,7 +1501,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         Uses the same tokenization logic as prefix tree building.
         
         Args:
-            field_name: Field name ("bpm", "duration", "keyscale", "timesignature", "genres")
+            field_name: Field name ("bpm", "caption", "duration", "keyscale", "language", "timesignature", "genres")
             
         Returns:
             List of token IDs for the complete field, or None if field is not provided
@@ -1281,8 +1513,10 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         # Build full field string with space (matching prefix tree tokenization)
         field_to_prefix = {
             "bpm": "bpm: ",
+            "caption": "caption: ",
             "duration": "duration: ",
             "keyscale": "keyscale: ",
+            "language": "language: ",
             "timesignature": "timesignature: ",
             "genres": "genres: ",
         }
@@ -1409,6 +1643,67 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 mask[0, self.newline_token] = 0
             
             scores = scores + mask
+        
+        elif self.state == FSMState.CAPTION_VALUE:
+            # Caption field generation with YAML format support:
+            # - Allow newlines and spaces (YAML multi-line formatting)
+            # - Block audio codes and backticks
+            # - Max 512 tokens
+            # - Transition when model wants to generate next field (non-indented line)
+            
+            # Check if field is user-provided and we haven't started injecting yet
+            if self.user_provided_metadata["caption"] is not None and not self.user_field_token_queue and not self.accumulated_value:
+                # Initialize token queue with field value tokens (value + newline)
+                value = self.user_provided_metadata["caption"]
+                value_text = f" {value}\n"
+                value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
+                if value_tokens:
+                    self.user_field_token_queue = value_tokens
+                    self.current_user_field = "caption"
+                    # Inject first token
+                    mask[0, value_tokens[0]] = 0
+                    scores = scores + mask
+                    return scores
+            
+            # Check if we should transition after a newline (non-indented line = new field)
+            if self.caption_after_newline:
+                # Get top token from current scores
+                top_token_id = torch.argmax(scores[0]).item()
+                top_token_text = self.tokenizer.decode([top_token_id])
+                
+                # If top token does NOT start with space/tab, it's a new field (like "duration:")
+                if len(top_token_text) > 0 and top_token_text[0] not in ' \t':
+                    # Caption is ending, transition to next field
+                    self.caption_after_newline = False
+                    self._transition_to_next_state()
+                    # Process with new state (DURATION_NAME)
+                    return self._process_single_sequence(input_ids, scores)
+                else:
+                    # It's indentation, continue caption
+                    self.caption_after_newline = False
+            
+            # Block backticks (code blocks)
+            if self.backtick_token is not None:
+                scores[0, self.backtick_token] = float('-inf')
+            
+            # Block ALL audio code tokens (critical - these should never appear in caption)
+            # Use precomputed mask for O(1) performance instead of O(n) loop
+            if self.audio_code_mask is not None:
+                # Move mask to same device/dtype as scores if needed
+                if self.audio_code_mask.device != scores.device or self.audio_code_mask.dtype != scores.dtype:
+                    self.audio_code_mask = self.audio_code_mask.to(device=scores.device, dtype=scores.dtype)
+                scores = scores + self.audio_code_mask
+            
+            # Enforce 512 token limit for caption
+            if self.caption_token_count >= 512:
+                # Force end by only allowing newline
+                if self.newline_token is not None:
+                    mask[0, self.newline_token] = 0
+                    scores = scores + mask
+                    return scores
+            
+            # Allow natural generation (with blocked audio codes and backticks)
+            return scores
         
         elif self.state == FSMState.DURATION_VALUE:
             # Check if field is user-provided and we haven't started injecting yet
@@ -1539,6 +1834,43 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                         mask[0, self.newline_token] = 0
                     scores = scores + mask
         
+        elif self.state == FSMState.LANGUAGE_VALUE:
+            # Language field: similar to keyscale, uses prefix tree
+            
+            # Check if field is user-provided and we haven't started injecting yet
+            if self.user_provided_metadata["language"] is not None and not self.user_field_token_queue and not self.accumulated_token_ids:
+                # Initialize token queue with field value tokens (value + newline)
+                value = self.user_provided_metadata["language"]
+                value_text = f" {value}\n"
+                value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
+                if value_tokens:
+                    self.user_field_token_queue = value_tokens
+                    self.current_user_field = "language"
+                    # Inject first token
+                    mask[0, value_tokens[0]] = 0
+                    scores = scores + mask
+                    return scores
+            
+            # Check if current token sequence is complete (allows newline)
+            token_prefix = tuple(self.accumulated_token_ids)
+            if token_prefix in self.language_prefix_tree and self.newline_token in self.language_prefix_tree[token_prefix]:
+                # Complete language, allow newline
+                if self.newline_token:
+                    mask[0, self.newline_token] = 0
+                scores = scores + mask
+            else:
+                # Not complete, allow valid continuation tokens
+                allowed = self._get_allowed_language_tokens()
+                if allowed:
+                    for t in allowed:
+                        mask[0, t] = 0
+                    scores = scores + mask
+                else:
+                    # No valid tokens found - force newline to end field
+                    if self.newline_token:
+                        mask[0, self.newline_token] = 0
+                    scores = scores + mask
+        
         elif self.state == FSMState.TIMESIG_VALUE:
             # Check if field is user-provided and we haven't started injecting yet
             if self.user_provided_metadata["timesignature"] is not None and not self.user_field_token_queue and not self.accumulated_token_ids:
@@ -1587,6 +1919,8 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             self.position_in_state = 0
             self.accumulated_value = ""  # Legacy, kept for compatibility
             self.accumulated_token_ids = []  # Reset token ID sequence for new field
+            self.caption_after_newline = False  # Reset caption newline tracking
+            self.caption_token_count = 0  # Reset caption token count
             if self.debug:
                 logger.debug(f"FSM transition: {old_state.name} -> {self.state.name}")
     
@@ -1703,6 +2037,22 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 # Genres still uses string-based trie, so keep accumulated_value
                 self.accumulated_value += token_str
         
+        elif self.state == FSMState.CAPTION_VALUE:
+            # Track token count for 512 limit
+            self.caption_token_count += 1
+            
+            # Accumulate caption text
+            self.accumulated_value += token_str
+            
+            # Track if this token is a newline (for transition detection)
+            if generated_token_id == self.newline_token:
+                # Mark that we need to check next token for field transition
+                self.caption_after_newline = True
+            else:
+                # Not a newline - if we were after newline and this is not space, 
+                # transition already happened in _process_single_sequence
+                self.caption_after_newline = False
+        
         elif self.state == FSMState.KEYSCALE_VALUE:
             if generated_token_id == self.newline_token:
                 # Newline ends the field
@@ -1711,6 +2061,18 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 # we should NOT update position_in_state with the newline token length,
                 # because that token belongs to the old state, not the new state.
                 # Return early to avoid the fixed_strings update logic below.
+                if self.state in self.fixed_strings:
+                    return
+            else:
+                # Add token ID to sequence (for prefix tree lookup)
+                self.accumulated_token_ids.append(generated_token_id)
+                # Also update legacy accumulated_value for compatibility
+                self.accumulated_value += token_str
+        
+        elif self.state == FSMState.LANGUAGE_VALUE:
+            if generated_token_id == self.newline_token:
+                # Newline ends the field
+                self._transition_to_next_state()
                 if self.state in self.fixed_strings:
                     return
             else:

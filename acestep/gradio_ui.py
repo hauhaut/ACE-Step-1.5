@@ -8,6 +8,14 @@ import random
 import glob
 import gradio as gr
 from typing import Callable, Optional, Tuple
+from acestep.constants import (
+    VALID_LANGUAGES,
+    TRACK_NAMES,
+    TASK_TYPES,
+    TASK_TYPES_TURBO,
+    TASK_TYPES_BASE,
+    DEFAULT_DIT_INSTRUCTION,
+)
 
 
 def create_gradio_interface(dit_handler, llm_handler, dataset_handler, init_params=None) -> gr.Blocks:
@@ -296,9 +304,9 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                     # Determine initial task_type choices based on default model
                     default_model_lower = (default_model or "").lower()
                     if "turbo" in default_model_lower:
-                        initial_task_choices = ["text2music", "repaint", "cover"]
+                        initial_task_choices = TASK_TYPES_TURBO
                     else:
-                        initial_task_choices = ["text2music", "repaint", "cover", "extract", "lego", "complete"]
+                        initial_task_choices = TASK_TYPES_BASE
                     
                     with gr.Row():
                         with gr.Column(scale=2):
@@ -311,15 +319,14 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                         with gr.Column(scale=8):
                             instruction_display_gen = gr.Textbox(
                                 label="Instruction",
-                                value="Fill the audio semantic mask based on the given conditions:",
+                                value=DEFAULT_DIT_INSTRUCTION,
                                 interactive=False,
                                 lines=1,
                                 info="Instruction is automatically generated based on task type",
                             )
                     
                     track_name = gr.Dropdown(
-                        choices=["woodwinds", "brass", "fx", "synth", "strings", "percussion", 
-                                "keyboard", "guitar", "bass", "drums", "backing_vocals", "vocals"],
+                        choices=TRACK_NAMES,
                         value=None,
                         label="Track Name",
                         info="Select track name for lego/extract tasks",
@@ -327,8 +334,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                     )
                     
                     complete_track_classes = gr.CheckboxGroup(
-                        choices=["woodwinds", "brass", "fx", "synth", "strings", "percussion", 
-                                "keyboard", "guitar", "bass", "drums", "backing_vocals", "vocals"],
+                        choices=TRACK_NAMES,
                         label="Track Names",
                         info="Select multiple track classes for complete task",
                         visible=False
@@ -410,8 +416,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                 with gr.Accordion("⚙️ Optional Parameters", open=True):
                     with gr.Row():
                         vocal_language = gr.Dropdown(
-                            choices=["en", "zh", "ja", "ko", "es", "fr", "de"],
-                            value="en",
+                            choices=VALID_LANGUAGES,
+                            value="unknown",
                             label="Vocal Language (optional)",
                             allow_custom_value=True,
                             info="use `unknown` for inst"
@@ -568,6 +574,20 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                 )
             
             with gr.Row():
+                use_cot_caption = gr.Checkbox(
+                    label="CoT Caption",
+                    value=True,
+                    info="Generate caption in CoT (chain-of-thought)",
+                    scale=1,
+                )
+                use_cot_language = gr.Checkbox(
+                    label="CoT Language",
+                    value=True,
+                    info="Generate language in CoT (chain-of-thought)",
+                    scale=1,
+                )
+            
+            with gr.Row():
                 audio_cover_strength = gr.Slider(
                     minimum=0.0,
                     maximum=1.0,
@@ -625,6 +645,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
         "lm_top_k": lm_top_k,
         "lm_top_p": lm_top_p,
         "lm_negative_prompt": lm_negative_prompt,
+        "use_cot_caption": use_cot_caption,
+        "use_cot_language": use_cot_language,
         "repainting_group": repainting_group,
         "repainting_start": repainting_start,
         "repainting_end": repainting_end,
@@ -824,7 +846,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 gr.update(visible=False),  # use_adg
                 gr.update(visible=False),  # cfg_interval_start
                 gr.update(visible=False),  # cfg_interval_end
-                gr.update(choices=["text2music", "repaint", "cover"]),  # task_type
+                gr.update(choices=TASK_TYPES_TURBO),  # task_type
             )
         elif "base" in config_path_lower:
             # Base model: max 100 steps, show CFG/ADG, show all task types
@@ -834,7 +856,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 gr.update(visible=True),  # use_adg
                 gr.update(visible=True),  # cfg_interval_start
                 gr.update(visible=True),  # cfg_interval_end
-                gr.update(choices=["text2music", "repaint", "cover", "extract", "lego", "complete"]),  # task_type
+                gr.update(choices=TASK_TYPES_BASE),  # task_type
             )
         else:
             # Default to turbo settings
@@ -844,7 +866,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),
-                gr.update(choices=["text2music", "repaint", "cover"]),  # task_type
+                gr.update(choices=TASK_TYPES_TURBO),  # task_type
             )
     
     generation_section["config_path"].change(
@@ -965,6 +987,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         instruction_display_gen, audio_cover_strength, task_type,
         use_adg, cfg_interval_start, cfg_interval_end, audio_format, lm_temperature,
         think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
+        use_cot_caption, use_cot_language,
         progress=gr.Progress(track_tqdm=True)
     ):
         # If think is enabled (llm_dit mode), generate audio codes using LM first
@@ -1019,6 +1042,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 top_k=top_k_value,
                 top_p=top_p_value,
                 user_metadata=user_metadata_to_pass,
+                use_cot_caption=use_cot_caption,
+                use_cot_language=use_cot_language,
             )
             
             # Store LM-generated metadata and audio codes for display
@@ -1076,14 +1101,18 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             metadata_lines = []
             if lm_generated_metadata.get('bpm'):
                 metadata_lines.append(f"- **BPM:** {lm_generated_metadata['bpm']}")
-            if lm_generated_metadata.get('keyscale'):
-                metadata_lines.append(f"- **KeyScale:** {lm_generated_metadata['keyscale']}")
-            if lm_generated_metadata.get('timesignature'):
-                metadata_lines.append(f"- **Time Signature:** {lm_generated_metadata['timesignature']}")
+            if lm_generated_metadata.get('caption'):
+                metadata_lines.append(f"- **User Query Rewritten Caption:** {lm_generated_metadata['caption']}")
             if lm_generated_metadata.get('duration'):
                 metadata_lines.append(f"- **Duration:** {lm_generated_metadata['duration']} seconds")
             if lm_generated_metadata.get('genres'):
                 metadata_lines.append(f"- **Genres:** {lm_generated_metadata['genres']}")
+            if lm_generated_metadata.get('keyscale'):
+                metadata_lines.append(f"- **KeyScale:** {lm_generated_metadata['keyscale']}")
+            if lm_generated_metadata.get('language'):
+                metadata_lines.append(f"- **Language:** {lm_generated_metadata['language']}")
+            if lm_generated_metadata.get('timesignature'):
+                metadata_lines.append(f"- **Time Signature:** {lm_generated_metadata['timesignature']}")
             
             if metadata_lines:
                 metadata_section = "\n\n**🤖 LM-Generated Metadata:**\n" + "\n\n".join(metadata_lines)
@@ -1140,7 +1169,9 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["lm_cfg_scale"],
             generation_section["lm_top_k"],
             generation_section["lm_top_p"],
-            generation_section["lm_negative_prompt"]
+            generation_section["lm_negative_prompt"],
+            generation_section["use_cot_caption"],
+            generation_section["use_cot_language"]
         ],
         outputs=[
             results_section["generated_audio_1"],

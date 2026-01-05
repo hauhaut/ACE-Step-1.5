@@ -35,6 +35,10 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from acestep.handler import AceStepHandler
 from acestep.llm_inference import LLMHandler
+from acestep.constants import (
+    DEFAULT_DIT_INSTRUCTION,
+    DEFAULT_LM_INSTRUCTION,
+)
 
 
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
@@ -70,7 +74,7 @@ class GenerateMusicRequest(BaseModel):
     repainting_start: float = 0.0
     repainting_end: Optional[float] = None
 
-    instruction: str = "Fill the audio semantic mask based on the given conditions:"
+    instruction: str = DEFAULT_DIT_INSTRUCTION
     audio_cover_strength: float = 1.0
     task_type: str = "text2music"
 
@@ -102,8 +106,8 @@ class GenerateMusicRequest(BaseModel):
 _LM_DEFAULT_TEMPERATURE = 0.85
 _LM_DEFAULT_CFG_SCALE = 2.0
 _LM_DEFAULT_TOP_P = 0.9
-_DEFAULT_DIT_INSTRUCTION = "Fill the audio semantic mask based on the given conditions:"
-_DEFAULT_LM_INSTRUCTION = "Generate audio semantic tokens based on the given conditions:"
+_DEFAULT_DIT_INSTRUCTION = DEFAULT_DIT_INSTRUCTION
+_DEFAULT_LM_INSTRUCTION = DEFAULT_LM_INSTRUCTION
 
 
 class CreateJobResponse(BaseModel):

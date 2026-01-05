@@ -17,6 +17,7 @@ from transformers.generation.logits_process import (
     RepetitionPenaltyLogitsProcessor,
 )
 from acestep.constrained_logits_processor import MetadataConstrainedLogitsProcessor
+from acestep.constants import DEFAULT_LM_INSTRUCTION
 
 
 class LLMHandler:
@@ -244,6 +245,8 @@ class LLMHandler:
         target_duration: Optional[float] = None,
         user_metadata: Optional[Dict[str, Optional[str]]] = None,
         stop_at_reasoning: bool = False,
+        skip_caption: bool = False,
+        skip_language: bool = False,
     ) -> str:
         """Shared vllm path: accept prebuilt formatted prompt and return text."""
         from nanovllm import SamplingParams
@@ -265,6 +268,9 @@ class LLMHandler:
             # Always call set_user_metadata to ensure previous settings are cleared if None
             self.constrained_processor.set_user_metadata(user_metadata)
             self.constrained_processor.set_stop_at_reasoning(stop_at_reasoning)
+            # Set skip_caption and skip_language based on flags
+            self.constrained_processor.set_skip_caption(skip_caption)
+            self.constrained_processor.set_skip_language(skip_language)
             
             constrained_processor = self.constrained_processor
 
@@ -318,6 +324,8 @@ class LLMHandler:
         target_duration: Optional[float] = None,
         user_metadata: Optional[Dict[str, Optional[str]]] = None,
         stop_at_reasoning: bool = False,
+        skip_caption: bool = False,
+        skip_language: bool = False,
     ) -> str:
         """Shared PyTorch path: accept prebuilt formatted prompt and return text."""
         inputs = self.llm_tokenizer(
@@ -338,6 +346,9 @@ class LLMHandler:
             # Always call set_user_metadata to ensure previous settings are cleared if None
             self.constrained_processor.set_user_metadata(user_metadata)
             self.constrained_processor.set_stop_at_reasoning(stop_at_reasoning)
+            # Set skip_caption and skip_language based on flags
+            self.constrained_processor.set_skip_caption(skip_caption)
+            self.constrained_processor.set_skip_language(skip_language)
             
             constrained_processor = self.constrained_processor
 
@@ -472,6 +483,8 @@ class LLMHandler:
         constrained_decoding_debug: bool = False,
         target_duration: Optional[float] = None,
         user_metadata: Optional[Dict[str, Optional[str]]] = None,
+        use_cot_caption: bool = True,
+        use_cot_language: bool = True,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Feishu-compatible LM generation.
 
@@ -483,6 +496,8 @@ class LLMHandler:
                             5 codes = 1 second. If specified, blocks EOS until target reached.
             user_metadata: User-provided metadata fields (e.g. bpm/duration/keyscale/timesignature).
                            If specified, constrained decoding will inject these values directly.
+            use_cot_caption: Whether to generate caption in CoT (default True).
+            use_cot_language: Whether to generate language in CoT (default True).
         """
         infer_type = (infer_type or "").strip().lower()
         if infer_type not in {"dit", "llm_dit"}:
@@ -509,6 +524,8 @@ class LLMHandler:
                     "repetition_penalty": repetition_penalty,
                     "target_duration": target_duration,
                     "user_metadata": user_metadata,
+                    "skip_caption": not use_cot_caption,
+                    "skip_language": not use_cot_language,
                 },
                 use_constrained_decoding=use_constrained_decoding,
                 constrained_decoding_debug=constrained_decoding_debug,
@@ -540,7 +557,7 @@ class LLMHandler:
             prompt = f"# Caption\n{caption}\n\n# Lyric\n{lyrics}\n"
         return self.llm_tokenizer.apply_chat_template(
             [
-                {"role": "system", "content": "# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n"},
+                {"role": "system", "content": f"# Instruction\n{DEFAULT_LM_INSTRUCTION}\n\n"},
                 {"role": "user", "content": prompt},
             ],
             tokenize=False,
@@ -591,6 +608,8 @@ class LLMHandler:
         repetition_penalty = cfg.get("repetition_penalty", 1.0)
         target_duration = cfg.get("target_duration")
         user_metadata = cfg.get("user_metadata")  # User-provided metadata fields
+        skip_caption = cfg.get("skip_caption", False)  # Skip caption generation in CoT
+        skip_language = cfg.get("skip_language", False)  # Skip language generation in CoT
 
         try:
             if self.llm_backend == "vllm":
@@ -607,6 +626,8 @@ class LLMHandler:
                     target_duration=target_duration,
                     user_metadata=user_metadata,
                     stop_at_reasoning=stop_at_reasoning,
+                    skip_caption=skip_caption,
+                    skip_language=skip_language,
                 )
                 return output_text, f"✅ Generated successfully (vllm) | length={len(output_text)}"
 
@@ -624,6 +645,8 @@ class LLMHandler:
                 target_duration=target_duration,
                 user_metadata=user_metadata,
                 stop_at_reasoning=stop_at_reasoning,
+                skip_caption=skip_caption,
+                skip_language=skip_language,
             )
             return output_text, f"✅ Generated successfully (pt) | length={len(output_text)}"
 
@@ -928,9 +951,11 @@ class LLMHandler:
         Expected format:
         <think>
         bpm: 73
+        caption: A calm piano melody
         duration: 273
         genres: Chinese folk
         keyscale: G major
+        language: en
         timesignature: 4
         </think>
         
@@ -973,32 +998,69 @@ class LLMHandler:
             lines_before_codes = output_text.split('<|audio_code_')[0] if '<|audio_code_' in output_text else output_text
             reasoning_text = lines_before_codes.strip()
         
-        # Parse metadata fields
+        # Parse metadata fields with YAML multi-line value support
         if reasoning_text:
-            for line in reasoning_text.split('\n'):
-                line = line.strip()
-                if ':' in line and not line.startswith('<'):
+            lines = reasoning_text.split('\n')
+            current_key = None
+            current_value_lines = []
+            
+            def save_current_field():
+                """Save the accumulated field value"""
+                nonlocal current_key, current_value_lines
+                if current_key and current_value_lines:
+                    # Join multi-line value
+                    value = '\n'.join(current_value_lines)
+                    
+                    if current_key == 'bpm':
+                        try:
+                            metadata['bpm'] = int(value.strip())
+                        except:
+                            metadata['bpm'] = value.strip()
+                    elif current_key == 'caption':
+                        # Post-process caption to remove YAML multi-line formatting
+                        metadata['caption'] = MetadataConstrainedLogitsProcessor.postprocess_caption(value)
+                    elif current_key == 'duration':
+                        try:
+                            metadata['duration'] = int(value.strip())
+                        except:
+                            metadata['duration'] = value.strip()
+                    elif current_key == 'genres':
+                        metadata['genres'] = value.strip()
+                    elif current_key == 'keyscale':
+                        metadata['keyscale'] = value.strip()
+                    elif current_key == 'language':
+                        metadata['language'] = value.strip()
+                    elif current_key == 'timesignature':
+                        metadata['timesignature'] = value.strip()
+                
+                current_key = None
+                current_value_lines = []
+            
+            for line in lines:
+                # Skip lines starting with '<' (tags)
+                if line.strip().startswith('<'):
+                    continue
+                
+                # Check if this is a new field (no leading spaces and contains ':')
+                if line and not line[0].isspace() and ':' in line:
+                    # Save previous field if any
+                    save_current_field()
+                    
+                    # Parse new field
                     parts = line.split(':', 1)
                     if len(parts) == 2:
-                        key = parts[0].strip().lower()
-                        value = parts[1].strip()
-                        
-                        if key == 'bpm':
-                            try:
-                                metadata['bpm'] = int(value)
-                            except:
-                                metadata['bpm'] = value
-                        elif key == 'duration':
-                            try:
-                                metadata['duration'] = int(value)
-                            except:
-                                metadata['duration'] = value
-                        elif key == 'genres':
-                            metadata['genres'] = value
-                        elif key == 'keyscale':
-                            metadata['keyscale'] = value
-                        elif key == 'timesignature':
-                            metadata['timesignature'] = value
+                        current_key = parts[0].strip().lower()
+                        # First line of value (after colon)
+                        first_value = parts[1]
+                        if first_value.strip():
+                            current_value_lines.append(first_value)
+                elif line.startswith(' ') or line.startswith('\t'):
+                    # Continuation line (YAML multi-line value)
+                    if current_key:
+                        current_value_lines.append(line)
+            
+            # Don't forget to save the last field
+            save_current_field()
         
         return metadata, audio_codes
     

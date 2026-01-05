@@ -23,6 +23,11 @@ import warnings
 from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
 from transformers.generation.streamers import BaseStreamer
 from diffusers.models import AutoencoderOobleck
+from acestep.constants import (
+    TASK_INSTRUCTIONS,
+    TRACK_NAMES,
+    DEFAULT_DIT_INSTRUCTION,
+)
 
 
 warnings.filterwarnings("ignore")
@@ -519,10 +524,11 @@ class AceStepHandler:
         Args:
             task: Task name (e.g., text2music, cover, repaint); kept for logging/future branching.
             instruction: Instruction text; default fallback matches service_generate behavior.
-            caption: Caption string.
+            caption: Caption string (fallback if not in metas).
             lyrics: Lyrics string.
             metas: Metadata (str or dict); follows _parse_metas formatting.
-            vocal_language: Language code for lyrics section.
+                   May contain 'caption' and 'language' fields from LM CoT output.
+            vocal_language: Language code for lyrics section (fallback if not in metas).
 
         Returns:
             (caption_input_text, lyrics_input_text)
@@ -533,18 +539,45 @@ class AceStepHandler:
                 instruction=None,
                 caption="A calm piano melody",
                 lyrics="la la la",
-                metas={"bpm": 90, "duration": 45},
+                metas={"bpm": 90, "duration": 45, "caption": "LM generated caption", "language": "en"},
                 vocal_language="en",
             )
         """
         # Align instruction formatting with _prepare_batch
-        final_instruction = instruction or "Fill the audio semantic mask based on the given conditions:"
+        final_instruction = instruction or DEFAULT_DIT_INSTRUCTION
         if not final_instruction.endswith(":"):
             final_instruction = final_instruction + ":"
 
+        # Extract caption and language from metas if available (from LM CoT output)
+        # Fallback to user-provided values if not in metas
+        actual_caption = caption
+        actual_language = vocal_language
+        
+        if metas is not None:
+            # Parse metas to dict if it's a string
+            if isinstance(metas, str):
+                # Try to parse as dict-like string or use as-is
+                parsed_metas = self._parse_metas([metas])
+                if parsed_metas and isinstance(parsed_metas[0], dict):
+                    meta_dict = parsed_metas[0]
+                else:
+                    meta_dict = {}
+            elif isinstance(metas, dict):
+                meta_dict = metas
+            else:
+                meta_dict = {}
+            
+            # Extract caption from metas if available
+            if 'caption' in meta_dict and meta_dict['caption']:
+                actual_caption = str(meta_dict['caption'])
+            
+            # Extract language from metas if available
+            if 'language' in meta_dict and meta_dict['language']:
+                actual_language = str(meta_dict['language'])
+
         parsed_meta = self._parse_metas([metas])[0]
-        caption_input = SFT_GEN_PROMPT.format(final_instruction, caption, parsed_meta)
-        lyrics_input = f"# Languages\n{vocal_language}\n\n# Lyric\n{lyrics}<|endoftext|>"
+        caption_input = SFT_GEN_PROMPT.format(final_instruction, actual_caption, parsed_meta)
+        lyrics_input = f"# Languages\n{actual_language}\n\n# Lyric\n{lyrics}<|endoftext|>"
         return caption_input, lyrics_input
     
     def _get_text_hidden_states(self, text_prompt: str) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -679,41 +712,36 @@ class AceStepHandler:
         track_name: Optional[str] = None,
         complete_track_classes: Optional[List[str]] = None
     ) -> str:
-        TRACK_NAMES = [
-            "woodwinds", "brass", "fx", "synth", "strings", "percussion",
-            "keyboard", "guitar", "bass", "drums", "backing_vocals", "vocals"
-        ]
-        
         if task_type == "text2music":
-            return "Fill the audio semantic mask based on the given conditions:"
+            return TASK_INSTRUCTIONS["text2music"]
         elif task_type == "repaint":
-            return "Repaint the mask area based on the given conditions:"
+            return TASK_INSTRUCTIONS["repaint"]
         elif task_type == "cover":
-            return "Generate audio semantic tokens based on the given conditions:"
+            return TASK_INSTRUCTIONS["cover"]
         elif task_type == "extract":
             if track_name:
                 # Convert to uppercase
                 track_name_upper = track_name.upper()
-                return f"Extract the {track_name_upper} track from the audio:"
+                return TASK_INSTRUCTIONS["extract"].format(TRACK_NAME=track_name_upper)
             else:
-                return "Extract the track from the audio:"
+                return TASK_INSTRUCTIONS["extract_default"]
         elif task_type == "lego":
             if track_name:
                 # Convert to uppercase
                 track_name_upper = track_name.upper()
-                return f"Generate the {track_name_upper} track based on the audio context:"
+                return TASK_INSTRUCTIONS["lego"].format(TRACK_NAME=track_name_upper)
             else:
-                return "Generate the track based on the audio context:"
+                return TASK_INSTRUCTIONS["lego_default"]
         elif task_type == "complete":
             if complete_track_classes and len(complete_track_classes) > 0:
                 # Convert to uppercase and join with " | "
                 track_classes_upper = [t.upper() for t in complete_track_classes]
                 complete_track_classes_str = " | ".join(track_classes_upper)
-                return f"Complete the input track with {complete_track_classes_str}:"
+                return TASK_INSTRUCTIONS["complete"].format(TRACK_CLASSES=complete_track_classes_str)
             else:
-                return "Complete the input track:"
+                return TASK_INSTRUCTIONS["complete_default"]
         else:
-            return "Fill the audio semantic mask based on the given conditions:"
+            return TASK_INSTRUCTIONS["text2music"]
     
     def process_reference_audio(self, audio_file) -> Optional[torch.Tensor]:
         if audio_file is None:
@@ -1247,7 +1275,7 @@ class AceStepHandler:
         # Process instructions early so we can use them for task type detection
         # Use custom instructions if provided, otherwise use default
         if instructions is None:
-            instructions = ["Fill the audio semantic mask based on the given conditions:"] * batch_size
+            instructions = [DEFAULT_DIT_INSTRUCTION] * batch_size
         
         # Ensure instructions list has the same length as batch_size
         if len(instructions) != batch_size:
@@ -1257,7 +1285,7 @@ class AceStepHandler:
                 # Pad or truncate to match batch_size
                 instructions = instructions[:batch_size]
                 while len(instructions) < batch_size:
-                    instructions.append("Fill the audio semantic mask based on the given conditions:")
+                    instructions.append(DEFAULT_DIT_INSTRUCTION)
         
         # Generate chunk_masks and spans based on repainting parameters
         # Also determine if this is a cover task (target audio provided without repainting)
@@ -1415,13 +1443,29 @@ class AceStepHandler:
         
         for i in range(batch_size):
             # Use custom instruction for this batch item
-            instruction = instructions[i] if i < len(instructions) else "Fill the audio semantic mask based on the given conditions:"
+            instruction = instructions[i] if i < len(instructions) else DEFAULT_DIT_INSTRUCTION
             # Ensure instruction ends with ":"
             if not instruction.endswith(":"):
                 instruction = instruction + ":"
             
-            # Format text prompt with custom instruction
-            text_prompt = SFT_GEN_PROMPT.format(instruction, captions[i], parsed_metas[i])
+            # Extract caption and language from metas if available (from LM CoT output)
+            # Fallback to user-provided values if not in metas
+            actual_caption = captions[i]
+            actual_language = vocal_languages[i]
+            
+            # Check if metas contains caption/language from LM CoT
+            if i < len(parsed_metas) and parsed_metas[i]:
+                meta_dict = parsed_metas[i]
+                if isinstance(meta_dict, dict):
+                    # Extract caption from metas if available
+                    if 'caption' in meta_dict and meta_dict['caption']:
+                        actual_caption = str(meta_dict['caption'])
+                    # Extract language from metas if available
+                    if 'language' in meta_dict and meta_dict['language']:
+                        actual_language = str(meta_dict['language'])
+            
+            # Format text prompt with custom instruction (using LM-generated caption if available)
+            text_prompt = SFT_GEN_PROMPT.format(instruction, actual_caption, parsed_metas[i])
             
             # Tokenize text
             text_inputs_dict = self.text_tokenizer(
@@ -1434,8 +1478,8 @@ class AceStepHandler:
             text_token_ids = text_inputs_dict.input_ids[0]
             text_attention_mask = text_inputs_dict.attention_mask[0].bool()
             
-            # Format and tokenize lyrics
-            lyrics_text = f"# Languages\n{vocal_languages[i]}\n\n# Lyric\n{lyrics[i]}<|endoftext|>"
+            # Format and tokenize lyrics (using LM-generated language if available)
+            lyrics_text = f"# Languages\n{actual_language}\n\n# Lyric\n{lyrics[i]}<|endoftext|>"
             lyrics_inputs_dict = self.text_tokenizer(
                 lyrics_text,
                 padding="longest",
@@ -1495,10 +1539,17 @@ class AceStepHandler:
             non_cover_text_attention_masks = []
             for i in range(batch_size):
                 # Use custom instruction for this batch item
-                instruction = "Fill the audio semantic mask based on the given conditions:"
+                instruction = DEFAULT_DIT_INSTRUCTION
                 
-                # Format text prompt with custom instruction
-                text_prompt = SFT_GEN_PROMPT.format(instruction, captions[i], parsed_metas[i])
+                # Extract caption from metas if available (from LM CoT output)
+                actual_caption = captions[i]
+                if i < len(parsed_metas) and parsed_metas[i]:
+                    meta_dict = parsed_metas[i]
+                    if isinstance(meta_dict, dict) and 'caption' in meta_dict and meta_dict['caption']:
+                        actual_caption = str(meta_dict['caption'])
+                
+                # Format text prompt with custom instruction (using LM-generated caption if available)
+                text_prompt = SFT_GEN_PROMPT.format(instruction, actual_caption, parsed_metas[i])
                 
                 # Tokenize text
                 text_inputs_dict = self.text_tokenizer(
@@ -1991,7 +2042,7 @@ class AceStepHandler:
         audio_code_string: Union[str, List[str]] = "",
         repainting_start: float = 0.0,
         repainting_end: Optional[float] = None,
-        instruction: str = "Fill the audio semantic mask based on the given conditions:",
+        instruction: str = DEFAULT_DIT_INSTRUCTION,
         audio_cover_strength: float = 1.0,
         task_type: str = "text2music",
         use_adg: bool = False,
@@ -2030,7 +2081,7 @@ class AceStepHandler:
                 # User has provided audio codes, switch to cover task
                 task_type = "cover"
                 # Update instruction for cover task
-                instruction = "Generate audio semantic tokens based on the given conditions:"
+                instruction = TASK_INSTRUCTIONS["cover"]
 
         logger.info("[generate_music] Starting generation...")
         if progress:
