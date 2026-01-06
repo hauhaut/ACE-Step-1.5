@@ -847,6 +847,20 @@ def create_app() -> FastAPI:
                 if (time_sig_val or "").strip():
                     metas_out["timesignature"] = str(time_sig_val)
 
+                def _ensure_text_meta(field: str, fallback: Optional[str]) -> None:
+                    existing = metas_out.get(field)
+                    if isinstance(existing, str):
+                        stripped = existing.strip()
+                        if stripped and stripped.upper() != "N/A":
+                            return
+                    if fallback is None:
+                        return
+                    if fallback.strip():
+                        metas_out[field] = fallback
+
+                _ensure_text_meta("caption", req.caption)
+                _ensure_text_meta("lyrics", req.lyrics)
+
                 def _none_if_na_str(v: Any) -> Optional[str]:
                     if v is None:
                         return None
