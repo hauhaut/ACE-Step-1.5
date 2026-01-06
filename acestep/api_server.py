@@ -29,6 +29,11 @@ from threading import Lock
 from typing import Any, Dict, Literal, Optional
 from uuid import uuid4
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # Optional dependency
+    load_dotenv = None  # type: ignore
+
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -89,8 +94,12 @@ class GenerateMusicRequest(BaseModel):
     lm_model_path: Optional[str] = None  # e.g. "acestep-5Hz-lm-0.6B"
     lm_backend: Literal["vllm", "pt"] = "vllm"
 
-    # Align defaults with `acestep/gradio_ui.py` and `feishu_bot/config.py`
-    # to improve lyric adherence in lm-dit mode.
+    constrained_decoding: bool = True
+    constrained_decoding_debug: bool = False
+    use_cot_caption: bool = True
+    use_cot_language: bool = True
+    is_format_caption: bool = False
+
     lm_temperature: float = 0.85
     lm_cfg_scale: float = 2.0
     lm_top_k: Optional[int] = None
@@ -125,8 +134,6 @@ class JobResult(BaseModel):
     status_message: str = ""
     seed_value: str = ""
 
-    # 5Hz LM metadata (present when server invoked LM)
-    # Keep a raw-ish dict for clients that expect a `metas` object.
     metas: Dict[str, Any] = Field(default_factory=dict)
     bpm: Optional[int] = None
     duration: Optional[float] = None
@@ -211,6 +218,22 @@ def _env_bool(name: str, default: bool) -> bool:
 def _get_project_root() -> str:
     current_file = os.path.abspath(__file__)
     return os.path.dirname(os.path.dirname(current_file))
+
+
+def _load_project_env() -> None:
+    if load_dotenv is None:
+        return
+    try:
+        project_root = _get_project_root()
+        env_path = os.path.join(project_root, ".env")
+        if os.path.exists(env_path):
+            load_dotenv(env_path, override=False)
+    except Exception:
+        # Optional best-effort: continue even if .env loading fails.
+        pass
+
+
+_load_project_env()
 
 
 def _to_int(v: Any, default: Optional[int] = None) -> Optional[int]:
@@ -372,7 +395,7 @@ def create_app() -> FastAPI:
                     raise RuntimeError(app.state._init_error)
 
                 project_root = _get_project_root()
-                config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
+                config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo-rl")
                 device = os.getenv("ACESTEP_DEVICE", "auto")
 
                 use_flash_attention = _env_bool("ACESTEP_USE_FLASH_ATTENTION", True)
@@ -568,25 +591,40 @@ def create_app() -> FastAPI:
 
                 has_codes = bool(audio_code_string and str(audio_code_string).strip())
                 need_lm_codes = bool(thinking) and (not has_codes)
-                need_lm_metas = (
-                    (bpm_val is None)
-                    or (not (key_scale_val or "").strip())
-                    or (not (time_sig_val or "").strip())
-                    or (audio_duration_val is None)
-                )
 
-                # Feishu-compatible: if user explicitly provided some metadata fields,
+                use_constrained_decoding = bool(getattr(req, "constrained_decoding", True))
+                constrained_decoding_debug = bool(getattr(req, "constrained_decoding_debug", False))
+                use_cot_caption = bool(getattr(req, "use_cot_caption", True))
+                use_cot_language = bool(getattr(req, "use_cot_language", True))
+                is_format_caption = bool(getattr(req, "is_format_caption", False))
+
                 # pass them into constrained decoding so LM injects them directly
                 # (i.e. does not re-infer / override those fields).
                 user_metadata: Dict[str, Optional[str]] = {}
-                if bpm_val is not None:
-                    user_metadata["bpm"] = str(int(bpm_val))
-                if audio_duration_val is not None:
-                    user_metadata["duration"] = str(float(audio_duration_val))
-                if (key_scale_val or "").strip():
-                    user_metadata["keyscale"] = str(key_scale_val)
-                if (time_sig_val or "").strip():
-                    user_metadata["timesignature"] = str(time_sig_val)
+
+                def _set_user_meta(field: str, value: Optional[Any]) -> None:
+                    if value is None:
+                        return
+                    s = str(value).strip()
+                    if not s or s.upper() == "N/A":
+                        return
+                    user_metadata[field] = s
+
+                _set_user_meta("bpm", int(bpm_val) if bpm_val is not None else None)
+                _set_user_meta("duration", float(audio_duration_val) if audio_duration_val is not None else None)
+                _set_user_meta("keyscale", key_scale_val if (key_scale_val or "").strip() else None)
+                _set_user_meta("timesignature", time_sig_val if (time_sig_val or "").strip() else None)
+
+                def _has_meta(field: str) -> bool:
+                    v = user_metadata.get(field)
+                    return bool((v or "").strip())
+
+                need_lm_metas = not (
+                    _has_meta("bpm")
+                    and _has_meta("duration")
+                    and _has_meta("keyscale")
+                    and _has_meta("timesignature")
+                )
 
                 lm_target_duration: Optional[float] = None
                 if need_lm_codes:
@@ -594,7 +632,13 @@ def create_app() -> FastAPI:
                     if audio_duration_val is not None and float(audio_duration_val) > 0:
                         lm_target_duration = float(audio_duration_val)
 
-                print(f"[api_server] LM调用参数: user_metadata={user_metadata}, target_duration={lm_target_duration}, need_lm_codes={need_lm_codes}, need_lm_metas={need_lm_metas}")
+                print(
+                    "[api_server] LM调用参数: "
+                    f"user_metadata_keys={sorted(user_metadata.keys())}, target_duration={lm_target_duration}, "
+                    f"need_lm_codes={need_lm_codes}, need_lm_metas={need_lm_metas}, "
+                    f"use_constrained_decoding={use_constrained_decoding}, use_cot_caption={use_cot_caption}, "
+                    f"use_cot_language={use_cot_language}, is_format_caption={is_format_caption}"
+                )
 
                 if need_lm_metas or need_lm_codes:
                     # Lazy init 5Hz LM once
@@ -602,7 +646,7 @@ def create_app() -> FastAPI:
                         if getattr(app.state, "_llm_initialized", False) is False and getattr(app.state, "_llm_init_error", None) is None:
                             project_root = _get_project_root()
                             checkpoint_dir = os.path.join(project_root, "checkpoints")
-                            lm_model_path = (req.lm_model_path or os.getenv("ACESTEP_LM_MODEL_PATH") or "acestep-5Hz-lm-0.6B").strip()
+                            lm_model_path = (req.lm_model_path or os.getenv("ACESTEP_LM_MODEL_PATH") or "acestep-5Hz-lm-0.6B-v3").strip()
                             backend = (req.lm_backend or os.getenv("ACESTEP_LM_BACKEND") or "vllm").strip().lower()
                             if backend not in {"vllm", "pt"}:
                                 backend = "vllm"
@@ -644,6 +688,11 @@ def create_app() -> FastAPI:
                                 repetition_penalty=float(req.lm_repetition_penalty),
                                 target_duration=lm_target_duration,
                                 user_metadata=(user_metadata or None),
+                                use_constrained_decoding=use_constrained_decoding,
+                                constrained_decoding_debug=constrained_decoding_debug,
+                                use_cot_caption=use_cot_caption,
+                                use_cot_language=use_cot_language,
+                                is_format_caption=is_format_caption,
                             )
 
                         meta, codes, status = _lm_call()
@@ -715,7 +764,6 @@ def create_app() -> FastAPI:
                     if s in {"", "N/A"}:
                         return None
                     return s
-
                 first, second, paths, gen_info, status_msg, seed_value, *_ = h.generate_music(
                     captions=req.caption,
                     lyrics=req.lyrics,
@@ -909,6 +957,11 @@ def create_app() -> FastAPI:
             normalized_bpm = _to_int(_get_any("bpm"), None)
             normalized_keyscale = str(_get_any("key_scale", "keyscale", "keyScale", default="") or "")
             normalized_timesig = str(_get_any("time_signature", "timesignature", "timeSignature", default="") or "")
+
+            # Accept it as an alias to avoid clients needing to special-case server.
+            if normalized_audio_duration is None:
+                normalized_audio_duration = _to_float(_get_any("target_duration", "targetDuration"), None)
+
             print(
                 "[api_server] normalized: "
                 f"thinking={_to_bool(get('thinking'), False)}, bpm={normalized_bpm}, "
@@ -950,6 +1003,12 @@ def create_app() -> FastAPI:
                 lm_top_p=_to_float(get("lm_top_p"), _LM_DEFAULT_TOP_P),
                 lm_repetition_penalty=_to_float(get("lm_repetition_penalty"), 1.0) or 1.0,
                 lm_negative_prompt=str(get("lm_negative_prompt", "NO USER INPUT") or "NO USER INPUT"),
+                constrained_decoding=_to_bool(_get_any("constrained_decoding", "constrainedDecoding", "constrained"), True),
+                constrained_decoding_debug=_to_bool(_get_any("constrained_decoding_debug", "constrainedDecodingDebug"), False),
+                # Accept common aliases, including hyphenated keys from some clients.
+                use_cot_caption=_to_bool(_get_any("use_cot_caption", "cot_caption", "cot-caption"), True),
+                use_cot_language=_to_bool(_get_any("use_cot_language", "cot_language", "cot-language"), True),
+                is_format_caption=_to_bool(_get_any("is_format_caption", "isFormatCaption"), False),
             )
 
         def _first_value(v: Any) -> Any:
