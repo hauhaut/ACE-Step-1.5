@@ -551,6 +551,7 @@ class LLMHandler:
         user_metadata: Optional[Dict[str, Optional[str]]] = None,
         use_cot_caption: bool = True,
         use_cot_language: bool = True,
+        is_format_caption: bool = False,
     ) -> Tuple[Dict[str, Any], str, str]:
         """Two-phase LM generation: CoT generation followed by audio codes generation.
 
@@ -575,7 +576,7 @@ class LLMHandler:
         
         # ========== PHASE 1: CoT Generation ==========
         # Always generate CoT unless all metadata are user-provided
-        if not has_all_metas:
+        if not has_all_metas or not is_format_caption:
             logger.info("Phase 1: Generating CoT metadata...")
             
             # Build formatted prompt for CoT phase

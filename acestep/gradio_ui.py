@@ -308,7 +308,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                     else:
                         initial_task_choices = TASK_TYPES_BASE
                     
-                    with gr.Row():
+                    with gr.Row(equal_height=True):
                         with gr.Column(scale=2):
                             task_type = gr.Dropdown(
                                 choices=initial_task_choices,
@@ -316,13 +316,21 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                                 label="Task Type",
                                 info="Select the task type for generation",
                             )
-                        with gr.Column(scale=8):
+                        with gr.Column(scale=7):
                             instruction_display_gen = gr.Textbox(
                                 label="Instruction",
                                 value=DEFAULT_DIT_INSTRUCTION,
                                 interactive=False,
                                 lines=1,
                                 info="Instruction is automatically generated based on task type",
+                            )
+                        with gr.Column(scale=1, min_width=100):
+                            load_file = gr.UploadButton(
+                                "Load",
+                                file_types=[".json"],
+                                file_count="single",
+                                variant="secondary",
+                                size="sm",
                             )
                     
                     track_name = gr.Dropdown(
@@ -486,15 +494,22 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                     info="Higher values follow text more closely",
                     visible=False
                 )
-                seed = gr.Textbox(
-                    label="Seed",
-                    value="-1",
-                    info="Use comma-separated values for batches"
-                )
-                random_seed_checkbox = gr.Checkbox(
-                    label="Random Seed",
-                    value=True,
-                    info="Enable to auto-generate seeds"
+                with gr.Column():
+                    seed = gr.Textbox(
+                        label="Seed",
+                        value="-1",
+                        info="Use comma-separated values for batches"
+                    )
+                    random_seed_checkbox = gr.Checkbox(
+                        label="Random Seed",
+                        value=True,
+                        info="Enable to auto-generate seeds"
+                    )
+                audio_format = gr.Dropdown(
+                    choices=["mp3", "flac"],
+                    value="mp3",
+                    label="Audio Format",
+                    info="Audio format for saved files"
                 )
             
             with gr.Row():
@@ -522,15 +537,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                     label="CFG Interval End",
                     visible=False
                 )
-            
-            with gr.Row():
-                audio_format = gr.Dropdown(
-                    choices=["mp3", "flac"],
-                    value="mp3",
-                    label="Audio Format",
-                    info="Audio format for saved files"
-                )
-            
+
             # LM (Language Model) Parameters
             gr.HTML("<h4>🤖 LM Generation Parameters</h4>")
             with gr.Row():
@@ -582,6 +589,12 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                 )
             
             with gr.Row():
+                use_cot_metas = gr.Checkbox(
+                    label="CoT Metas",
+                    value=True,
+                    info="Use LM to generate CoT metadata (uncheck to skip LM CoT generation)",
+                    scale=1,
+                )
                 use_cot_caption = gr.Checkbox(
                     label="CoT Caption",
                     value=True,
@@ -654,6 +667,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
         "lm_top_k": lm_top_k,
         "lm_top_p": lm_top_p,
         "lm_negative_prompt": lm_negative_prompt,
+        "use_cot_metas": use_cot_metas,
         "use_cot_caption": use_cot_caption,
         "use_cot_language": use_cot_language,
         "repainting_group": repainting_group,
@@ -662,6 +676,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
         "audio_cover_strength": audio_cover_strength,
         "captions": captions,
         "sample_btn": sample_btn,
+        "load_file": load_file,
         "lyrics": lyrics,
         "vocal_language": vocal_language,
         "bpm": bpm,
@@ -691,6 +706,9 @@ def create_results_section(dit_handler) -> dict:
         # Hidden state to store LM-generated metadata
         lm_metadata_state = gr.State(value=None)
         
+        # Hidden state to track if caption/metadata is from formatted source (LM/transcription)
+        is_format_caption_state = gr.State(value=False)
+        
         status_output = gr.Textbox(label="Generation Status", interactive=False)
         
         with gr.Row():
@@ -700,22 +718,38 @@ def create_results_section(dit_handler) -> dict:
                     type="filepath",
                     interactive=False
                 )
-                send_to_src_btn_1 = gr.Button(
-                    "Send To Src Audio",
-                    variant="secondary",
-                    size="sm"
-                )
+                with gr.Row(equal_height=True):
+                    send_to_src_btn_1 = gr.Button(
+                        "Send To Src Audio",
+                        variant="secondary",
+                        size="sm",
+                        scale=1
+                    )
+                    save_btn_1 = gr.Button(
+                        "💾 Save",
+                        variant="primary",
+                        size="sm",
+                        scale=1
+                    )
             with gr.Column():
                 generated_audio_2 = gr.Audio(
                     label="🎵 Generated Music (Sample 2)",
                     type="filepath",
                     interactive=False
                 )
-                send_to_src_btn_2 = gr.Button(
-                    "Send To Src Audio",
-                    variant="secondary",
-                    size="sm"
-                )
+                with gr.Row(equal_height=True):
+                    send_to_src_btn_2 = gr.Button(
+                        "Send To Src Audio",
+                        variant="secondary",
+                        size="sm",
+                        scale=1
+                    )
+                    save_btn_2 = gr.Button(
+                        "💾 Save",
+                        variant="primary",
+                        size="sm",
+                        scale=1
+                    )
 
         with gr.Accordion("📁 Batch Results & Generation Details", open=False):
             generated_audio_batch = gr.File(
@@ -738,11 +772,14 @@ def create_results_section(dit_handler) -> dict:
     
     return {
         "lm_metadata_state": lm_metadata_state,
+        "is_format_caption_state": is_format_caption_state,
         "status_output": status_output,
         "generated_audio_1": generated_audio_1,
         "generated_audio_2": generated_audio_2,
         "send_to_src_btn_1": send_to_src_btn_1,
         "send_to_src_btn_2": send_to_src_btn_2,
+        "save_btn_1": save_btn_1,
+        "save_btn_2": save_btn_2,
         "generated_audio_batch": generated_audio_batch,
         "generation_info": generation_info,
         "align_score_1": align_score_1,
@@ -756,6 +793,161 @@ def create_results_section(dit_handler) -> dict:
 
 def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, dataset_section, generation_section, results_section):
     """Setup event handlers connecting UI components and business logic"""
+    
+    def save_metadata(
+        task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature, audio_duration,
+        batch_size_input, inference_steps, guidance_scale, seed, random_seed_checkbox,
+        use_adg, cfg_interval_start, cfg_interval_end, audio_format,
+        lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
+        use_cot_caption, use_cot_language, audio_cover_strength,
+        think_checkbox, text2music_audio_code_string, repainting_start, repainting_end,
+        track_name, complete_track_classes, lm_metadata
+    ):
+        """Save all generation parameters to a JSON file"""
+        import datetime
+        
+        # Create metadata dictionary
+        metadata = {
+            "saved_at": datetime.datetime.now().isoformat(),
+            "task_type": task_type,
+            "caption": captions or "",
+            "lyrics": lyrics or "",
+            "vocal_language": vocal_language,
+            "bpm": bpm if bpm is not None else None,
+            "keyscale": key_scale or "",
+            "timesignature": time_signature or "",
+            "duration": audio_duration if audio_duration is not None else -1,
+            "batch_size": batch_size_input,
+            "inference_steps": inference_steps,
+            "guidance_scale": guidance_scale,
+            "seed": seed,
+            "random_seed": False, # Disable random seed for reproducibility
+            "use_adg": use_adg,
+            "cfg_interval_start": cfg_interval_start,
+            "cfg_interval_end": cfg_interval_end,
+            "audio_format": audio_format,
+            "lm_temperature": lm_temperature,
+            "lm_cfg_scale": lm_cfg_scale,
+            "lm_top_k": lm_top_k,
+            "lm_top_p": lm_top_p,
+            "lm_negative_prompt": lm_negative_prompt,
+            "use_cot_caption": use_cot_caption,
+            "use_cot_language": use_cot_language,
+            "audio_cover_strength": audio_cover_strength,
+            "think": think_checkbox,
+            "audio_codes": text2music_audio_code_string or "",
+            "repainting_start": repainting_start,
+            "repainting_end": repainting_end,
+            "track_name": track_name,
+            "complete_track_classes": complete_track_classes or [],
+        }
+        
+        # Add LM-generated metadata if available
+        if lm_metadata:
+            metadata["lm_generated_metadata"] = lm_metadata
+        
+        # Save to file
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"generation_params_{timestamp}.json"
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+            
+            gr.Info(f"✅ Parameters saved to {filename}")
+            return filename
+        except Exception as e:
+            gr.Warning(f"❌ Failed to save parameters: {str(e)}")
+            return None
+    
+    def load_metadata(file_obj):
+        """Load generation parameters from a JSON file"""
+        if file_obj is None:
+            gr.Warning("⚠️ No file selected")
+            return [None] * 31 + [False]  # Return None for all fields, False for is_format_caption
+        
+        try:
+            # Read the uploaded file
+            if hasattr(file_obj, 'name'):
+                filepath = file_obj.name
+            else:
+                filepath = file_obj
+            
+            with open(filepath, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+            
+            # Extract all fields
+            task_type = metadata.get('task_type', 'text2music')
+            captions = metadata.get('caption', '')
+            lyrics = metadata.get('lyrics', '')
+            vocal_language = metadata.get('vocal_language', 'unknown')
+            
+            # Convert bpm
+            bpm_value = metadata.get('bpm')
+            if bpm_value is not None and bpm_value != "N/A":
+                try:
+                    bpm = int(bpm_value) if bpm_value else None
+                except:
+                    bpm = None
+            else:
+                bpm = None
+            
+            key_scale = metadata.get('keyscale', '')
+            time_signature = metadata.get('timesignature', '')
+            
+            # Convert duration
+            duration_value = metadata.get('duration', -1)
+            if duration_value is not None and duration_value != "N/A":
+                try:
+                    audio_duration = float(duration_value)
+                except:
+                    audio_duration = -1
+            else:
+                audio_duration = -1
+            
+            batch_size = metadata.get('batch_size', 2)
+            inference_steps = metadata.get('inference_steps', 8)
+            guidance_scale = metadata.get('guidance_scale', 7.0)
+            seed = metadata.get('seed', '-1')
+            random_seed = metadata.get('random_seed', True)
+            use_adg = metadata.get('use_adg', False)
+            cfg_interval_start = metadata.get('cfg_interval_start', 0.0)
+            cfg_interval_end = metadata.get('cfg_interval_end', 1.0)
+            audio_format = metadata.get('audio_format', 'mp3')
+            lm_temperature = metadata.get('lm_temperature', 0.85)
+            lm_cfg_scale = metadata.get('lm_cfg_scale', 2.0)
+            lm_top_k = metadata.get('lm_top_k', 0)
+            lm_top_p = metadata.get('lm_top_p', 0.9)
+            lm_negative_prompt = metadata.get('lm_negative_prompt', 'NO USER INPUT')
+            use_cot_caption = metadata.get('use_cot_caption', True)
+            use_cot_language = metadata.get('use_cot_language', True)
+            audio_cover_strength = metadata.get('audio_cover_strength', 1.0)
+            think = metadata.get('think', True)
+            audio_codes = metadata.get('audio_codes', '')
+            repainting_start = metadata.get('repainting_start', 0.0)
+            repainting_end = metadata.get('repainting_end', -1)
+            track_name = metadata.get('track_name')
+            complete_track_classes = metadata.get('complete_track_classes', [])
+            
+            gr.Info(f"✅ Parameters loaded from {os.path.basename(filepath)}")
+            
+            return (
+                task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature,
+                audio_duration, batch_size, inference_steps, guidance_scale, seed, random_seed,
+                use_adg, cfg_interval_start, cfg_interval_end, audio_format,
+                lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
+                use_cot_caption, use_cot_language, audio_cover_strength,
+                think, audio_codes, repainting_start, repainting_end,
+                track_name, complete_track_classes,
+                True  # Set is_format_caption to True when loading from file
+            )
+            
+        except json.JSONDecodeError as e:
+            gr.Warning(f"❌ Invalid JSON file: {str(e)}")
+            return [None] * 31 + [False]
+        except Exception as e:
+            gr.Warning(f"❌ Error loading file: {str(e)}")
+            return [None] * 31 + [False]
     
     def load_random_example(task_type: str):
         """Load a random example from the task-specific examples directory
@@ -1092,14 +1284,14 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         instruction_display_gen, audio_cover_strength, task_type,
         use_adg, cfg_interval_start, cfg_interval_end, audio_format, lm_temperature,
         think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
-        use_cot_caption, use_cot_language,
+        use_cot_metas, use_cot_caption, use_cot_language, is_format_caption,
         progress=gr.Progress(track_tqdm=True)
     ):
-        # If think is enabled (llm_dit mode), generate audio codes using LM first
+        # If think is enabled (llm_dit mode) and use_cot_metas is True, generate audio codes using LM first
         audio_code_string_to_use = text2music_audio_code_string
         lm_generated_metadata = None  # Store LM-generated metadata for display
         lm_generated_audio_codes = None  # Store LM-generated audio codes for display
-        if think_checkbox and llm_handler.llm_initialized:
+        if think_checkbox and llm_handler.llm_initialized and use_cot_metas:
             # Convert top_k: 0 means None (disabled)
             top_k_value = None if lm_top_k == 0 else int(lm_top_k)
             # Convert top_p: 1.0 means None (disabled)
@@ -1149,6 +1341,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 user_metadata=user_metadata_to_pass,
                 use_cot_caption=use_cot_caption,
                 use_cot_language=use_cot_language,
+                is_format_caption=is_format_caption,
             )
             
             # Store LM-generated metadata and audio codes for display
@@ -1238,7 +1431,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             align_text_2,
             align_plot_2,
             updated_audio_codes,  # Update audio codes in UI
-            lm_generated_metadata  # Store metadata for "Send to src audio" buttons
+            lm_generated_metadata,  # Store metadata for "Send to src audio" buttons
+            is_format_caption  # Keep is_format_caption unchanged (LM doesn't modify user input fields)
         )
     
     generation_section["generate_btn"].click(
@@ -1274,8 +1468,10 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["lm_top_k"],
             generation_section["lm_top_p"],
             generation_section["lm_negative_prompt"],
+            generation_section["use_cot_metas"],
             generation_section["use_cot_caption"],
-            generation_section["use_cot_language"]
+            generation_section["use_cot_language"],
+            results_section["is_format_caption_state"]
         ],
         outputs=[
             results_section["generated_audio_1"],
@@ -1291,7 +1487,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             results_section["align_text_2"],
             results_section["align_plot_2"],
             generation_section["text2music_audio_code_string"],  # Update audio codes display
-            results_section["lm_metadata_state"]  # Store metadata
+            results_section["lm_metadata_state"],  # Store metadata
+            results_section["is_format_caption_state"]  # Update is_format_caption state
         ]
     )
     
@@ -1420,10 +1617,10 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             lm_metadata: Dictionary containing LM-generated metadata
             
         Returns:
-            Tuple of (audio_file, bpm, caption, duration, key_scale, language, time_signature)
+            Tuple of (audio_file, bpm, caption, duration, key_scale, language, time_signature, is_format_caption)
         """
         if audio_file is None:
-            return None, None, None, None, None, None, None
+            return None, None, None, None, None, None, None, True  # Keep is_format_caption as True
         
         # Extract metadata fields if available
         bpm_value = None
@@ -1481,7 +1678,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             duration_value,
             key_scale_value,
             language_value,
-            time_signature_value
+            time_signature_value,
+            True  # Set is_format_caption to True (from LM-generated metadata)
         )
     
     results_section["send_to_src_btn_1"].click(
@@ -1497,7 +1695,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["audio_duration"],
             generation_section["key_scale"],
             generation_section["vocal_language"],
-            generation_section["time_signature"]
+            generation_section["time_signature"],
+            results_section["is_format_caption_state"]
         ]
     )
     
@@ -1514,13 +1713,21 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["audio_duration"],
             generation_section["key_scale"],
             generation_section["vocal_language"],
-            generation_section["time_signature"]
+            generation_section["time_signature"],
+            results_section["is_format_caption_state"]
         ]
     )
     
     # Sample button - smart sample (uses LM if initialized, otherwise examples)
+    # Need to add is_format_caption return value to sample_example_smart
+    def sample_example_smart_with_flag(task_type: str):
+        """Wrapper for sample_example_smart that adds is_format_caption flag"""
+        result = sample_example_smart(task_type)
+        # Add True at the end to set is_format_caption
+        return result + (True,)
+    
     generation_section["sample_btn"].click(
-        fn=sample_example_smart,
+        fn=sample_example_smart_with_flag,
         inputs=[generation_section["task_type"]],
         outputs=[
             generation_section["captions"],
@@ -1531,6 +1738,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["key_scale"],
             generation_section["vocal_language"],
             generation_section["time_signature"],
+            results_section["is_format_caption_state"]  # Set is_format_caption to True (from Sample/LM)
         ]
     )
     
@@ -1585,7 +1793,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             duration,
             keyscale,
             language,
-            timesignature
+            timesignature,
+            True  # Set is_format_caption to True (from Transcribe/LM understanding)
         )
     
     # Update transcribe button text based on whether codes are present
@@ -1619,7 +1828,56 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["key_scale"],        # Update keyscale field
             generation_section["vocal_language"],   # Update language field
             generation_section["time_signature"],   # Update time signature field
+            results_section["is_format_caption_state"]  # Set is_format_caption to True
         ]
+    )
+    
+    # Reset is_format_caption to False when user manually edits fields
+    def reset_format_caption_flag():
+        """Reset is_format_caption to False when user manually edits caption/metadata"""
+        return False
+    
+    # Connect reset function to all user-editable metadata fields
+    generation_section["captions"].change(
+        fn=reset_format_caption_flag,
+        inputs=[],
+        outputs=[results_section["is_format_caption_state"]]
+    )
+    
+    generation_section["lyrics"].change(
+        fn=reset_format_caption_flag,
+        inputs=[],
+        outputs=[results_section["is_format_caption_state"]]
+    )
+    
+    generation_section["bpm"].change(
+        fn=reset_format_caption_flag,
+        inputs=[],
+        outputs=[results_section["is_format_caption_state"]]
+    )
+    
+    generation_section["key_scale"].change(
+        fn=reset_format_caption_flag,
+        inputs=[],
+        outputs=[results_section["is_format_caption_state"]]
+    )
+    
+    generation_section["time_signature"].change(
+        fn=reset_format_caption_flag,
+        inputs=[],
+        outputs=[results_section["is_format_caption_state"]]
+    )
+    
+    generation_section["vocal_language"].change(
+        fn=reset_format_caption_flag,
+        inputs=[],
+        outputs=[results_section["is_format_caption_state"]]
+    )
+    
+    generation_section["audio_duration"].change(
+        fn=reset_format_caption_flag,
+        inputs=[],
+        outputs=[results_section["is_format_caption_state"]]
     )
     
     # Auto-expand Audio Uploads accordion when audio is uploaded
@@ -1639,5 +1897,124 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         fn=update_audio_uploads_accordion,
         inputs=[generation_section["reference_audio"], generation_section["src_audio"]],
         outputs=[generation_section["audio_uploads_accordion"]]
+    )
+    
+    # Save metadata handlers
+    results_section["save_btn_1"].click(
+        fn=save_metadata,
+        inputs=[
+            generation_section["task_type"],
+            generation_section["captions"],
+            generation_section["lyrics"],
+            generation_section["vocal_language"],
+            generation_section["bpm"],
+            generation_section["key_scale"],
+            generation_section["time_signature"],
+            generation_section["audio_duration"],
+            generation_section["batch_size_input"],
+            generation_section["inference_steps"],
+            generation_section["guidance_scale"],
+            generation_section["seed"],
+            generation_section["random_seed_checkbox"],
+            generation_section["use_adg"],
+            generation_section["cfg_interval_start"],
+            generation_section["cfg_interval_end"],
+            generation_section["audio_format"],
+            generation_section["lm_temperature"],
+            generation_section["lm_cfg_scale"],
+            generation_section["lm_top_k"],
+            generation_section["lm_top_p"],
+            generation_section["lm_negative_prompt"],
+            generation_section["use_cot_caption"],
+            generation_section["use_cot_language"],
+            generation_section["audio_cover_strength"],
+            generation_section["think_checkbox"],
+            generation_section["text2music_audio_code_string"],
+            generation_section["repainting_start"],
+            generation_section["repainting_end"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
+            results_section["lm_metadata_state"],
+        ],
+        outputs=[]
+    )
+    
+    results_section["save_btn_2"].click(
+        fn=save_metadata,
+        inputs=[
+            generation_section["task_type"],
+            generation_section["captions"],
+            generation_section["lyrics"],
+            generation_section["vocal_language"],
+            generation_section["bpm"],
+            generation_section["key_scale"],
+            generation_section["time_signature"],
+            generation_section["audio_duration"],
+            generation_section["batch_size_input"],
+            generation_section["inference_steps"],
+            generation_section["guidance_scale"],
+            generation_section["seed"],
+            generation_section["random_seed_checkbox"],
+            generation_section["use_adg"],
+            generation_section["cfg_interval_start"],
+            generation_section["cfg_interval_end"],
+            generation_section["audio_format"],
+            generation_section["lm_temperature"],
+            generation_section["lm_cfg_scale"],
+            generation_section["lm_top_k"],
+            generation_section["lm_top_p"],
+            generation_section["lm_negative_prompt"],
+            generation_section["use_cot_caption"],
+            generation_section["use_cot_language"],
+            generation_section["audio_cover_strength"],
+            generation_section["think_checkbox"],
+            generation_section["text2music_audio_code_string"],
+            generation_section["repainting_start"],
+            generation_section["repainting_end"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
+            results_section["lm_metadata_state"],
+        ],
+        outputs=[]
+    )
+    
+    # Load metadata handler - triggered when file is uploaded via UploadButton
+    generation_section["load_file"].upload(
+        fn=load_metadata,
+        inputs=[generation_section["load_file"]],
+        outputs=[
+            generation_section["task_type"],
+            generation_section["captions"],
+            generation_section["lyrics"],
+            generation_section["vocal_language"],
+            generation_section["bpm"],
+            generation_section["key_scale"],
+            generation_section["time_signature"],
+            generation_section["audio_duration"],
+            generation_section["batch_size_input"],
+            generation_section["inference_steps"],
+            generation_section["guidance_scale"],
+            generation_section["seed"],
+            generation_section["random_seed_checkbox"],
+            generation_section["use_adg"],
+            generation_section["cfg_interval_start"],
+            generation_section["cfg_interval_end"],
+            generation_section["audio_format"],
+            generation_section["lm_temperature"],
+            generation_section["lm_cfg_scale"],
+            generation_section["lm_top_k"],
+            generation_section["lm_top_p"],
+            generation_section["lm_negative_prompt"],
+            generation_section["use_cot_caption"],
+            generation_section["use_cot_language"],
+            generation_section["audio_cover_strength"],
+            generation_section["think_checkbox"],
+            generation_section["text2music_audio_code_string"],
+            generation_section["repainting_start"],
+            generation_section["repainting_end"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
+            results_section["is_format_caption_state"]
+        ]
     )
 
