@@ -246,7 +246,10 @@ def _to_int(v: Any, default: Optional[int] = None) -> Optional[int]:
     s = str(v).strip()
     if s == "":
         return default
-    return int(s)
+    try:
+        return int(s)
+    except Exception:
+        return default
 
 
 def _to_float(v: Any, default: Optional[float] = None) -> Optional[float]:
@@ -257,7 +260,10 @@ def _to_float(v: Any, default: Optional[float] = None) -> Optional[float]:
     s = str(v).strip()
     if s == "":
         return default
-    return float(s)
+    try:
+        return float(s)
+    except Exception:
+        return default
 
 
 def _to_bool(v: Any, default: bool = False) -> bool:
@@ -650,6 +656,31 @@ def create_app() -> FastAPI:
                         req.audio_duration = sample_duration
 
                     lm_meta = sample_metadata
+
+                    fallback_values: Dict[str, Any] = {}
+                    default_bpm = _to_int(os.getenv("ACESTEP_SAMPLE_DEFAULT_BPM", "120"), 120) or 120
+                    default_duration = _to_float(os.getenv("ACESTEP_SAMPLE_DEFAULT_DURATION_SECONDS", "120"), 120.0) or 120.0
+                    default_key = os.getenv("ACESTEP_SAMPLE_DEFAULT_KEY", "C Major") or "C Major"
+                    default_timesig = os.getenv("ACESTEP_SAMPLE_DEFAULT_TIMESIGNATURE", "4/4") or "4/4"
+
+                    if req.bpm is None or req.bpm <= 0:
+                        req.bpm = default_bpm
+                        fallback_values["bpm"] = default_bpm
+
+                    if req.audio_duration is None or req.audio_duration <= 0:
+                        req.audio_duration = default_duration
+                        fallback_values["audio_duration"] = default_duration
+
+                    if not (req.key_scale or "").strip():
+                        req.key_scale = default_key
+                        fallback_values["key_scale"] = default_key
+
+                    if not (req.time_signature or "").strip():
+                        req.time_signature = default_timesig
+                        fallback_values["time_signature"] = default_timesig
+
+                    if fallback_values:
+                        print("[api_server] sample mode fallback values:", fallback_values)
 
                     print(
                         "[api_server] sample mode metadata:",
