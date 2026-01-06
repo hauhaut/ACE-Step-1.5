@@ -363,12 +363,20 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                         
                     # Audio Codes for text2music
                     with gr.Accordion("🎼 LM Codes Hints", open=False, visible=True) as text2music_audio_codes_group:
-                        text2music_audio_code_string = gr.Textbox(
-                            label="LM Codes Hints",
-                            placeholder="<|audio_code_10695|><|audio_code_54246|>...",
-                            lines=6,
-                            info="Paste LM codes hints for text2music generation"
-                        )
+                        with gr.Row(equal_height=True):
+                            text2music_audio_code_string = gr.Textbox(
+                                label="LM Codes Hints",
+                                placeholder="<|audio_code_10695|><|audio_code_54246|>...",
+                                lines=6,
+                                info="Paste LM codes hints for text2music generation",
+                                scale=9,
+                            )
+                            transcribe_btn = gr.Button(
+                                "Transcribe",
+                                variant="secondary",
+                                size="sm",
+                                scale=1,
+                            )
                     
                     # Repainting controls
                     with gr.Group(visible=False) as repainting_group:
@@ -639,6 +647,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
         "src_audio": src_audio,
         "convert_src_to_codes_btn": convert_src_to_codes_btn,
         "text2music_audio_code_string": text2music_audio_code_string,
+        "transcribe_btn": transcribe_btn,
         "text2music_audio_codes_group": text2music_audio_codes_group,
         "lm_temperature": lm_temperature,
         "lm_cfg_scale": lm_cfg_scale,
@@ -678,6 +687,9 @@ def create_results_section(dit_handler) -> dict:
     """Create results display section"""
     with gr.Group():
         gr.HTML('<div class="section-header"><h3>🎧 Generated Results</h3></div>')
+        
+        # Hidden state to store LM-generated metadata
+        lm_metadata_state = gr.State(value=None)
         
         status_output = gr.Textbox(label="Generation Status", interactive=False)
         
@@ -725,6 +737,7 @@ def create_results_section(dit_handler) -> dict:
                     align_plot_2 = gr.Plot(label="Attention Focus Score Heatmap (Sample 2)")
     
     return {
+        "lm_metadata_state": lm_metadata_state,
         "status_output": status_output,
         "generated_audio_1": generated_audio_1,
         "generated_audio_2": generated_audio_2,
@@ -751,7 +764,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             task_type: The task type (e.g., "text2music")
             
         Returns:
-            Tuple of (caption_value, lyrics_value, think_value) for updating UI components
+            Tuple of (caption, lyrics, think, bpm, duration, keyscale, language, timesignature) for updating UI components
         """
         try:
             # Get the project root directory
@@ -764,14 +777,14 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             # Check if directory exists
             if not os.path.exists(examples_dir):
                 gr.Warning(f"Examples directory not found: examples/{task_type}/")
-                return "", "", True
+                return "", "", True, None, None, "", "", ""
             
             # Find all JSON files in the directory
             json_files = glob.glob(os.path.join(examples_dir, "*.json"))
             
             if not json_files:
                 gr.Warning(f"No JSON files found in examples/{task_type}/")
-                return "", "", True
+                return "", "", True, None, None, "", "", ""
             
             # Randomly select one file
             selected_file = random.choice(json_files)
@@ -796,19 +809,111 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 if not isinstance(think_value, bool):
                     think_value = True
                 
-                gr.Info(f"Loaded example from {os.path.basename(selected_file)}")
-                return caption_value, lyrics_value, think_value
+                # Extract optional metadata fields
+                bpm_value = None
+                if 'bpm' in data and data['bpm'] not in [None, "N/A", ""]:
+                    try:
+                        bpm_value = int(data['bpm'])
+                    except (ValueError, TypeError):
+                        pass
+                
+                duration_value = None
+                if 'duration' in data and data['duration'] not in [None, "N/A", ""]:
+                    try:
+                        duration_value = float(data['duration'])
+                    except (ValueError, TypeError):
+                        pass
+                
+                keyscale_value = data.get('keyscale', '')
+                if keyscale_value in [None, "N/A"]:
+                    keyscale_value = ''
+                
+                language_value = data.get('language', '')
+                if language_value in [None, "N/A"]:
+                    language_value = ''
+                
+                timesignature_value = data.get('timesignature', '')
+                if timesignature_value in [None, "N/A"]:
+                    timesignature_value = ''
+                
+                gr.Info(f"📁 Loaded example from {os.path.basename(selected_file)}")
+                return caption_value, lyrics_value, think_value, bpm_value, duration_value, keyscale_value, language_value, timesignature_value
                 
             except json.JSONDecodeError as e:
                 gr.Warning(f"Failed to parse JSON file {os.path.basename(selected_file)}: {str(e)}")
-                return "", "", True
+                return "", "", True, None, None, "", "", ""
             except Exception as e:
                 gr.Warning(f"Error reading file {os.path.basename(selected_file)}: {str(e)}")
-                return "", "", True
+                return "", "", True, None, None, "", "", ""
                 
         except Exception as e:
             gr.Warning(f"Error loading example: {str(e)}")
-            return "", "", True
+            return "", "", True, None, None, "", "", ""
+    
+    def sample_example_smart(task_type: str):
+        """Smart sample function that uses LM if initialized, otherwise falls back to examples
+        
+        Args:
+            task_type: The task type (e.g., "text2music")
+            
+        Returns:
+            Tuple of (caption, lyrics, think, bpm, duration, keyscale, language, timesignature) for updating UI components
+        """
+        # Check if LM is initialized
+        if llm_handler.llm_initialized:
+            # Use LM to generate example
+            try:
+                # Generate example using LM with empty input (NO USER INPUT)
+                metadata, status = llm_handler.understand_audio_from_codes(
+                    audio_codes="NO USER INPUT",
+                    use_constrained_decoding=True,
+                    temperature=0.85,
+                )
+                
+                if metadata:
+                    caption_value = metadata.get('caption', '')
+                    lyrics_value = metadata.get('lyrics', '')
+                    think_value = True  # Always enable think when using LM-generated examples
+                    
+                    # Extract optional metadata fields
+                    bpm_value = None
+                    if 'bpm' in metadata and metadata['bpm'] not in [None, "N/A", ""]:
+                        try:
+                            bpm_value = int(metadata['bpm'])
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    duration_value = None
+                    if 'duration' in metadata and metadata['duration'] not in [None, "N/A", ""]:
+                        try:
+                            duration_value = float(metadata['duration'])
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    keyscale_value = metadata.get('keyscale', '')
+                    if keyscale_value in [None, "N/A"]:
+                        keyscale_value = ''
+                    
+                    language_value = metadata.get('language', '')
+                    if language_value in [None, "N/A"]:
+                        language_value = ''
+                    
+                    timesignature_value = metadata.get('timesignature', '')
+                    if timesignature_value in [None, "N/A"]:
+                        timesignature_value = ''
+                    
+                    gr.Info("🤖 Generated example using LM (Language Model)")
+                    return caption_value, lyrics_value, think_value, bpm_value, duration_value, keyscale_value, language_value, timesignature_value
+                else:
+                    gr.Warning("Failed to generate example using LM, falling back to examples directory")
+                    return load_random_example(task_type)
+                    
+            except Exception as e:
+                gr.Warning(f"Error generating example with LM: {str(e)}, falling back to examples directory")
+                return load_random_example(task_type)
+        else:
+            # LM not initialized, use examples directory
+            return load_random_example(task_type)
     
     def update_init_status(status_msg, enable_btn):
         """Update initialization status and enable/disable generate button"""
@@ -1105,8 +1210,6 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 metadata_lines.append(f"- **User Query Rewritten Caption:** {lm_generated_metadata['caption']}")
             if lm_generated_metadata.get('duration'):
                 metadata_lines.append(f"- **Duration:** {lm_generated_metadata['duration']} seconds")
-            if lm_generated_metadata.get('genres'):
-                metadata_lines.append(f"- **Genres:** {lm_generated_metadata['genres']}")
             if lm_generated_metadata.get('keyscale'):
                 metadata_lines.append(f"- **KeyScale:** {lm_generated_metadata['keyscale']}")
             if lm_generated_metadata.get('language'):
@@ -1134,7 +1237,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             align_score_2,
             align_text_2,
             align_plot_2,
-            updated_audio_codes  # Update audio codes in UI
+            updated_audio_codes,  # Update audio codes in UI
+            lm_generated_metadata  # Store metadata for "Send to src audio" buttons
         )
     
     generation_section["generate_btn"].click(
@@ -1186,7 +1290,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             results_section["align_score_2"],
             results_section["align_text_2"],
             results_section["align_plot_2"],
-            generation_section["text2music_audio_code_string"]  # Update audio codes display
+            generation_section["text2music_audio_code_string"],  # Update audio codes display
+            results_section["lm_metadata_state"]  # Store metadata
         ]
     )
     
@@ -1306,33 +1411,214 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         ]
     )
     
-    # Send generated audio to src_audio
-    def send_audio_to_src(audio_file):
-        """Send generated audio file to src_audio input"""
+    # Send generated audio to src_audio and populate metadata
+    def send_audio_to_src_with_metadata(audio_file, lm_metadata):
+        """Send generated audio file to src_audio input and populate metadata fields
+        
+        Args:
+            audio_file: Audio file path
+            lm_metadata: Dictionary containing LM-generated metadata
+            
+        Returns:
+            Tuple of (audio_file, bpm, caption, duration, key_scale, language, time_signature)
+        """
         if audio_file is None:
-            return None
-        return audio_file
+            return None, None, None, None, None, None, None
+        
+        # Extract metadata fields if available
+        bpm_value = None
+        caption_value = None
+        duration_value = None
+        key_scale_value = None
+        language_value = None
+        time_signature_value = None
+        
+        if lm_metadata:
+            # BPM
+            if lm_metadata.get('bpm'):
+                bpm_str = lm_metadata.get('bpm')
+                if bpm_str and bpm_str != "N/A":
+                    try:
+                        bpm_value = int(bpm_str)
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Caption (Rewritten Caption)
+            if lm_metadata.get('caption'):
+                caption_value = lm_metadata.get('caption')
+            
+            # Duration
+            if lm_metadata.get('duration'):
+                duration_str = lm_metadata.get('duration')
+                if duration_str and duration_str != "N/A":
+                    try:
+                        duration_value = float(duration_str)
+                    except (ValueError, TypeError):
+                        pass
+            
+            # KeyScale
+            if lm_metadata.get('keyscale'):
+                key_scale_str = lm_metadata.get('keyscale')
+                if key_scale_str and key_scale_str != "N/A":
+                    key_scale_value = key_scale_str
+            
+            # Language
+            if lm_metadata.get('language'):
+                language_str = lm_metadata.get('language')
+                if language_str and language_str != "N/A":
+                    language_value = language_str
+            
+            # Time Signature
+            if lm_metadata.get('timesignature'):
+                time_sig_str = lm_metadata.get('timesignature')
+                if time_sig_str and time_sig_str != "N/A":
+                    time_signature_value = time_sig_str
+        
+        return (
+            audio_file,
+            bpm_value,
+            caption_value,
+            duration_value,
+            key_scale_value,
+            language_value,
+            time_signature_value
+        )
     
     results_section["send_to_src_btn_1"].click(
-        fn=send_audio_to_src,
-        inputs=[results_section["generated_audio_1"]],
-        outputs=[generation_section["src_audio"]]
+        fn=send_audio_to_src_with_metadata,
+        inputs=[
+            results_section["generated_audio_1"],
+            results_section["lm_metadata_state"]
+        ],
+        outputs=[
+            generation_section["src_audio"],
+            generation_section["bpm"],
+            generation_section["captions"],
+            generation_section["audio_duration"],
+            generation_section["key_scale"],
+            generation_section["vocal_language"],
+            generation_section["time_signature"]
+        ]
     )
     
     results_section["send_to_src_btn_2"].click(
-        fn=send_audio_to_src,
-        inputs=[results_section["generated_audio_2"]],
-        outputs=[generation_section["src_audio"]]
+        fn=send_audio_to_src_with_metadata,
+        inputs=[
+            results_section["generated_audio_2"],
+            results_section["lm_metadata_state"]
+        ],
+        outputs=[
+            generation_section["src_audio"],
+            generation_section["bpm"],
+            generation_section["captions"],
+            generation_section["audio_duration"],
+            generation_section["key_scale"],
+            generation_section["vocal_language"],
+            generation_section["time_signature"]
+        ]
     )
     
-    # Sample button - load random example
+    # Sample button - smart sample (uses LM if initialized, otherwise examples)
     generation_section["sample_btn"].click(
-        fn=load_random_example,
+        fn=sample_example_smart,
         inputs=[generation_section["task_type"]],
         outputs=[
             generation_section["captions"],
             generation_section["lyrics"],
-            generation_section["think_checkbox"]
+            generation_section["think_checkbox"],
+            generation_section["bpm"],
+            generation_section["audio_duration"],
+            generation_section["key_scale"],
+            generation_section["vocal_language"],
+            generation_section["time_signature"],
+        ]
+    )
+    
+    # Transcribe audio codes to metadata (or generate example if empty)
+    def transcribe_audio_codes(audio_code_string):
+        """
+        Transcribe audio codes to metadata using LLM understanding.
+        If audio_code_string is empty, generate a sample example instead.
+        
+        Args:
+            audio_code_string: String containing audio codes (or empty for example generation)
+            
+        Returns:
+            Tuple of (status_message, caption, lyrics, bpm, duration, keyscale, language, timesignature)
+        """
+        if not llm_handler.llm_initialized:
+            return "❌ 5Hz LM not initialized. Please initialize it first.", "", "", None, None, "", "", ""
+        
+        # If codes are empty, this becomes a "generate example" task
+        # Use "NO USER INPUT" as the input to generate a sample
+        if not audio_code_string or not audio_code_string.strip():
+            audio_code_string = "NO USER INPUT"
+        
+        # Call LLM understanding
+        metadata, status = llm_handler.understand_audio_from_codes(audio_codes=audio_code_string, use_constrained_decoding=True)
+        
+        # Extract fields for UI update
+        caption = metadata.get('caption', '')
+        lyrics = metadata.get('lyrics', '')
+        bpm = metadata.get('bpm')
+        duration = metadata.get('duration')
+        keyscale = metadata.get('keyscale', '')
+        language = metadata.get('language', '')
+        timesignature = metadata.get('timesignature', '')
+        
+        # Convert to appropriate types
+        try:
+            bpm = int(bpm) if bpm and bpm != 'N/A' else None
+        except:
+            bpm = None
+        
+        try:
+            duration = float(duration) if duration and duration != 'N/A' else None
+        except:
+            duration = None
+        
+        return (
+            status,
+            caption,
+            lyrics,
+            bpm,
+            duration,
+            keyscale,
+            language,
+            timesignature
+        )
+    
+    # Update transcribe button text based on whether codes are present
+    def update_transcribe_button_text(audio_code_string):
+        """
+        Update the transcribe button text based on input content.
+        If empty: "Generate Example"
+        If has content: "Transcribe"
+        """
+        if not audio_code_string or not audio_code_string.strip():
+            return gr.update(value="Generate Example")
+        else:
+            return gr.update(value="Transcribe")
+    
+    # Update button text when codes change
+    generation_section["text2music_audio_code_string"].change(
+        fn=update_transcribe_button_text,
+        inputs=[generation_section["text2music_audio_code_string"]],
+        outputs=[generation_section["transcribe_btn"]]
+    )
+    
+    generation_section["transcribe_btn"].click(
+        fn=transcribe_audio_codes,
+        inputs=[generation_section["text2music_audio_code_string"]],
+        outputs=[
+            results_section["status_output"],       # Show status
+            generation_section["captions"],         # Update caption field
+            generation_section["lyrics"],           # Update lyrics field
+            generation_section["bpm"],              # Update BPM field
+            generation_section["audio_duration"],   # Update duration field
+            generation_section["key_scale"],        # Update keyscale field
+            generation_section["vocal_language"],   # Update language field
+            generation_section["time_signature"],   # Update time signature field
         ]
     )
     

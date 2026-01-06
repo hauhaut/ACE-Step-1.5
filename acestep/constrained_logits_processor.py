@@ -35,9 +35,6 @@ class FSMState(Enum):
     DURATION_NAME = auto()       # Generating "duration: "
     DURATION_VALUE = auto()      # Generating numeric value 10-600
     NEWLINE_AFTER_DURATION = auto()
-    GENRES_NAME = auto()         # Generating "genres: "
-    GENRES_VALUE = auto()        # Generating any non-empty string
-    NEWLINE_AFTER_GENRES = auto()
     KEYSCALE_NAME = auto()       # Generating "keyscale: "
     KEYSCALE_VALUE = auto()      # Generating keyscale pattern
     NEWLINE_AFTER_KEYSCALE = auto()
@@ -77,35 +74,28 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         tokenizer: AutoTokenizer,
         enabled: bool = True,
         debug: bool = False,
-        genres_vocab_path: Optional[str] = None,
-        skip_genres: bool = True,
+        **kwargs: Any,
     ):
         """
         Initialize the constrained logits processor.
         
         This processor should be initialized once when loading the LLM and reused
-        for all generations. Use update_caption() before each generation to update
-        the caption-based genre filtering.
-        
+        for all generations.
         Args:
             tokenizer: The tokenizer to use for encoding/decoding
             enabled: Whether to enable constrained decoding
             debug: Whether to print debug information
-            genres_vocab_path: Path to genres vocabulary file (one genre per line)
-                              If None, defaults to "acestep/genres_vocab.txt"
-            skip_genres: Whether to skip genres generation in metadata (default True)
         """
         self.tokenizer = tokenizer
         self.enabled = enabled
         self.debug = debug
-        self.skip_genres = skip_genres
         self.skip_caption = False  # Set to True to skip caption field generation
         self.skip_language = False  # Set to True to skip language field generation
         self.caption: Optional[str] = None  # Set via update_caption() before each generation
         
         # User-provided metadata fields (optional)
         # If provided, these fields will be used directly instead of generating
-        # Format: {"bpm": "120", "caption": "...", "duration": "234", "keyscale": "G major", "language": "en", "timesignature": "4", "genres": "Pop Rock"}
+        # Format: {"bpm": "120", "caption": "...", "duration": "234", "keyscale": "G major", "language": "en", "timesignature": "4"}
         self.user_provided_metadata: Dict[str, Optional[str]] = {
             "bpm": None,
             "caption": None,
@@ -113,7 +103,6 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             "keyscale": None,
             "language": None,
             "timesignature": None,
-            "genres": None,
         }
         
         # Temperature settings for different generation phases (set per-generation)
@@ -131,6 +120,10 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         # Stop at reasoning flag - if True, stop generation after </think> tag
         self.stop_at_reasoning: bool = False
         
+        # Generation phase - "cot" or "codes"
+        # Used to determine FSM behavior when prompt already contains CoT
+        self.generation_phase: str = "cot"
+        
         # Current state
         self.state = FSMState.THINK_TAG
         self.position_in_state = 0  # Position within current state's fixed string
@@ -140,6 +133,8 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         # Caption generation state tracking
         self.caption_after_newline = False  # Track if we're right after a newline in caption
         self.caption_token_count = 0  # Track token count for caption (max 512)
+        self.caption_ending = False  # Track if caption is ending (after detecting non-indented line)
+        self.pending_field_name = ""  # Accumulate field name tokens when caption is ending
         
         # Token queue for user-provided fields (injected directly without generation)
         self.user_field_token_queue: List[int] = []
@@ -147,16 +142,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         
         # Pre-compute token IDs for efficiency
         self._precompute_tokens()
-        
-        # Genres vocabulary for constrained decoding
-        self.genres_vocab_path = genres_vocab_path or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "genres_vocab.txt"
-        )
-        self.genres_vocab: List[str] = []  # Full vocab
-        self.genres_vocab_mtime: float = 0.0
-        self.genres_trie: Dict = {}  # Trie for full vocab (fallback)
-        self.caption_genres_trie: Dict = {}  # Trie for caption-matched genres (priority)
-        self.caption_matched_genres: List[str] = []  # Genres matched from caption
+
         self._char_to_tokens: Dict[str, set] = {}  # Precomputed char -> token IDs mapping
         
         # Precompute token mappings once (O(vocab_size), runs once at init)
@@ -199,11 +185,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         
         # Build language prefix tree (similar to keyscale but for language codes)
         self.language_prefix_tree = self._build_language_prefix_tree()
-        
-        self._load_genres_vocab()
-        
-        # Note: Caption-based genre filtering is initialized via update_caption() before each generation
-        
+
         # Fixed strings for each state
         # IMPORTANT: Do NOT include trailing space after colon - tokenizer will handle spacing
         # All matching should be done at token level, not string level
@@ -214,14 +196,13 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             FSMState.BPM_NAME: "bpm:",
             FSMState.CAPTION_NAME: "caption:",
             FSMState.DURATION_NAME: "duration:",
-            FSMState.GENRES_NAME: "genres:",
             FSMState.KEYSCALE_NAME: "keyscale:",
             FSMState.LANGUAGE_NAME: "language:",
             FSMState.TIMESIG_NAME: "timesignature:",
             FSMState.THINK_END_TAG: "</think>",
         }
         
-        # State transitions - build dynamically based on skip_genres
+        # State transitions
         self._build_state_transitions()
     
     def _get_next_field_state(self, current_field: str) -> Optional[FSMState]:
@@ -230,19 +211,17 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         even if the field is user-provided (we still need to generate the field name).
         
         Args:
-            current_field: Current field name ("bpm", "caption", "duration", "genres", "keyscale", "language", "timesignature")
+            current_field: Current field name ("bpm", "caption", "duration", "keyscale", "language", "timesignature")
             
         Returns:
             Next FSMState (NAME state of next field), or THINK_END_TAG if no more fields
         """
         # New field order: bpm -> caption -> duration -> keyscale -> language -> timesignature
-        # genres is optional and can be skipped
-        field_order = ["bpm", "caption", "duration", "genres", "keyscale", "language", "timesignature"]
+        field_order = ["bpm", "caption", "duration","keyscale", "language", "timesignature"]
         field_to_state = {
             "bpm": FSMState.BPM_NAME,
             "caption": FSMState.CAPTION_NAME,
             "duration": FSMState.DURATION_NAME,
-            "genres": FSMState.GENRES_NAME,
             "keyscale": FSMState.KEYSCALE_NAME,
             "language": FSMState.LANGUAGE_NAME,
             "timesignature": FSMState.TIMESIG_NAME,
@@ -256,10 +235,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         # Find next field in order
         for i in range(current_idx + 1, len(field_order)):
             field = field_order[i]
-            
-            # Skip fields based on flags
-            if field == "genres" and self.skip_genres:
-                continue
+
             if field == "caption" and self.skip_caption:
                 continue
             if field == "language" and self.skip_language:
@@ -272,7 +248,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         return FSMState.THINK_END_TAG
     
     def _build_state_transitions(self):
-        """Build state transition map based on skip_genres and user-provided metadata."""
+        """Build state transition map based on user-provided metadata."""
         self.next_state = {
             FSMState.THINK_TAG: FSMState.NEWLINE_AFTER_THINK,
             FSMState.NEWLINE_AFTER_THINK: FSMState.BPM_NAME,  # Always start with BPM
@@ -281,7 +257,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         }
         
         # Build transitions for all fields (even if user-provided, we still need to generate field name)
-        # Field order: bpm -> caption -> duration -> genres -> keyscale -> language -> timesignature
+        # Field order: bpm -> caption -> duration -> keyscale -> language -> timesignature
         
         # BPM field: NAME -> VALUE -> next field (caption or duration)
         self.next_state[FSMState.BPM_NAME] = FSMState.BPM_VALUE
@@ -296,11 +272,6 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.next_state[FSMState.DURATION_NAME] = FSMState.DURATION_VALUE
         self.next_state[FSMState.DURATION_VALUE] = self._get_next_field_state("duration")
         
-        # Genres field (only if not skipped): NAME -> VALUE -> next field
-        if not self.skip_genres:
-            self.next_state[FSMState.GENRES_NAME] = FSMState.GENRES_VALUE
-            self.next_state[FSMState.GENRES_VALUE] = self._get_next_field_state("genres")
-        
         # Keyscale field: NAME -> VALUE -> next field (language or timesignature)
         self.next_state[FSMState.KEYSCALE_NAME] = FSMState.KEYSCALE_VALUE
         self.next_state[FSMState.KEYSCALE_VALUE] = self._get_next_field_state("keyscale")
@@ -313,11 +284,6 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         # Timesignature field: NAME -> VALUE -> THINK_END_TAG
         self.next_state[FSMState.TIMESIG_NAME] = FSMState.TIMESIG_VALUE
         self.next_state[FSMState.TIMESIG_VALUE] = FSMState.THINK_END_TAG
-    
-    def set_skip_genres(self, skip: bool):
-        """Set whether to skip genres generation and rebuild state transitions."""
-        self.skip_genres = skip
-        self._build_state_transitions()
     
     def set_skip_caption(self, skip: bool):
         """Set whether to skip caption generation and rebuild state transitions."""
@@ -372,6 +338,21 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         """
         self.stop_at_reasoning = stop
     
+    def set_generation_phase(self, phase: str):
+        """
+        Set the generation phase.
+        
+        Args:
+            phase: "cot" for CoT metadata generation, "codes" for audio codes generation,
+                   or "understand" for audio understanding (codes → metadata + lyrics).
+                   When phase is "codes" and the input prompt already contains </think>,
+                   the FSM will skip metadata generation and go directly to codes generation.
+                   When phase is "understand", generate CoT metadata then free-form lyrics.
+        """
+        if phase not in ("cot", "codes", "understand"):
+            raise ValueError(f"Invalid generation phase: {phase!r}. Must be 'cot', 'codes', or 'understand'")
+        self.generation_phase = phase
+    
     def set_user_metadata(self, metadata: Optional[Dict[str, Optional[str]]] = None):
         """
         Set user-provided metadata fields. Fields that are provided will be used directly
@@ -385,14 +366,13 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 - "keyscale": Optional[str] - e.g., "G major"
                 - "language": Optional[str] - e.g., "en"
                 - "timesignature": Optional[str] - e.g., "4"
-                - "genres": Optional[str] - e.g., "Pop Rock"
                 If None, clears all user-provided metadata.
         """
         if metadata is None:
             metadata = {}
         
         # Update user-provided metadata
-        for field in ["bpm", "caption", "duration", "keyscale", "language", "timesignature", "genres"]:
+        for field in ["bpm", "caption", "duration", "keyscale", "language", "timesignature"]:
             if field in metadata:
                 self.user_provided_metadata[field] = metadata[field]
             else:
@@ -458,10 +438,6 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         # Vocab size
         self.vocab_size = len(self.tokenizer)
         
-        # Comma token for multi-genre support
-        comma_tokens = self.tokenizer.encode(",", add_special_tokens=False)
-        self.comma_token = comma_tokens[-1] if comma_tokens else None
-        
         # EOS token for duration-constrained codes generation
         self.eos_token_id = self.tokenizer.eos_token_id
         
@@ -484,6 +460,8 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         # Precompute audio code mask for efficient blocking (O(1) instead of O(n))
         # This mask will be added to scores during caption generation
         self.audio_code_mask: Optional[torch.Tensor] = None
+        # Inverse mask: block all non-audio-code tokens (for CODES_GENERATION state)
+        self.non_audio_code_mask: Optional[torch.Tensor] = None
         self._build_audio_code_mask()
         
         # Build valid keyscales set (prefix tree will be built after _char_to_tokens is initialized)
@@ -519,9 +497,13 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         This mask can be added to scores in O(1) time instead of O(n) loop.
         
         The mask is [1, vocab_size] tensor with -inf at audio code token positions.
+        
+        Also builds the inverse mask (non_audio_code_mask) for CODES_GENERATION state,
+        which blocks all non-audio-code tokens.
         """
         if not self.audio_code_token_ids:
             self.audio_code_mask = None
+            self.non_audio_code_mask = None
             return
         
         # Create mask tensor: 0 everywhere, -inf at audio code positions
@@ -536,8 +518,19 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         
         self.audio_code_mask = mask
         
+        # Build inverse mask: -inf everywhere EXCEPT at audio code positions
+        # This is used in CODES_GENERATION state to only allow audio codes
+        inverse_mask = torch.full((1, self.vocab_size), float('-inf'), dtype=torch.float32)
+        inverse_mask[0, audio_code_indices] = 0
+        
+        # Also allow EOS token in codes generation (will be controlled by duration constraint)
+        if self.eos_token_id is not None:
+            inverse_mask[0, self.eos_token_id] = 0
+        
+        self.non_audio_code_mask = inverse_mask
+        
         if self.debug:
-            logger.debug(f"Built audio code mask for {len(self.audio_code_token_ids)} tokens")
+            logger.debug(f"Built audio code masks for {len(self.audio_code_token_ids)} tokens")
     
     def _build_keyscale_prefix_tree(self) -> Dict[Tuple[int, ...], Set[int]]:
         """
@@ -814,133 +807,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             print(f"  {repr(ks)}")
         
         print("=" * 60)
-    
-    def _load_genres_vocab(self):
-        """
-        Load genres vocabulary from file. Supports hot reload by checking file mtime.
-        File format: one genre per line, lines starting with # are comments.
-        """
-        if not os.path.exists(self.genres_vocab_path):
-            if self.debug:
-                logger.debug(f"Genres vocab file not found: {self.genres_vocab_path}")
-            return
-        
-        try:
-            mtime = os.path.getmtime(self.genres_vocab_path)
-            if mtime <= self.genres_vocab_mtime:
-                return  # File hasn't changed
-            
-            with open(self.genres_vocab_path, 'r', encoding='utf-8') as f:
-                genres = []
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith('#'):
-                        genres.append(line.lower())
-                
-                self.genres_vocab = genres
-                self.genres_vocab_mtime = mtime
-                self._build_genres_trie()
-                
-                if self.debug:
-                    logger.debug(f"Loaded {len(self.genres_vocab)} genres from {self.genres_vocab_path}")
-        except Exception as e:
-            logger.warning(f"Failed to load genres vocab: {e}")
-    
-    def _build_genres_trie(self):
-        """
-        Build a trie (prefix tree) from genres vocabulary for efficient prefix matching.
-        Each node is a dict with:
-          - '_end': True if this node represents a complete genre
-          - other keys: next characters in the trie
-        """
-        self.genres_trie = {}
-        
-        for genre in self.genres_vocab:
-            node = self.genres_trie
-            for char in genre:
-                if char not in node:
-                    node[char] = {}
-                node = node[char]
-            node['_end'] = True  # Mark end of a complete genre
-        
-        if self.debug:
-            logger.debug(f"Built genres trie with {len(self.genres_vocab)} entries")
-    
-    def _extract_caption_genres(self, caption: str):
-        """
-        Extract genres from the user's caption that match entries in the vocabulary.
-        This creates a smaller trie for faster and more relevant genre generation.
-        
-        Strategy (optimized - O(words * max_genre_len) instead of O(vocab_size)):
-        1. Extract words/phrases from caption
-        2. For each word, use trie to find all vocab entries that START with this word
-        3. Build a separate trie from matched genres
-        """
-        if not caption or not self.genres_vocab:
-            return
-        
-        caption_lower = caption.lower()
-        matched_genres = set()
-        
-        # Extract words from caption (split by common delimiters)
-        import re
-        words = re.split(r'[,\s\-_/\\|]+', caption_lower)
-        words = [w.strip() for w in words if w.strip() and len(w.strip()) >= 2]
-        
-        # For each word, find genres in trie that start with this word
-        for word in words:
-            # Find all genres starting with this word using trie traversal
-            node = self._get_genres_trie_node(word)
-            if node is not None:
-                # Collect all complete genres under this node
-                self._collect_complete_genres(node, word, matched_genres)
-        
-        # Also check if any word appears as a substring in short genres (< 20 chars)
-        # This is a quick check for common single-word genres
-        genres_set = set(self.genres_vocab)
-        for word in words:
-            if word in genres_set:
-                matched_genres.add(word)
-        
-        if not matched_genres:
-            if self.debug:
-                logger.debug(f"No genres matched in caption, using full vocab")
-            return
-        
-        # Build a trie from matched genres
-        self.caption_matched_genres = list(matched_genres)
-        self.caption_genres_trie = {}
-        
-        for genre in matched_genres:
-            node = self.caption_genres_trie
-            for char in genre:
-                if char not in node:
-                    node[char] = {}
-                node = node[char]
-            node['_end'] = True
-        
-        if self.debug:
-            logger.debug(f"Matched {len(matched_genres)} genres from caption: {list(matched_genres)[:5]}...")
-    
-    def _collect_complete_genres(self, node: Dict, prefix: str, result: set, max_depth: int = 50):
-        """
-        Recursively collect all complete genres under a trie node.
-        Limited depth to avoid too many matches.
-        """
-        if max_depth <= 0:
-            return
-        
-        if node.get('_end', False):
-            result.add(prefix)
-        
-        # Limit total collected genres to avoid slowdown
-        if len(result) >= 100:
-            return
-        
-        for char, child_node in node.items():
-            if char not in ('_end', '_tokens'):
-                self._collect_complete_genres(child_node, prefix + char, result, max_depth - 1)
-    
+
     def _precompute_char_token_mapping(self):
         """
         Precompute mapping from characters to token IDs and token decoded texts.
@@ -992,36 +859,8 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         
         if self.debug:
             logger.debug(f"Precomputed char->token mapping for {len(self._char_to_tokens)} unique characters")
-    
-    def _try_reload_genres_vocab(self):
-        """Check if genres vocab file has been updated and reload if necessary."""
-        if not os.path.exists(self.genres_vocab_path):
-            return
-        
-        try:
-            mtime = os.path.getmtime(self.genres_vocab_path)
-            if mtime > self.genres_vocab_mtime:
-                self._load_genres_vocab()
-        except Exception:
-            pass  # Ignore errors during hot reload check
-    
-    def _get_genres_trie_node(self, prefix: str) -> Optional[Dict]:
-        """
-        Get the trie node for a given prefix.
-        Returns None if the prefix is not valid (no genres start with this prefix).
-        """
-        node = self.genres_trie
-        for char in prefix.lower():
-            if char not in node:
-                return None
-            node = node[char]
-        return node
-    
-    def _is_complete_genre(self, text: str) -> bool:
-        """Check if the given text is a complete genre in the vocabulary."""
-        node = self._get_genres_trie_node(text.strip())
-        return node is not None and node.get('_end', False)
-    
+
+
     def _get_trie_node_from_trie(self, trie: Dict, prefix: str) -> Optional[Dict]:
         """Get a trie node from a specific trie (helper for caption vs full trie)."""
         node = trie
@@ -1030,109 +869,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 return None
             node = node[char]
         return node
-    
-    def _get_allowed_genres_tokens(self) -> List[int]:
-        """
-        Get allowed tokens for genres field based on trie matching.
-        
-        The entire genres string (including commas) must match a complete entry in the vocab.
-        For example, if vocab contains "pop, rock, jazz", the generated string must exactly
-        match that entry - we don't treat commas as separators for individual genres.
-        
-        Strategy:
-        1. If caption-matched genres exist, use that smaller trie first (faster + more relevant)
-        2. If no caption matches or prefix not in caption trie, fallback to full vocab trie
-        3. Get valid next characters from current trie node
-        4. For each candidate token, verify the full decoded text forms a valid trie prefix
-        """
-        if not self.genres_vocab:
-            # No vocab loaded, allow all except newline if empty
-            return []
-        
-        # Use the full accumulated value (don't split by comma - treat as single entry)
-        accumulated = self.accumulated_value.lower()
-        current_genre_prefix = accumulated.strip()
-        
-        # Determine which trie to use: caption-matched (priority) or full vocab (fallback)
-        use_caption_trie = False
-        current_node = None
-        
-        # Try caption-matched trie first if available
-        if self.caption_genres_trie:
-            if current_genre_prefix == "":
-                current_node = self.caption_genres_trie
-                use_caption_trie = True
-            else:
-                current_node = self._get_trie_node_from_trie(self.caption_genres_trie, current_genre_prefix)
-                if current_node is not None:
-                    use_caption_trie = True
-        
-        # Fallback to full vocab trie
-        if current_node is None:
-            if current_genre_prefix == "":
-                current_node = self.genres_trie
-            else:
-                current_node = self._get_genres_trie_node(current_genre_prefix)
-        
-        if current_node is None:
-            # Invalid prefix, force newline to end
-            if self.newline_token:
-                return [self.newline_token]
-            return []
-        
-        # Get valid next characters from trie node
-        valid_next_chars = set(k for k in current_node.keys() if k not in ('_end', '_tokens'))
-        
-        # If current value is a complete genre, allow newline to end
-        is_complete = current_node.get('_end', False)
-        
-        if not valid_next_chars:
-            # No more characters to match, only allow newline if complete
-            allowed = set()
-            if is_complete and self.newline_token:
-                allowed.add(self.newline_token)
-            return list(allowed)
-        
-        # Collect candidate tokens based on first character
-        candidate_tokens = set()
-        for char in valid_next_chars:
-            if char in self._char_to_tokens:
-                candidate_tokens.update(self._char_to_tokens[char])
-        
-        # Select the appropriate trie for validation
-        active_trie = self.caption_genres_trie if use_caption_trie else self.genres_trie
-        
-        # Validate each candidate token: check if prefix + decoded_token is a valid trie prefix
-        allowed = set()
-        for token_id in candidate_tokens:
-            # Use precomputed decoded text (already normalized)
-            decoded_normalized = self._token_to_text.get(token_id, "")
-            
-            if not decoded_normalized or not decoded_normalized.strip():
-                # Token decodes to empty or only whitespace - allow if space/comma is a valid next char
-                if ' ' in valid_next_chars or ',' in valid_next_chars:
-                    allowed.add(token_id)
-                continue
-            
-            # Build new prefix by appending decoded token
-            # Handle space-prefixed tokens (e.g., " rock" from "pop rock")
-            if decoded_normalized.startswith(' ') or decoded_normalized.startswith(','):
-                # Token has leading space/comma - append directly
-                new_prefix = current_genre_prefix + decoded_normalized
-            else:
-                new_prefix = current_genre_prefix + decoded_normalized
-            
-            # Check if new_prefix is a valid prefix in the active trie
-            new_node = self._get_trie_node_from_trie(active_trie, new_prefix)
-            if new_node is not None:
-                allowed.add(token_id)
-        
-        # If current value is a complete genre, also allow newline
-        if is_complete and self.newline_token:
-            allowed.add(self.newline_token)
-        
-        return list(allowed)
-    
+
     def reset(self):
         """Reset the processor state for a new generation."""
         self.state = FSMState.THINK_TAG
@@ -1144,6 +881,8 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.current_user_field = None  # Reset current user field
         self.caption_after_newline = False  # Reset caption newline tracking
         self.caption_token_count = 0  # Reset caption token count
+        self.caption_ending = False  # Reset caption ending tracking
+        self.pending_field_name = ""  # Reset pending field name
     
     def set_target_duration(self, duration: Optional[float]):
         """
@@ -1162,27 +901,6 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             self.target_codes = None
             if self.debug:
                 logger.debug("Target duration cleared, no duration constraint")
-    
-    def update_caption(self, caption: Optional[str]):
-        """
-        Update the caption and rebuild the caption-matched genres trie.
-        Call this before each generation to prioritize genres from the new caption.
-        
-        Args:
-            caption: User's input caption. If None or empty, clears caption matching.
-        """
-        # Check for hot reload of genres vocabulary
-        self._try_reload_genres_vocab()
-        
-        self.caption = caption
-        self.caption_genres_trie = {}
-        self.caption_matched_genres = []
-        
-        if caption:
-            self._extract_caption_genres(caption)
-        
-        # Also reset FSM state for new generation
-        self.reset()
     
     def _get_allowed_tokens_for_fixed_string(self, fixed_str: str) -> List[int]:
         """
@@ -1342,26 +1060,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             logger.debug(f"Numeric field decision: newline_prob={newline_prob:.4f}, max_digit_prob={max_digit_prob:.4f}")
         
         return newline_prob > max_digit_prob
-    
-    def _should_end_text_field(self, logits: torch.Tensor) -> bool:
-        """
-        Determine if we should end a text field (genres).
-        Returns True if P(newline) > P(any other token) AND we have some content.
-        """
-        if not self.accumulated_value.strip():
-            return False  # Need at least some content
-        
-        probs = torch.softmax(logits, dim=-1)
-        newline_prob = probs[0, self.newline_token].item() if self.newline_token else 0
-        
-        # Get max probability among non-newline tokens
-        masked_probs = probs.clone()
-        if self.newline_token:
-            masked_probs[0, self.newline_token] = 0
-        max_other_prob = masked_probs[0].max().item()
-        
-        return newline_prob > max_other_prob
-    
+
     def _get_allowed_keyscale_tokens(self) -> List[int]:
         """
         Get allowed tokens for keyscale field using the precomputed prefix tree.
@@ -1435,9 +1134,32 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             return self._apply_temperature_scaling(scores)
         
         if self.state == FSMState.COMPLETED:
+            # In understanding phase, block audio codes during lyrics generation (COMPLETED state)
+            if self.generation_phase == "understand" and self.audio_code_mask is not None:
+                # Move mask to same device/dtype as scores if needed
+                if self.audio_code_mask.device != scores.device or self.audio_code_mask.dtype != scores.dtype:
+                    self.audio_code_mask = self.audio_code_mask.to(device=scores.device, dtype=scores.dtype)
+                scores = scores + self.audio_code_mask
             return self._apply_temperature_scaling(scores)
         
+        # For codes phase, detect if input already contains </think> and skip to CODES_GENERATION
+        if self.generation_phase == "codes" and self.state == FSMState.THINK_TAG:
+            # Check if input contains </think> token sequence
+            if self._input_contains_think_end_tag(input_ids):
+                # Skip metadata generation, go directly to codes generation
+                self.state = FSMState.CODES_GENERATION
+                self.codes_count = 0
+                if self.debug:
+                    logger.debug("Codes phase: detected </think> in input, skipping to CODES_GENERATION")
+        
         if self.state == FSMState.CODES_GENERATION:
+            # Block all non-audio-code tokens (only allow audio codes and EOS)
+            if self.non_audio_code_mask is not None:
+                # Move mask to same device/dtype as scores if needed
+                if self.non_audio_code_mask.device != scores.device or self.non_audio_code_mask.dtype != scores.dtype:
+                    self.non_audio_code_mask = self.non_audio_code_mask.to(device=scores.device, dtype=scores.dtype)
+                scores = scores + self.non_audio_code_mask
+            
             # Apply duration constraint in codes generation phase
             if self.target_codes is not None and self.eos_token_id is not None:
                 if self.codes_count < self.target_codes:
@@ -1463,6 +1185,31 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         
         # Apply temperature scaling after constraint masking
         return self._apply_temperature_scaling(scores)
+    
+    def _input_contains_think_end_tag(self, input_ids: torch.LongTensor) -> bool:
+        """
+        Check if input contains the </think> closing tag.
+        
+        Args:
+            input_ids: [batch_size, seq_len] input token IDs
+            
+        Returns:
+            True if </think> is found in the input (any sequence in batch)
+        """
+        # Tokenize </think> to get its token sequence
+        think_end_tokens = self.tokenizer.encode("</think>", add_special_tokens=False)
+        if not think_end_tokens:
+            return False
+        
+        # Check each sequence in batch
+        for b in range(input_ids.shape[0]):
+            seq = input_ids[b].tolist()
+            # Search for the token sequence in the input
+            for i in range(len(seq) - len(think_end_tokens) + 1):
+                if seq[i:i+len(think_end_tokens)] == think_end_tokens:
+                    return True
+        
+        return False
     
     def _apply_temperature_scaling(self, scores: torch.FloatTensor) -> torch.FloatTensor:
         """
@@ -1501,7 +1248,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         Uses the same tokenization logic as prefix tree building.
         
         Args:
-            field_name: Field name ("bpm", "caption", "duration", "keyscale", "language", "timesignature", "genres")
+            field_name: Field name ("bpm", "caption", "duration", "keyscale", "language", "timesignature")
             
         Returns:
             List of token IDs for the complete field, or None if field is not provided
@@ -1518,7 +1265,6 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             "keyscale": "keyscale: ",
             "language": "language: ",
             "timesignature": "timesignature: ",
-            "genres": "genres: ",
         }
         prefix = field_to_prefix[field_name]
         full_text = f"{prefix}{value}\n"
@@ -1673,14 +1419,24 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 
                 # If top token does NOT start with space/tab, it's a new field (like "duration:")
                 if len(top_token_text) > 0 and top_token_text[0] not in ' \t':
-                    # Caption is ending, transition to next field
+                    # Caption is ending - LM is generating next field name
+                    # Instead of forcing state transition to DURATION_NAME (which would regenerate the field name),
+                    # we enter a "caption_ending" mode where we allow free generation until we detect the field value
                     self.caption_after_newline = False
-                    self._transition_to_next_state()
-                    # Process with new state (DURATION_NAME)
-                    return self._process_single_sequence(input_ids, scores)
+                    self.caption_ending = True  # Start tracking field name
+                    self.pending_field_name = ""  # Reset pending field name
+                    # Allow free generation (no constraints) so LM can generate field name naturally
+                    return scores
                 else:
                     # It's indentation, continue caption
                     self.caption_after_newline = False
+            
+            # If caption is ending (LM generating next field name), allow free generation
+            # and track the field name until we see colon
+            if self.caption_ending:
+                # Allow any token (free generation)
+                # The field name detection will happen in update_state()
+                return scores
             
             # Block backticks (code blocks)
             if self.backtick_token is not None:
@@ -1749,55 +1505,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     mask[0, self.newline_token] = 0
                 
                 scores = scores + mask
-        
-        elif self.state == FSMState.GENRES_VALUE:
-            # Check if field is user-provided and we haven't started injecting yet
-            if self.user_provided_metadata["genres"] is not None and not self.user_field_token_queue and not self.accumulated_value:
-                # Initialize token queue with field value tokens (value + newline)
-                value = self.user_provided_metadata["genres"]
-                value_text = f" {value}\n"
-                value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
-                if value_tokens:
-                    self.user_field_token_queue = value_tokens
-                    self.current_user_field = "genres"
-                    # Inject first token
-                    mask[0, value_tokens[0]] = 0
-                    scores = scores + mask
-                    return scores
-            
-            # Try to hot-reload genres vocab if file has changed
-            self._try_reload_genres_vocab()
-            
-            # Get allowed tokens based on genres vocabulary
-            allowed = self._get_allowed_genres_tokens()
-            
-            if allowed:
-                # Use vocabulary-constrained decoding
-                for t in allowed:
-                    mask[0, t] = 0
-                scores = scores + mask
-            elif self.genres_vocab:
-                # Vocab is loaded but no valid continuation found
-                # Force newline to end the field
-                if self.newline_token:
-                    mask[0, self.newline_token] = 0
-                    if self.debug:
-                        logger.debug(f"No valid genre continuation for '{self.accumulated_value}', forcing newline")
-                scores = scores + mask
-            else:
-                # Fallback: no vocab loaded, use probability-based ending
-                if self._should_end_text_field(scores):
-                    if self.newline_token:
-                        mask[0, self.newline_token] = 0
-                        self._transition_to_next_state()
-                    scores = scores + mask
-                else:
-                    # Allow any token except newline if we don't have content yet
-                    if not self.accumulated_value.strip():
-                        if self.newline_token:
-                            scores[0, self.newline_token] = float('-inf')
-                    # Otherwise, don't constrain (fallback behavior)
-        
+
         elif self.state == FSMState.KEYSCALE_VALUE:
             # Check if field is user-provided and we haven't started injecting yet
             if self.user_provided_metadata["keyscale"] is not None and not self.user_field_token_queue and not self.accumulated_token_ids:
@@ -1835,7 +1543,10 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     scores = scores + mask
         
         elif self.state == FSMState.LANGUAGE_VALUE:
-            # Language field: similar to keyscale, uses prefix tree
+            # Language field: Use top-1 probability language (greedy selection)
+            # Unlike other fields, we don't use prefix tree sampling.
+            # Instead, we select the highest probability language at the start,
+            # then force generate the rest of that language code.
             
             # Check if field is user-provided and we haven't started injecting yet
             if self.user_provided_metadata["language"] is not None and not self.user_field_token_queue and not self.accumulated_token_ids:
@@ -1851,25 +1562,63 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     scores = scores + mask
                     return scores
             
-            # Check if current token sequence is complete (allows newline)
-            token_prefix = tuple(self.accumulated_token_ids)
-            if token_prefix in self.language_prefix_tree and self.newline_token in self.language_prefix_tree[token_prefix]:
-                # Complete language, allow newline
-                if self.newline_token:
-                    mask[0, self.newline_token] = 0
-                scores = scores + mask
-            else:
-                # Not complete, allow valid continuation tokens
-                allowed = self._get_allowed_language_tokens()
-                if allowed:
-                    for t in allowed:
-                        mask[0, t] = 0
-                    scores = scores + mask
+            # If we haven't started generating language yet (empty accumulated_token_ids),
+            # select the top-1 probability token from all valid first tokens
+            if not self.accumulated_token_ids:
+                # Get all possible first tokens for all languages
+                empty_prefix = tuple()
+                if empty_prefix in self.language_prefix_tree:
+                    candidate_tokens = list(self.language_prefix_tree[empty_prefix])
+                    
+                    if candidate_tokens:
+                        # Find the token with highest probability (top-1)
+                        # Create a mask that blocks all tokens except candidates
+                        temp_mask = torch.full_like(scores, float('-inf'))
+                        for t in candidate_tokens:
+                            temp_mask[0, t] = 0
+                        temp_scores = scores + temp_mask
+                        
+                        # Get the highest probability token among candidates
+                        top_token_id = torch.argmax(temp_scores[0]).item()
+                        
+                        # Only allow this top-1 token, block all others (including other language tokens)
+                        mask[0, top_token_id] = 0
+                        scores = scores + mask
+                        
+                        if self.debug:
+                            top_token_text = self.tokenizer.decode([top_token_id])
+                            logger.debug(f"Language field: selected top-1 token {top_token_id} ({repr(top_token_text)}) from {len(candidate_tokens)} candidates")
+                    else:
+                        # No valid first tokens found - force newline
+                        if self.newline_token:
+                            mask[0, self.newline_token] = 0
+                        scores = scores + mask
                 else:
-                    # No valid tokens found - force newline to end field
+                    # Empty prefix not in tree - force newline
                     if self.newline_token:
                         mask[0, self.newline_token] = 0
                     scores = scores + mask
+            else:
+                # We've started generating a language, continue with prefix tree constraints
+                # Check if current token sequence is complete (allows newline)
+                token_prefix = tuple(self.accumulated_token_ids)
+                if token_prefix in self.language_prefix_tree and self.newline_token in self.language_prefix_tree[token_prefix]:
+                    # Complete language, allow newline
+                    if self.newline_token:
+                        mask[0, self.newline_token] = 0
+                    scores = scores + mask
+                else:
+                    # Not complete, allow valid continuation tokens
+                    allowed = self._get_allowed_language_tokens()
+                    if allowed:
+                        for t in allowed:
+                            mask[0, t] = 0
+                        scores = scores + mask
+                    else:
+                        # No valid tokens found - force newline to end field
+                        if self.newline_token:
+                            mask[0, self.newline_token] = 0
+                        scores = scores + mask
         
         elif self.state == FSMState.TIMESIG_VALUE:
             # Check if field is user-provided and we haven't started injecting yet
@@ -1908,12 +1657,18 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             old_state = self.state
             next_state = self.next_state[self.state]
             
-            # If stop_at_reasoning is True and we're transitioning from THINK_END_TAG,
-            # skip CODES_GENERATION and go directly to COMPLETED
-            if self.stop_at_reasoning and old_state == FSMState.THINK_END_TAG:
-                next_state = FSMState.COMPLETED
-                if self.debug:
-                    logger.debug(f"stop_at_reasoning=True: skipping CODES_GENERATION, going directly to COMPLETED")
+            # Handle different cases at THINK_END_TAG based on generation phase
+            # NOTE: Do NOT override next_state here when stop_at_reasoning=True
+            # because we need to transition to the tag state first to generate </think>,
+            # then handle stop_at_reasoning in update_state() AFTER the tag is complete
+            if old_state == FSMState.THINK_END_TAG:
+                if self.generation_phase == "understand":
+                    # Understanding mode: allow free-form lyrics after metadata
+                    # No more constrained decoding after </think>
+                    next_state = FSMState.COMPLETED
+                    if self.debug:
+                        logger.debug(f"generation_phase='understand': allowing free-form lyrics after </think>")
+                # else: default to CODES_GENERATION (for "codes" phase) or respect stop_at_reasoning flag
             
             self.state = next_state
             self.position_in_state = 0
@@ -1921,6 +1676,8 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             self.accumulated_token_ids = []  # Reset token ID sequence for new field
             self.caption_after_newline = False  # Reset caption newline tracking
             self.caption_token_count = 0  # Reset caption token count
+            self.caption_ending = False  # Reset caption ending tracking
+            self.pending_field_name = ""  # Reset pending field name
             if self.debug:
                 logger.debug(f"FSM transition: {old_state.name} -> {self.state.name}")
     
@@ -1991,23 +1748,23 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             
             # Check if we've completed the fixed string
             if self.position_in_state >= len(fixed_str):
-                self._transition_to_next_state()
+                # Special handling for THINK_END_TAG with stop_at_reasoning
+                if self.state == FSMState.THINK_END_TAG and self.stop_at_reasoning:
+                    # </think> tag is complete, now we can stop generation
+                    # Force transition to COMPLETED instead of CODES_GENERATION
+                    old_state = self.state
+                    self.state = FSMState.COMPLETED
+                    self.position_in_state = 0
+                    self.accumulated_value = ""
+                    self.accumulated_token_ids = []
+                    if self.debug:
+                        logger.debug(f"FSM transition (stop_at_reasoning): {old_state.name} -> {self.state.name}")
+                else:
+                    self._transition_to_next_state()
         
         elif self.state in [FSMState.BPM_VALUE, FSMState.DURATION_VALUE, FSMState.TIMESIG_VALUE]:
             # Accumulate numeric value using token ID sequence
             if generated_token_id == self.newline_token:
-                # if self.state == FSMState.DURATION_VALUE and self.accumulated_value:
-                #     try:
-                #         generated_duration = int(self.accumulated_value)
-                #         if self.target_codes is None and generated_duration > 0:
-                #             self.target_codes = int(generated_duration * 5)
-                #             if self.debug:
-                #                 logger.debug(f"Synced duration: {generated_duration}s -> Set target_codes limit to {self.target_codes}")
-                #     except ValueError:
-                #         if self.debug:
-                #             logger.warning(f"Could not parse duration value: {self.accumulated_value}")
-                # Newline ends the field
-                # Save old state before transition
                 old_state = self.state
                 self._transition_to_next_state()
                 # IMPORTANT: After state transition, if new state is a fixed_strings state,
@@ -2022,21 +1779,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 # Also update legacy accumulated_value for compatibility
                 if token_str.strip().isdigit():
                     self.accumulated_value += token_str.strip()
-        
-        elif self.state == FSMState.GENRES_VALUE:
-            if generated_token_id == self.newline_token:
-                # Newline ends the field
-                self._transition_to_next_state()
-                # IMPORTANT: After state transition, if new state is a fixed_strings state,
-                # we should NOT update position_in_state with the newline token length,
-                # because that token belongs to the old state, not the new state.
-                # Return early to avoid the fixed_strings update logic below.
-                if self.state in self.fixed_strings:
-                    return
-            else:
-                # Genres still uses string-based trie, so keep accumulated_value
-                self.accumulated_value += token_str
-        
+
         elif self.state == FSMState.CAPTION_VALUE:
             # Track token count for 512 limit
             self.caption_token_count += 1
@@ -2049,9 +1792,51 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 # Mark that we need to check next token for field transition
                 self.caption_after_newline = True
             else:
-                # Not a newline - if we were after newline and this is not space, 
+                # Not a newline - if we were after newline and this is not space,
                 # transition already happened in _process_single_sequence
                 self.caption_after_newline = False
+            
+            # If caption is ending, accumulate field name and detect field completion
+            if self.caption_ending:
+                self.pending_field_name += token_str
+                
+                # Check if we've completed a field name (detected colon)
+                if ':' in token_str or token_str.strip() == ':':
+                    # Extract field name (before colon)
+                    field_name_full = self.pending_field_name.strip()
+                    # Remove trailing colon if present
+                    field_name = field_name_full.rstrip(':').strip().lower()
+                    
+                    if self.debug:
+                        logger.debug(f"Detected field name after caption: {repr(field_name)}")
+                    
+                    # Map field name to VALUE state
+                    field_name_to_value_state = {
+                        "duration": FSMState.DURATION_VALUE,
+                        "keyscale": FSMState.KEYSCALE_VALUE,
+                        "language": FSMState.LANGUAGE_VALUE,
+                        "timesignature": FSMState.TIMESIG_VALUE,
+                    }
+                    
+                    if field_name in field_name_to_value_state:
+                        # Transition directly to the field's VALUE state
+                        old_state = self.state
+                        self.state = field_name_to_value_state[field_name]
+                        self.position_in_state = 0
+                        self.accumulated_value = ""
+                        self.accumulated_token_ids = []
+                        self.caption_ending = False
+                        self.pending_field_name = ""
+                        
+                        if self.debug:
+                            logger.debug(f"FSM transition (caption ending): {old_state.name} -> {self.state.name}")
+                    else:
+                        # Unknown field name, force transition to next field
+                        if self.debug:
+                            logger.warning(f"Unknown field name after caption: {repr(field_name)}, forcing transition")
+                        self.caption_ending = False
+                        self.pending_field_name = ""
+                        self._transition_to_next_state()
         
         elif self.state == FSMState.KEYSCALE_VALUE:
             if generated_token_id == self.newline_token:

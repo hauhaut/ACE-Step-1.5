@@ -8,6 +8,7 @@ import time
 from typing import Optional, Dict, Any, Tuple, List
 from contextlib import contextmanager
 
+import yaml
 import torch
 from loguru import logger
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -17,7 +18,7 @@ from transformers.generation.logits_process import (
     RepetitionPenaltyLogitsProcessor,
 )
 from acestep.constrained_logits_processor import MetadataConstrainedLogitsProcessor
-from acestep.constants import DEFAULT_LM_INSTRUCTION
+from acestep.constants import DEFAULT_LM_INSTRUCTION, DEFAULT_LM_UNDERSTAND_INSTRUCTION
 
 
 class LLMHandler:
@@ -247,6 +248,10 @@ class LLMHandler:
         stop_at_reasoning: bool = False,
         skip_caption: bool = False,
         skip_language: bool = False,
+        generation_phase: str = "cot",
+        caption: str = "",
+        lyrics: str = "",
+        cot_text: str = "",
     ) -> str:
         """Shared vllm path: accept prebuilt formatted prompt and return text."""
         from nanovllm import SamplingParams
@@ -258,12 +263,14 @@ class LLMHandler:
         # Use shared constrained processor if enabled
         constrained_processor = None
         if use_constrained_decoding or use_phase_temperatures:
+            # Reset processor state for new generation
+            self.constrained_processor.reset()
+            
             # Use shared processor, just update caption and settings
             self.constrained_processor.enabled = use_constrained_decoding
             self.constrained_processor.debug = constrained_decoding_debug
             self.constrained_processor.metadata_temperature = metadata_temperature if use_phase_temperatures else None
             self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
-            self.constrained_processor.update_caption(formatted_prompt)  # Use formatted prompt for genre extraction
             self.constrained_processor.set_target_duration(target_duration)
             # Always call set_user_metadata to ensure previous settings are cleared if None
             self.constrained_processor.set_user_metadata(user_metadata)
@@ -271,6 +278,8 @@ class LLMHandler:
             # Set skip_caption and skip_language based on flags
             self.constrained_processor.set_skip_caption(skip_caption)
             self.constrained_processor.set_skip_language(skip_language)
+            # Set generation phase for phase-aware processing
+            self.constrained_processor.set_generation_phase(generation_phase)
             
             constrained_processor = self.constrained_processor
 
@@ -286,7 +295,21 @@ class LLMHandler:
         )
 
         if cfg_scale > 1.0:
-            formatted_unconditional_prompt = self.build_formatted_prompt(negative_prompt, is_negative_prompt=True)
+            # Build unconditional prompt based on generation phase
+            if generation_phase == "codes":
+                # Codes phase: use empty CoT in unconditional prompt
+                # formatted_prompt was built with build_formatted_prompt_with_cot(caption, lyrics, cot_text)
+                # For unconditional, we use empty CoT: build_formatted_prompt_with_cot(caption, lyrics, cot_text, is_negative_prompt=True, negative_prompt=...)
+                formatted_unconditional_prompt = self.build_formatted_prompt_with_cot(
+                    caption, lyrics, cot_text, is_negative_prompt=True, negative_prompt=negative_prompt
+                )
+            else:
+                # CoT phase: unconditional prompt
+                # If negative_prompt is provided, use it as caption; otherwise remove caption and keep only lyrics
+                formatted_unconditional_prompt = self.build_formatted_prompt(
+                    caption, lyrics, is_negative_prompt=True, generation_phase="cot", negative_prompt=negative_prompt
+                )
+            
             outputs = self.llm.generate(
                 [formatted_prompt],
                 sampling_params,
@@ -326,6 +349,10 @@ class LLMHandler:
         stop_at_reasoning: bool = False,
         skip_caption: bool = False,
         skip_language: bool = False,
+        generation_phase: str = "cot",
+        caption: str = "",
+        lyrics: str = "",
+        cot_text: str = "",
     ) -> str:
         """Shared PyTorch path: accept prebuilt formatted prompt and return text."""
         inputs = self.llm_tokenizer(
@@ -338,10 +365,12 @@ class LLMHandler:
         # Use shared constrained processor if enabled
         constrained_processor = None
         if use_constrained_decoding:
+            # Reset processor state for new generation
+            self.constrained_processor.reset()
+            
             # Use shared processor, just update caption and settings
             self.constrained_processor.enabled = use_constrained_decoding
             self.constrained_processor.debug = constrained_decoding_debug
-            self.constrained_processor.update_caption(formatted_prompt)  # Use formatted prompt for genre extraction
             self.constrained_processor.set_target_duration(target_duration)
             # Always call set_user_metadata to ensure previous settings are cleared if None
             self.constrained_processor.set_user_metadata(user_metadata)
@@ -349,6 +378,8 @@ class LLMHandler:
             # Set skip_caption and skip_language based on flags
             self.constrained_processor.set_skip_caption(skip_caption)
             self.constrained_processor.set_skip_language(skip_language)
+            # Set generation phase for phase-aware processing
+            self.constrained_processor.set_generation_phase(generation_phase)
             
             constrained_processor = self.constrained_processor
 
@@ -366,7 +397,18 @@ class LLMHandler:
                 logits_processor.append(RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty))
 
             if cfg_scale > 1.0:
-                formatted_unconditional_prompt = self.build_formatted_prompt(negative_prompt, is_negative_prompt=True)
+                # Build unconditional prompt based on generation phase
+                if generation_phase == "codes":
+                    # Codes phase: use empty CoT in unconditional prompt
+                    formatted_unconditional_prompt = self.build_formatted_prompt_with_cot(
+                        caption, lyrics, cot_text, is_negative_prompt=True, negative_prompt=negative_prompt
+                    )
+                else:
+                    # CoT phase: unconditional prompt
+                    # If negative_prompt is provided, use it as caption; otherwise remove caption and keep only lyrics
+                    formatted_unconditional_prompt = self.build_formatted_prompt(
+                        caption, lyrics, is_negative_prompt=True, generation_phase="cot", negative_prompt=negative_prompt
+                    )
                 
                 # Tokenize both prompts together to ensure same length (with left padding)
                 # Left padding is important for generation tasks
@@ -464,9 +506,33 @@ class LLMHandler:
         """Check if all required metadata are present."""
         if user_metadata is None:
             return False
-        if 'bpm' in user_metadata and 'keyscale' in user_metadata and 'timesignature' in user_metadata and 'duration' in user_metadata and 'genres' in user_metadata:
+        if 'bpm' in user_metadata and 'keyscale' in user_metadata and 'timesignature' in user_metadata and 'duration' in user_metadata:
             return True
         return False
+    
+    def _format_metadata_as_cot(self, metadata: Dict[str, Any]) -> str:
+        """
+        Format parsed metadata as CoT text using YAML format (matching training format).
+        
+        Args:
+            metadata: Dictionary with keys: bpm, caption, duration, keyscale, language, timesignature
+            
+        Returns:
+            Formatted CoT text: "<think>\n{yaml_content}\n</think>"
+        """
+        # Build cot_items dict with only non-None values
+        cot_items = {}
+        for key in ['bpm', 'caption', 'duration', 'keyscale', 'language', 'timesignature']:
+            if key in metadata and metadata[key] is not None:
+                cot_items[key] = metadata[key]
+        
+        # Format as YAML (sorted keys, unicode support)
+        if len(cot_items) > 0:
+            cot_yaml = yaml.dump(cot_items, allow_unicode=True, sort_keys=True).strip()
+        else:
+            cot_yaml = ""
+        
+        return f"<think>\n{cot_yaml}\n</think>"
 
     def generate_with_stop_condition(
         self,
@@ -486,10 +552,10 @@ class LLMHandler:
         use_cot_caption: bool = True,
         use_cot_language: bool = True,
     ) -> Tuple[Dict[str, Any], str, str]:
-        """Feishu-compatible LM generation.
+        """Two-phase LM generation: CoT generation followed by audio codes generation.
 
-        - infer_type='dit': stop at </think> and return metas only (no audio codes)
-        - infer_type='llm_dit': normal generation (metas + audio codes)
+        - infer_type='dit': Phase 1 only - generate CoT and return metas (no audio codes)
+        - infer_type='llm_dit': Phase 1 + Phase 2 - generate CoT then audio codes
         
         Args:
             target_duration: Target duration in seconds for codes generation constraint.
@@ -503,17 +569,21 @@ class LLMHandler:
         if infer_type not in {"dit", "llm_dit"}:
             return {}, "", f"❌ invalid infer_type: {infer_type!r} (expected 'dit' or 'llm_dit')"
 
-        # Build formatted prompt
-        formatted_prompt = self.build_formatted_prompt(caption, lyrics)
-
-        # Determine stop condition
-        stop_at_reasoning = (infer_type == "dit")
-        has_all_metas = self.has_all_metas(user_metadata)
+        metadata = {}
         audio_codes = ""
+        has_all_metas = self.has_all_metas(user_metadata)
         
-        if not has_all_metas or not stop_at_reasoning:
-            # For llm_dit mode: use normal generation (stops at EOS)
-            output_text, status = self.generate_from_formatted_prompt(
+        # ========== PHASE 1: CoT Generation ==========
+        # Always generate CoT unless all metadata are user-provided
+        if not has_all_metas:
+            logger.info("Phase 1: Generating CoT metadata...")
+            
+            # Build formatted prompt for CoT phase
+            formatted_prompt = self.build_formatted_prompt(caption, lyrics, generation_phase="cot")
+
+            logger.info(f"generate_with_stop_condition: formatted_prompt={formatted_prompt}")
+            # Generate CoT (stop at </think>)
+            cot_output_text, status = self.generate_from_formatted_prompt(
                 formatted_prompt=formatted_prompt,
                 cfg={
                     "temperature": temperature,
@@ -522,39 +592,121 @@ class LLMHandler:
                     "top_k": top_k,
                     "top_p": top_p,
                     "repetition_penalty": repetition_penalty,
-                    "target_duration": target_duration,
+                    "target_duration": None,  # No duration constraint for CoT phase
                     "user_metadata": user_metadata,
                     "skip_caption": not use_cot_caption,
                     "skip_language": not use_cot_language,
+                    "generation_phase": "cot",
+                    # Pass context for building unconditional prompt in CoT phase
+                    "caption": caption,
+                    "lyrics": lyrics,
                 },
                 use_constrained_decoding=use_constrained_decoding,
                 constrained_decoding_debug=constrained_decoding_debug,
-                stop_at_reasoning=stop_at_reasoning,
+                stop_at_reasoning=True,  # Always stop at </think> in Phase 1
             )
-            if not output_text:
+            
+            if not cot_output_text:
                 return {}, "", status
-
-            # Parse output
-            metadata, audio_codes = self.parse_lm_output(output_text)
-
+            
+            # Parse metadata from CoT output
+            metadata, _ = self.parse_lm_output(cot_output_text)
+            logger.info(f"Phase 1 completed. Generated metadata: {list(metadata.keys())}")
+        else:
+            # Use user-provided metadata
+            logger.info("Phase 1: Using user-provided metadata (skipping generation)")
+            metadata = {k: v for k, v in user_metadata.items() if v is not None}
+        
+        # If infer_type is 'dit', stop here and return only metadata
+        if infer_type == "dit":
+            status_msg = f"✅ Generated CoT metadata successfully\nFields: {', '.join(metadata.keys())}"
+            return metadata, "", status_msg
+        
+        # ========== PHASE 2: Audio Codes Generation ==========
+        logger.info("Phase 2: Generating audio codes...")
+        
+        # Format metadata as CoT using YAML (matching training format)
+        cot_text = self._format_metadata_as_cot(metadata)
+        
+        # Build formatted prompt with CoT for codes generation phase
+        formatted_prompt_with_cot = self.build_formatted_prompt_with_cot(caption, lyrics, cot_text)
+        logger.info(f"generate_with_stop_condition: formatted_prompt_with_cot={formatted_prompt_with_cot}")
+        # Generate audio codes
+        codes_output_text, status = self.generate_from_formatted_prompt(
+            formatted_prompt=formatted_prompt_with_cot,
+            cfg={
+                "temperature": temperature,
+                "cfg_scale": cfg_scale,
+                "negative_prompt": negative_prompt,
+                "top_k": top_k,
+                "top_p": top_p,
+                "repetition_penalty": repetition_penalty,
+                "target_duration": target_duration,
+                "user_metadata": None,  # No user metadata injection in Phase 2
+                "skip_caption": True,  # Skip caption since CoT is already included
+                "skip_language": True,  # Skip language since CoT is already included
+                "generation_phase": "codes",
+                # Pass context for building unconditional prompt in codes phase
+                "caption": caption,
+                "lyrics": lyrics,
+                "cot_text": cot_text,
+            },
+            use_constrained_decoding=use_constrained_decoding,
+            constrained_decoding_debug=constrained_decoding_debug,
+            stop_at_reasoning=False,  # Generate codes until EOS
+        )
+        
+        if not codes_output_text:
+            return metadata, "", status
+        
+        # Parse audio codes from output (metadata should be same as Phase 1)
+        _, audio_codes = self.parse_lm_output(codes_output_text)
+        
         codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
-        status_msg = f"✅ Generated successfully\nOutput length: {len(output_text)} chars\nCodes count: {codes_count}"
+        logger.info(f"Phase 2 completed. Generated {codes_count} audio codes")
+        
+        status_msg = f"✅ Generated successfully (2-phase)\nPhase 1: CoT metadata\nPhase 2: {codes_count} audio codes"
         return metadata, audio_codes, status_msg
 
-    def build_formatted_prompt(self, caption: str, lyrics: str = "", is_negative_prompt: bool = False) -> str:
+    def build_formatted_prompt(self, caption: str, lyrics: str = "", is_negative_prompt: bool = False, generation_phase: str = "cot", negative_prompt: str = "NO USER INPUT") -> str:
         """
         Build the chat-formatted prompt for 5Hz LM from caption/lyrics.
         Raises a ValueError if the tokenizer is not initialized.
 
+        Args:
+            caption: Caption text
+            lyrics: Lyrics text
+            is_negative_prompt: If True, builds unconditional prompt for CFG
+            generation_phase: "cot" or "codes" - affects unconditional prompt format
+            negative_prompt: Negative prompt for CFG (used when is_negative_prompt=True)
+            
         Example:
             prompt = handler.build_formatted_prompt("calm piano", "hello world")
         """
         if self.llm_tokenizer is None:
             raise ValueError("LLM tokenizer is not initialized. Call initialize() first.")
+        
         if is_negative_prompt:
-            prompt = caption
+            # Unconditional prompt for CFG
+            # Check if user provided a meaningful negative prompt (not the default)
+            has_negative_prompt = negative_prompt and negative_prompt.strip() and negative_prompt.strip() != "NO USER INPUT"
+            
+            if generation_phase == "cot":
+                # CoT phase unconditional prompt
+                if has_negative_prompt:
+                    # If negative prompt provided, use it as caption
+                    prompt = f"# Caption\n{negative_prompt}\n\n# Lyric\n{lyrics}\n"
+                else:
+                    # No negative prompt: remove caption, keep only lyrics
+                    prompt = f"# Lyric\n{lyrics}\n"
+            else:
+                # Codes phase: will be handled by build_formatted_prompt_with_cot
+                # For backward compatibility, use simple caption as before
+                prompt = caption
         else:
+            # Conditional prompt: include both caption and lyrics
             prompt = f"# Caption\n{caption}\n\n# Lyric\n{lyrics}\n"
+        
         return self.llm_tokenizer.apply_chat_template(
             [
                 {"role": "system", "content": f"# Instruction\n{DEFAULT_LM_INSTRUCTION}\n\n"},
@@ -563,7 +715,258 @@ class LLMHandler:
             tokenize=False,
             add_generation_prompt=True,
         )
-
+    
+    def build_formatted_prompt_with_cot(self, caption: str, lyrics: str, cot_text: str, is_negative_prompt: bool = False, negative_prompt: str = "NO USER INPUT") -> str:
+        """
+        Build the chat-formatted prompt for codes generation phase with pre-generated CoT.
+        
+        Args:
+            caption: Caption text
+            lyrics: Lyrics text  
+            cot_text: Pre-generated CoT text (e.g., "<think>\\nbpm: 120\\n...\\n</think>")
+            is_negative_prompt: If True, uses empty CoT for CFG unconditional prompt
+            negative_prompt: Negative prompt for CFG (used when is_negative_prompt=True)
+            
+        Returns:
+            Formatted prompt string
+            
+        Example:
+            cot = "<think>\\nbpm: 120\\ncaption: calm piano\\n...\\n</think>"
+            prompt = handler.build_formatted_prompt_with_cot("calm piano", "hello", cot)
+        """
+        if self.llm_tokenizer is None:
+            raise ValueError("LLM tokenizer is not initialized. Call initialize() first.")
+        
+        if is_negative_prompt:
+            # Unconditional prompt for codes phase
+            # Check if user provided a meaningful negative prompt
+            has_negative_prompt = negative_prompt and negative_prompt.strip() and negative_prompt.strip() != "NO USER INPUT"
+            
+            # Use empty CoT for unconditional
+            cot_for_prompt = "<think>\n</think>"
+            
+            if has_negative_prompt:
+                # If negative prompt provided, use it as caption
+                caption_for_prompt = negative_prompt
+            else:
+                # No negative prompt: use original caption
+                caption_for_prompt = caption
+        else:
+            # Conditional prompt: use the full CoT and original caption
+            cot_for_prompt = cot_text
+            caption_for_prompt = caption
+        
+        # Build user prompt with caption and lyrics ONLY (no COT)
+        # COT should be in the assistant's message, not user's
+        user_prompt = f"# Caption\n{caption_for_prompt}\n\n# Lyric\n{lyrics}\n"
+        
+        # Build the chat with assistant message containing the COT
+        # The model will continue generation after the COT
+        formatted = self.llm_tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": f"# Instruction\n{DEFAULT_LM_INSTRUCTION}\n\n"},
+                {"role": "user", "content": user_prompt},
+                {"role": "assistant", "content": cot_for_prompt},
+            ],
+            tokenize=False,
+            add_generation_prompt=False,  # Don't add generation prompt, COT is already in assistant
+        )
+        
+        # Add a newline after </think> so model generates audio codes on next line
+        if not formatted.endswith('\n'):
+            formatted += '\n'
+        
+        return formatted
+    
+    def build_formatted_prompt_for_understanding(
+        self,
+        audio_codes: str,
+        is_negative_prompt: bool = False,
+        negative_prompt: str = "NO USER INPUT"
+    ) -> str:
+        """
+        Build the chat-formatted prompt for audio understanding from codes.
+        
+        This is the reverse of generation: given audio codes, generate metadata and lyrics.
+        
+        Args:
+            audio_codes: Audio code string (e.g., "<|audio_code_123|><|audio_code_456|>...")
+            is_negative_prompt: If True, builds unconditional prompt for CFG
+            negative_prompt: Negative prompt for CFG (used when is_negative_prompt=True)
+            
+        Returns:
+            Formatted prompt string
+            
+        Example:
+            codes = "<|audio_code_18953|><|audio_code_13833|>..."
+            prompt = handler.build_formatted_prompt_for_understanding(codes)
+        """
+        if self.llm_tokenizer is None:
+            raise ValueError("LLM tokenizer is not initialized. Call initialize() first.")
+        
+        # For understanding task, user provides audio codes
+        # Unconditional prompt uses negative_prompt or empty string
+        if is_negative_prompt:
+            user_content = negative_prompt if negative_prompt and negative_prompt.strip() else ""
+        else:
+            user_content = audio_codes
+        
+        return self.llm_tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "system",
+                    "content": f"# Instruction\n{DEFAULT_LM_UNDERSTAND_INSTRUCTION}\n\n"
+                },
+                {
+                    "role": "user",
+                    "content": user_content
+                },
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    
+    def understand_audio_from_codes(
+        self,
+        audio_codes: str,
+        temperature: float = 0.3,
+        cfg_scale: float = 1.0,
+        negative_prompt: str = "NO USER INPUT",
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        repetition_penalty: float = 1.0,
+        use_constrained_decoding: bool = True,
+        constrained_decoding_debug: bool = False,
+    ) -> Tuple[Dict[str, Any], str]:
+        """
+        Understand audio codes and generate metadata + lyrics.
+        
+        This is the reverse of the normal generation flow:
+        - Input: Audio codes
+        - Output: Metadata (bpm, caption, duration, etc.) + Lyrics
+        
+        Args:
+            audio_codes: String of audio code tokens (e.g., "<|audio_code_123|><|audio_code_456|>...")
+            temperature: Sampling temperature for generation
+            cfg_scale: Classifier-Free Guidance scale (1.0 = no CFG, >1.0 = use CFG)
+            negative_prompt: Negative prompt for CFG
+            top_k: Top-K sampling (None = disabled)
+            top_p: Top-P (nucleus) sampling (None = disabled)
+            repetition_penalty: Repetition penalty (1.0 = no penalty)
+            use_constrained_decoding: Whether to use FSM-based constrained decoding for metadata
+            constrained_decoding_debug: Whether to enable debug logging for constrained decoding
+            
+        Returns:
+            Tuple of (metadata_dict, status_message)
+            metadata_dict contains:
+                - bpm: int or str
+                - caption: str
+                - duration: int or str
+                - genres: str
+                - keyscale: str
+                - language: str
+                - timesignature: str
+                - lyrics: str (extracted from output after </think>)
+        
+        Example:
+            codes = "<|audio_code_18953|><|audio_code_13833|>..."
+            metadata, status = handler.understand_audio_from_codes(codes)
+            print(metadata['caption'])  # "A cinematic orchestral piece..."
+            print(metadata['lyrics'])   # "[Intro: ...]\\n..."
+        """
+        if not getattr(self, "llm_initialized", False):
+            return {}, "❌ 5Hz LM not initialized. Please initialize it first."
+        
+        if not audio_codes or not audio_codes.strip():
+            return {}, "❌ No audio codes provided. Please paste audio codes first."
+        
+        logger.info(f"Understanding audio codes (length: {len(audio_codes)} chars)")
+        
+        # Build formatted prompt for understanding
+        formatted_prompt = self.build_formatted_prompt_for_understanding(audio_codes)
+        print(f"formatted_prompt: {formatted_prompt}")
+        # Generate using constrained decoding (understand phase)
+        # We want to generate metadata first (CoT), then lyrics (natural text)
+        output_text, status = self.generate_from_formatted_prompt(
+            formatted_prompt=formatted_prompt,
+            cfg={
+                "temperature": temperature,
+                "cfg_scale": cfg_scale,
+                "negative_prompt": negative_prompt,
+                "top_k": top_k,
+                "top_p": top_p,
+                "repetition_penalty": repetition_penalty,
+                "target_duration": None,  # No duration constraint for understanding
+                "user_metadata": None,  # No user metadata injection
+                "skip_caption": False,  # Generate caption
+                "skip_language": False,  # Generate language
+                "generation_phase": "understand",  # Understanding phase: generate CoT metadata, then free-form lyrics
+                # Context for building unconditional prompt
+                "caption": "",
+                "lyrics": "",
+            },
+            use_constrained_decoding=use_constrained_decoding,
+            constrained_decoding_debug=constrained_decoding_debug,
+            stop_at_reasoning=False,  # Continue after </think> to generate lyrics
+        )
+        
+        if not output_text:
+            return {}, status
+        
+        # Parse metadata and extract lyrics
+        metadata, _ = self.parse_lm_output(output_text)
+        
+        # Extract lyrics section (everything after </think>)
+        lyrics = self._extract_lyrics_from_output(output_text)
+        if lyrics:
+            metadata['lyrics'] = lyrics
+        
+        logger.info(f"Understanding completed. Generated {len(metadata)} metadata fields")
+        if constrained_decoding_debug:
+            logger.debug(f"Generated metadata: {list(metadata.keys())}")
+            logger.debug(f"Output text preview: {output_text[:200]}...")
+        
+        status_msg = f"✅ Understanding completed successfully\nGenerated fields: {', '.join(metadata.keys())}"
+        return metadata, status_msg
+    
+    def _extract_lyrics_from_output(self, output_text: str) -> str:
+        """
+        Extract lyrics section from LLM output.
+        
+        The lyrics appear after the </think> tag and typically start with "# Lyric"
+        or directly with lyric content.
+        
+        Args:
+            output_text: Full LLM output text
+            
+        Returns:
+            Extracted lyrics string, or empty string if no lyrics found
+        """
+        import re
+        
+        # Find the </think> tag
+        think_end_pattern = r'</think>'
+        match = re.search(think_end_pattern, output_text)
+        
+        if not match:
+            # No </think> tag found, no lyrics
+            return ""
+        
+        # Extract everything after </think>
+        after_think = output_text[match.end():].strip()
+        
+        if not after_think:
+            return ""
+        
+        # Remove "# Lyric" header if present
+        lyric_header_pattern = r'^#\s*Lyri[c|cs]?\s*\n'
+        after_think = re.sub(lyric_header_pattern, '', after_think, flags=re.IGNORECASE)
+        
+        # Remove <|im_end|> tag at the end if present
+        after_think = re.sub(r'<\|im_end\|>\s*$', '', after_think)
+        
+        return after_think.strip()
+    
     def generate_from_formatted_prompt(
         self,
         formatted_prompt: str,
@@ -583,6 +986,7 @@ class LLMHandler:
                 - negative_prompt (str) used when cfg_scale > 1
                 - top_k (int), top_p (float), repetition_penalty (float)
                 - target_duration (float): Target duration in seconds for codes generation
+                - generation_phase (str): "cot" or "codes" for phase-aware CFG
             use_constrained_decoding: Whether to use FSM-based constrained decoding
             constrained_decoding_debug: Whether to enable debug logging for constrained decoding
             stop_at_reasoning: If True, stop generation immediately after </think> tag (no audio codes)
@@ -610,6 +1014,11 @@ class LLMHandler:
         user_metadata = cfg.get("user_metadata")  # User-provided metadata fields
         skip_caption = cfg.get("skip_caption", False)  # Skip caption generation in CoT
         skip_language = cfg.get("skip_language", False)  # Skip language generation in CoT
+        generation_phase = cfg.get("generation_phase", "cot")  # "cot" or "codes"
+        # Additional context for codes phase unconditional prompt building
+        caption = cfg.get("caption", "")
+        lyrics = cfg.get("lyrics", "")
+        cot_text = cfg.get("cot_text", "")
 
         try:
             if self.llm_backend == "vllm":
@@ -628,6 +1037,10 @@ class LLMHandler:
                     stop_at_reasoning=stop_at_reasoning,
                     skip_caption=skip_caption,
                     skip_language=skip_language,
+                    generation_phase=generation_phase,
+                    caption=caption,
+                    lyrics=lyrics,
+                    cot_text=cot_text,
                 )
                 return output_text, f"✅ Generated successfully (vllm) | length={len(output_text)}"
 
@@ -647,6 +1060,10 @@ class LLMHandler:
                 stop_at_reasoning=stop_at_reasoning,
                 skip_caption=skip_caption,
                 skip_language=skip_language,
+                generation_phase=generation_phase,
+                caption=caption,
+                lyrics=lyrics,
+                cot_text=cot_text,
             )
             return output_text, f"✅ Generated successfully (pt) | length={len(output_text)}"
 

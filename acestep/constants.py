@@ -69,6 +69,7 @@ TASK_TYPES_BASE = ["text2music", "repaint", "cover", "extract", "lego", "complet
 # Default instructions
 DEFAULT_DIT_INSTRUCTION = "Fill the audio semantic mask based on the given conditions:"
 DEFAULT_LM_INSTRUCTION = "Generate audio semantic tokens based on the given conditions:"
+DEFAULT_LM_UNDERSTAND_INSTRUCTION = "Understand the given musical conditions and describe the audio semantics accordingly:"
 
 # Instruction templates for each task type
 # Note: Some instructions use placeholders like {TRACK_NAME} or {TRACK_CLASSES}
