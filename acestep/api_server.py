@@ -58,6 +58,8 @@ class GenerateMusicRequest(BaseModel):
     # - thinking=False: do not use LM to generate codes (dit behavior)
     # Regardless of thinking, if some metas are missing, server may use LM to fill them.
     thinking: bool = False
+    # Sample-mode requests auto-generate caption/lyrics/metas via LM (no user prompt).
+    sample_mode: bool = False
 
     bpm: Optional[int] = None
     # Accept common client keys via manual parsing (see _build_req_from_mapping).
@@ -559,6 +561,36 @@ def create_app() -> FastAPI:
                             out[k] = "N/A"
                     return out
 
+                def _ensure_llm_ready() -> None:
+                    with app.state._llm_init_lock:
+                        initialized = getattr(app.state, "_llm_initialized", False)
+                        had_error = getattr(app.state, "_llm_init_error", None)
+                        if initialized or had_error is not None:
+                            return
+
+                        project_root = _get_project_root()
+                        checkpoint_dir = os.path.join(project_root, "checkpoints")
+                        lm_model_path = (req.lm_model_path or os.getenv("ACESTEP_LM_MODEL_PATH") or "acestep-5Hz-lm-0.6B-v3").strip()
+                        backend = (req.lm_backend or os.getenv("ACESTEP_LM_BACKEND") or "vllm").strip().lower()
+                        if backend not in {"vllm", "pt"}:
+                            backend = "vllm"
+
+                        lm_device = os.getenv("ACESTEP_LM_DEVICE", os.getenv("ACESTEP_DEVICE", "auto"))
+                        lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
+
+                        status, ok = llm.initialize(
+                            checkpoint_dir=checkpoint_dir,
+                            lm_model_path=lm_model_path,
+                            backend=backend,
+                            device=lm_device,
+                            offload_to_cpu=lm_offload,
+                            dtype=h.dtype,
+                        )
+                        if not ok:
+                            app.state._llm_init_error = status
+                        else:
+                            app.state._llm_initialized = True
+
                 # Optional: generate 5Hz LM codes server-side
                 audio_code_string = req.audio_code_string
                 bpm_val = req.bpm
@@ -579,6 +611,57 @@ def create_app() -> FastAPI:
                 audio_cover_strength_val = float(req.audio_cover_strength)
 
                 lm_meta: Optional[Dict[str, Any]] = None
+
+                sample_mode = bool(getattr(req, "sample_mode", False))
+                if sample_mode:
+                    _ensure_llm_ready()
+                    if getattr(app.state, "_llm_init_error", None):
+                        raise RuntimeError(f"5Hz LM init failed: {app.state._llm_init_error}")
+
+                    sample_metadata, sample_status = llm.understand_audio_from_codes(
+                        audio_codes="NO USER INPUT",
+                        temperature=float(getattr(req, "lm_temperature", _LM_DEFAULT_TEMPERATURE)),
+                        cfg_scale=max(1.0, float(getattr(req, "lm_cfg_scale", _LM_DEFAULT_CFG_SCALE))),
+                        negative_prompt=str(getattr(req, "lm_negative_prompt", "NO USER INPUT") or "NO USER INPUT"),
+                        top_k=_normalize_optional_int(getattr(req, "lm_top_k", None)),
+                        top_p=_normalize_optional_float(getattr(req, "lm_top_p", None)),
+                        repetition_penalty=float(getattr(req, "lm_repetition_penalty", 1.0)),
+                        use_constrained_decoding=bool(getattr(req, "constrained_decoding", True)),
+                        constrained_decoding_debug=bool(getattr(req, "constrained_decoding_debug", False)),
+                    )
+
+                    if not sample_metadata or str(sample_status).startswith("❌"):
+                        raise RuntimeError(f"Sample generation failed: {sample_status}")
+
+                    req.caption = str(sample_metadata.get("caption", "") or "")
+                    req.lyrics = str(sample_metadata.get("lyrics", "") or "")
+                    req.bpm = _to_int(sample_metadata.get("bpm"), req.bpm)
+
+                    sample_keyscale = sample_metadata.get("keyscale", sample_metadata.get("key_scale", ""))
+                    if sample_keyscale:
+                        req.key_scale = str(sample_keyscale)
+
+                    sample_timesig = sample_metadata.get("timesignature", sample_metadata.get("time_signature", ""))
+                    if sample_timesig:
+                        req.time_signature = str(sample_timesig)
+
+                    sample_duration = _to_float(sample_metadata.get("duration"), None)
+                    if sample_duration is not None and sample_duration > 0:
+                        req.audio_duration = sample_duration
+
+                    lm_meta = sample_metadata
+
+                    print(
+                        "[api_server] sample mode metadata:",
+                        {
+                            "caption_len": len(req.caption),
+                            "lyrics_len": len(req.lyrics),
+                            "bpm": req.bpm,
+                            "audio_duration": req.audio_duration,
+                            "key_scale": req.key_scale,
+                            "time_signature": req.time_signature,
+                        },
+                    )
 
                 # Determine effective batch size (used for per-sample LM code diversity)
                 effective_batch_size = req.batch_size
@@ -641,31 +724,7 @@ def create_app() -> FastAPI:
                 )
 
                 if need_lm_metas or need_lm_codes:
-                    # Lazy init 5Hz LM once
-                    with app.state._llm_init_lock:
-                        if getattr(app.state, "_llm_initialized", False) is False and getattr(app.state, "_llm_init_error", None) is None:
-                            project_root = _get_project_root()
-                            checkpoint_dir = os.path.join(project_root, "checkpoints")
-                            lm_model_path = (req.lm_model_path or os.getenv("ACESTEP_LM_MODEL_PATH") or "acestep-5Hz-lm-0.6B-v3").strip()
-                            backend = (req.lm_backend or os.getenv("ACESTEP_LM_BACKEND") or "vllm").strip().lower()
-                            if backend not in {"vllm", "pt"}:
-                                backend = "vllm"
-
-                            lm_device = os.getenv("ACESTEP_LM_DEVICE", os.getenv("ACESTEP_DEVICE", "auto"))
-                            lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
-
-                            status, ok = llm.initialize(
-                                checkpoint_dir=checkpoint_dir,
-                                lm_model_path=lm_model_path,
-                                backend=backend,
-                                device=lm_device,
-                                offload_to_cpu=lm_offload,
-                                dtype=h.dtype,
-                            )
-                            if not ok:
-                                app.state._llm_init_error = status
-                            else:
-                                app.state._llm_initialized = True
+                    _ensure_llm_ready()
 
                     if getattr(app.state, "_llm_init_error", None):
                         # If codes generation is required, fail hard.
@@ -972,6 +1031,7 @@ def create_app() -> FastAPI:
                 caption=str(get("caption", "") or ""),
                 lyrics=str(get("lyrics", "") or ""),
                 thinking=_to_bool(get("thinking"), False),
+                sample_mode=_to_bool(_get_any("sample_mode", "sampleMode"), False),
                 bpm=normalized_bpm,
                 key_scale=normalized_keyscale,
                 time_signature=normalized_timesig,
@@ -1105,6 +1165,50 @@ def create_app() -> FastAPI:
         if temp_files:
             async with app.state.job_temp_files_lock:
                 app.state.job_temp_files[rec.job_id] = temp_files
+
+        async with app.state.pending_lock:
+            app.state.pending_ids.append(rec.job_id)
+            position = len(app.state.pending_ids)
+
+        await q.put((rec.job_id, req))
+        return CreateJobResponse(job_id=rec.job_id, status="queued", queue_position=position)
+
+    @app.post("/v1/music/random", response_model=CreateJobResponse)
+    async def create_random_sample_job(request: Request) -> CreateJobResponse:
+        """Create a sample-mode job that auto-generates caption/lyrics via LM."""
+
+        thinking_value: Any = None
+        content_type = (request.headers.get("content-type") or "").lower()
+        body_dict: Dict[str, Any] = {}
+
+        if "json" in content_type:
+            try:
+                payload = await request.json()
+                if isinstance(payload, dict):
+                    body_dict = payload
+            except Exception:
+                body_dict = {}
+
+        if not body_dict and request.query_params:
+            body_dict = dict(request.query_params)
+
+        thinking_value = body_dict.get("thinking")
+        if thinking_value is None:
+            thinking_value = body_dict.get("Thinking")
+
+        thinking_flag = _to_bool(thinking_value, True)
+
+        req = GenerateMusicRequest(
+            caption="",
+            lyrics="",
+            thinking=thinking_flag,
+            sample_mode=True,
+        )
+
+        rec = store.create()
+        q: asyncio.Queue = app.state.job_queue
+        if q.full():
+            raise HTTPException(status_code=429, detail="Server busy: queue is full")
 
         async with app.state.pending_lock:
             app.state.pending_ids.append(rec.job_id)
