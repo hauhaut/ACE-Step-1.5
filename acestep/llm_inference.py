@@ -39,6 +39,9 @@ class LLMHandler:
         
         # Shared constrained decoding processor (initialized once when LLM is loaded)
         self.constrained_processor: Optional[MetadataConstrainedLogitsProcessor] = None
+        
+        # Shared HuggingFace model for perplexity calculation (when using vllm backend)
+        self._hf_model_for_scoring = None
     
     def get_available_5hz_lm_models(self) -> List[str]:
         """Scan and return all model directory names starting with 'acestep-5Hz-lm-'"""
@@ -246,6 +249,7 @@ class LLMHandler:
         target_duration: Optional[float] = None,
         user_metadata: Optional[Dict[str, Optional[str]]] = None,
         stop_at_reasoning: bool = False,
+        skip_genres: bool = True,
         skip_caption: bool = False,
         skip_language: bool = False,
         generation_phase: str = "cot",
@@ -276,6 +280,7 @@ class LLMHandler:
             self.constrained_processor.set_user_metadata(user_metadata)
             self.constrained_processor.set_stop_at_reasoning(stop_at_reasoning)
             # Set skip_caption and skip_language based on flags
+            self.constrained_processor.set_skip_genres(skip_genres)
             self.constrained_processor.set_skip_caption(skip_caption)
             self.constrained_processor.set_skip_language(skip_language)
             # Set generation phase for phase-aware processing
@@ -347,6 +352,7 @@ class LLMHandler:
         target_duration: Optional[float] = None,
         user_metadata: Optional[Dict[str, Optional[str]]] = None,
         stop_at_reasoning: bool = False,
+        skip_genres: bool = True,
         skip_caption: bool = False,
         skip_language: bool = False,
         generation_phase: str = "cot",
@@ -376,6 +382,7 @@ class LLMHandler:
             self.constrained_processor.set_user_metadata(user_metadata)
             self.constrained_processor.set_stop_at_reasoning(stop_at_reasoning)
             # Set skip_caption and skip_language based on flags
+            self.constrained_processor.set_skip_genres(skip_genres)
             self.constrained_processor.set_skip_caption(skip_caption)
             self.constrained_processor.set_skip_language(skip_language)
             # Set generation phase for phase-aware processing
@@ -597,6 +604,7 @@ class LLMHandler:
                     "user_metadata": user_metadata,
                     "skip_caption": not use_cot_caption,
                     "skip_language": not use_cot_language,
+                    "skip_genres": True,  # Generate genres
                     "generation_phase": "cot",
                     # Pass context for building unconditional prompt in CoT phase
                     "caption": caption,
@@ -863,7 +871,6 @@ class LLMHandler:
                 - bpm: int or str
                 - caption: str
                 - duration: int or str
-                - genres: str
                 - keyscale: str
                 - language: str
                 - timesignature: str
@@ -901,6 +908,7 @@ class LLMHandler:
                 "user_metadata": None,  # No user metadata injection
                 "skip_caption": False,  # Generate caption
                 "skip_language": False,  # Generate language
+                "skip_genres": False,  # Generate genres
                 "generation_phase": "understand",  # Understanding phase: generate CoT metadata, then free-form lyrics
                 # Context for building unconditional prompt
                 "caption": "",
@@ -1015,6 +1023,7 @@ class LLMHandler:
         user_metadata = cfg.get("user_metadata")  # User-provided metadata fields
         skip_caption = cfg.get("skip_caption", False)  # Skip caption generation in CoT
         skip_language = cfg.get("skip_language", False)  # Skip language generation in CoT
+        skip_genres = cfg.get("skip_genres", False)  # Skip genres generation in CoT
         generation_phase = cfg.get("generation_phase", "cot")  # "cot" or "codes"
         # Additional context for codes phase unconditional prompt building
         caption = cfg.get("caption", "")
@@ -1036,6 +1045,7 @@ class LLMHandler:
                     target_duration=target_duration,
                     user_metadata=user_metadata,
                     stop_at_reasoning=stop_at_reasoning,
+                    skip_genres=skip_genres,
                     skip_caption=skip_caption,
                     skip_language=skip_language,
                     generation_phase=generation_phase,
@@ -1059,6 +1069,7 @@ class LLMHandler:
                 target_duration=target_duration,
                 user_metadata=user_metadata,
                 stop_at_reasoning=stop_at_reasoning,
+                skip_genres=skip_genres,
                 skip_caption=skip_caption,
                 skip_language=skip_language,
                 generation_phase=generation_phase,
@@ -1521,3 +1532,51 @@ class LLMHandler:
             torch.cuda.empty_cache()
             offload_time = time.time() - start_time
             logger.info(f"Offloaded LLM to CPU in {offload_time:.4f}s")
+    
+    def get_hf_model_for_scoring(self):
+        """
+        Get HuggingFace model for perplexity scoring.
+        
+        For vllm backend, loads HuggingFace model from disk (weights are cached by transformers).
+        For pt backend, returns the existing model.
+        
+        Returns:
+            HuggingFace model instance
+        """
+        if self.llm_backend == "pt":
+            # For PyTorch backend, directly return the model
+            return self.llm
+        
+        elif self.llm_backend == "vllm":
+            # For vllm backend, load HuggingFace model from disk
+            # Note: transformers caches model weights, so this doesn't duplicate disk I/O
+            if self._hf_model_for_scoring is None:
+                logger.info("Loading HuggingFace model for scoring (from checkpoint)")
+                
+                # Get model path from vllm config
+                model_runner = self.llm.model_runner
+                model_path = model_runner.config.model
+                
+                # Load HuggingFace model from the same checkpoint
+                # This will load the original unfused weights
+                import time
+                start_time = time.time()
+                self._hf_model_for_scoring = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                    torch_dtype=self.dtype
+                )
+                load_time = time.time() - start_time
+                logger.info(f"HuggingFace model loaded in {load_time:.2f}s")
+                
+                # Move to same device as vllm model
+                device = next(model_runner.model.parameters()).device
+                self._hf_model_for_scoring = self._hf_model_for_scoring.to(device)
+                self._hf_model_for_scoring.eval()
+                
+                logger.info(f"HuggingFace model for scoring ready on {device}")
+            
+            return self._hf_model_for_scoring
+        
+        else:
+            raise ValueError(f"Unknown backend: {self.llm_backend}")

@@ -607,6 +607,12 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                     info="Generate language in CoT (chain-of-thought)",
                     scale=1,
                 )
+                constrained_decoding_debug = gr.Checkbox(
+                    label="Constrained Decoding Debug",
+                    value=False,
+                    info="Enable debug logging for constrained decoding (check to see detailed logs)",
+                    scale=1,
+                )
             
             with gr.Row():
                 audio_cover_strength = gr.Slider(
@@ -618,11 +624,21 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
                     info="Control how many denoising steps use LM-generated codes",
                     scale=1,
                 )
+                score_scale = gr.Slider(
+                    minimum=1.0,
+                    maximum=200.0,
+                    value=10.0,
+                    step=1.0,
+                    label="Quality Score Sensitivity",
+                    info="Lower = more sensitive to quality differences (default: 10.0)",
+                    scale=1,
+                )
                 output_alignment_preference = gr.Checkbox(
                     label="Output Attention Focus Score (disabled)",
                     value=False,
                     info="Output attention focus score analysis",
                     interactive=False,
+                    visible=False,
                     scale=1,
                 )
         
@@ -632,10 +648,14 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
             think_checkbox = gr.Checkbox(
                 label="Think",
                 value=True,
-                info="Enable llm generate hints",
                 scale=1,
             )
             generate_btn = gr.Button("🎵 Generate Music", variant="primary", size="lg", interactive=generate_btn_interactive, scale=10)
+            instrumental_checkbox = gr.Checkbox(
+                label="Instrumental",
+                value=False,
+                scale=1,
+            )
     
     return {
         "service_config_accordion": service_config_accordion,
@@ -695,6 +715,9 @@ def create_generation_section(dit_handler, llm_handler, init_params=None) -> dic
         "output_alignment_preference": output_alignment_preference,
         "think_checkbox": think_checkbox,
         "generate_btn": generate_btn,
+        "instrumental_checkbox": instrumental_checkbox,
+        "constrained_decoding_debug": constrained_decoding_debug,
+        "score_scale": score_scale,
     }
 
 
@@ -720,7 +743,7 @@ def create_results_section(dit_handler) -> dict:
                 )
                 with gr.Row(equal_height=True):
                     send_to_src_btn_1 = gr.Button(
-                        "Send To Src Audio",
+                        "🔗 Send To Src Audio",
                         variant="secondary",
                         size="sm",
                         scale=1
@@ -731,6 +754,17 @@ def create_results_section(dit_handler) -> dict:
                         size="sm",
                         scale=1
                     )
+                    score_btn_1 = gr.Button(
+                        "📊 Score",
+                        variant="secondary",
+                        size="sm",
+                        scale=1
+                    )
+                score_display_1 = gr.Textbox(
+                    label="Quality Score (Sample 1)",
+                    interactive=False,
+                    placeholder="Click 'Score' to calculate perplexity-based quality score"
+                )
             with gr.Column():
                 generated_audio_2 = gr.Audio(
                     label="🎵 Generated Music (Sample 2)",
@@ -739,7 +773,7 @@ def create_results_section(dit_handler) -> dict:
                 )
                 with gr.Row(equal_height=True):
                     send_to_src_btn_2 = gr.Button(
-                        "Send To Src Audio",
+                        "🔗 Send To Src Audio",
                         variant="secondary",
                         size="sm",
                         scale=1
@@ -750,6 +784,17 @@ def create_results_section(dit_handler) -> dict:
                         size="sm",
                         scale=1
                     )
+                    score_btn_2 = gr.Button(
+                        "📊 Score",
+                        variant="secondary",
+                        size="sm",
+                        scale=1
+                    )
+                score_display_2 = gr.Textbox(
+                    label="Quality Score (Sample 2)",
+                    interactive=False,
+                    placeholder="Click 'Score' to calculate perplexity-based quality score"
+                )
 
         with gr.Accordion("📁 Batch Results & Generation Details", open=False):
             generated_audio_batch = gr.File(
@@ -780,6 +825,10 @@ def create_results_section(dit_handler) -> dict:
         "send_to_src_btn_2": send_to_src_btn_2,
         "save_btn_1": save_btn_1,
         "save_btn_2": save_btn_2,
+        "score_btn_1": score_btn_1,
+        "score_btn_2": score_btn_2,
+        "score_display_1": score_display_1,
+        "score_display_2": score_display_2,
         "generated_audio_batch": generated_audio_batch,
         "generation_info": generation_info,
         "align_score_1": align_score_1,
@@ -1042,11 +1091,12 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             gr.Warning(f"Error loading example: {str(e)}")
             return "", "", True, None, None, "", "", ""
     
-    def sample_example_smart(task_type: str):
+    def sample_example_smart(task_type: str, constrained_decoding_debug: bool = False):
         """Smart sample function that uses LM if initialized, otherwise falls back to examples
         
         Args:
             task_type: The task type (e.g., "text2music")
+            constrained_decoding_debug: Whether to enable debug logging for constrained decoding
             
         Returns:
             Tuple of (caption, lyrics, think, bpm, duration, keyscale, language, timesignature) for updating UI components
@@ -1060,6 +1110,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                     audio_codes="NO USER INPUT",
                     use_constrained_decoding=True,
                     temperature=0.85,
+                    constrained_decoding_debug=constrained_decoding_debug,
                 )
                 
                 if metadata:
@@ -1094,7 +1145,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                     if timesignature_value in [None, "N/A"]:
                         timesignature_value = ''
                     
-                    gr.Info("🤖 Generated example using LM (Language Model)")
+                    gr.Info("🤖 Generated example using LM")
                     return caption_value, lyrics_value, think_value, bpm_value, duration_value, keyscale_value, language_value, timesignature_value
                 else:
                     gr.Warning("Failed to generate example using LM, falling back to examples directory")
@@ -1285,6 +1336,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         use_adg, cfg_interval_start, cfg_interval_end, audio_format, lm_temperature,
         think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
         use_cot_metas, use_cot_caption, use_cot_language, is_format_caption,
+        constrained_decoding_debug,
         progress=gr.Progress(track_tqdm=True)
     ):
         # If think is enabled (llm_dit mode) and use_cot_metas is True, generate audio codes using LM first
@@ -1342,6 +1394,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 use_cot_caption=use_cot_caption,
                 use_cot_language=use_cot_language,
                 is_format_caption=is_format_caption,
+                constrained_decoding_debug=constrained_decoding_debug,
             )
             
             # Store LM-generated metadata and audio codes for display
@@ -1471,7 +1524,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["use_cot_metas"],
             generation_section["use_cot_caption"],
             generation_section["use_cot_language"],
-            results_section["is_format_caption_state"]
+            results_section["is_format_caption_state"],
+            generation_section["constrained_decoding_debug"]
         ],
         outputs=[
             results_section["generated_audio_1"],
@@ -1720,15 +1774,18 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     
     # Sample button - smart sample (uses LM if initialized, otherwise examples)
     # Need to add is_format_caption return value to sample_example_smart
-    def sample_example_smart_with_flag(task_type: str):
+    def sample_example_smart_with_flag(task_type: str, constrained_decoding_debug: bool):
         """Wrapper for sample_example_smart that adds is_format_caption flag"""
-        result = sample_example_smart(task_type)
+        result = sample_example_smart(task_type, constrained_decoding_debug)
         # Add True at the end to set is_format_caption
         return result + (True,)
     
     generation_section["sample_btn"].click(
         fn=sample_example_smart_with_flag,
-        inputs=[generation_section["task_type"]],
+        inputs=[
+            generation_section["task_type"],
+            generation_section["constrained_decoding_debug"]
+        ],
         outputs=[
             generation_section["captions"],
             generation_section["lyrics"],
@@ -1743,13 +1800,14 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     )
     
     # Transcribe audio codes to metadata (or generate example if empty)
-    def transcribe_audio_codes(audio_code_string):
+    def transcribe_audio_codes(audio_code_string, constrained_decoding_debug):
         """
         Transcribe audio codes to metadata using LLM understanding.
         If audio_code_string is empty, generate a sample example instead.
         
         Args:
             audio_code_string: String containing audio codes (or empty for example generation)
+            constrained_decoding_debug: Whether to enable debug logging for constrained decoding
             
         Returns:
             Tuple of (status_message, caption, lyrics, bpm, duration, keyscale, language, timesignature)
@@ -1763,7 +1821,11 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             audio_code_string = "NO USER INPUT"
         
         # Call LLM understanding
-        metadata, status = llm_handler.understand_audio_from_codes(audio_codes=audio_code_string, use_constrained_decoding=True)
+        metadata, status = llm_handler.understand_audio_from_codes(
+            audio_codes=audio_code_string,
+            use_constrained_decoding=True,
+            constrained_decoding_debug=constrained_decoding_debug,
+        )
         
         # Extract fields for UI update
         caption = metadata.get('caption', '')
@@ -1818,7 +1880,10 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     
     generation_section["transcribe_btn"].click(
         fn=transcribe_audio_codes,
-        inputs=[generation_section["text2music_audio_code_string"]],
+        inputs=[
+            generation_section["text2music_audio_code_string"],
+            generation_section["constrained_decoding_debug"]
+        ],
         outputs=[
             results_section["status_output"],       # Show status
             generation_section["captions"],         # Update caption field
@@ -1899,9 +1964,9 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         outputs=[generation_section["audio_uploads_accordion"]]
     )
     
-    # Save metadata handlers
+    # Save metadata handlers - use JavaScript to trigger automatic download
     results_section["save_btn_1"].click(
-        fn=save_metadata,
+        fn=None,
         inputs=[
             generation_section["task_type"],
             generation_section["captions"],
@@ -1936,11 +2001,77 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["complete_track_classes"],
             results_section["lm_metadata_state"],
         ],
-        outputs=[]
+        outputs=None,
+        js="""
+        (task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature, audio_duration,
+         batch_size_input, inference_steps, guidance_scale, seed, random_seed_checkbox,
+         use_adg, cfg_interval_start, cfg_interval_end, audio_format,
+         lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
+         use_cot_caption, use_cot_language, audio_cover_strength,
+         think_checkbox, text2music_audio_code_string, repainting_start, repainting_end,
+         track_name, complete_track_classes, lm_metadata) => {
+            // Create metadata object
+            const metadata = {
+                saved_at: new Date().toISOString(),
+                task_type: task_type,
+                caption: captions || "",
+                lyrics: lyrics || "",
+                vocal_language: vocal_language,
+                bpm: bpm,
+                keyscale: key_scale || "",
+                timesignature: time_signature || "",
+                duration: audio_duration,
+                batch_size: batch_size_input,
+                inference_steps: inference_steps,
+                guidance_scale: guidance_scale,
+                seed: seed,
+                random_seed: random_seed_checkbox,
+                use_adg: use_adg,
+                cfg_interval_start: cfg_interval_start,
+                cfg_interval_end: cfg_interval_end,
+                audio_format: audio_format,
+                lm_temperature: lm_temperature,
+                lm_cfg_scale: lm_cfg_scale,
+                lm_top_k: lm_top_k,
+                lm_top_p: lm_top_p,
+                lm_negative_prompt: lm_negative_prompt,
+                use_cot_caption: use_cot_caption,
+                use_cot_language: use_cot_language,
+                audio_cover_strength: audio_cover_strength,
+                think: think_checkbox,
+                audio_codes: text2music_audio_code_string || "",
+                repainting_start: repainting_start,
+                repainting_end: repainting_end,
+                track_name: track_name,
+                complete_track_classes: complete_track_classes || []
+            };
+            
+            if (lm_metadata) {
+                metadata.lm_generated_metadata = lm_metadata;
+            }
+            
+            // Create JSON string
+            const jsonStr = JSON.stringify(metadata, null, 2);
+            
+            // Create blob and download
+            const blob = new Blob([jsonStr], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').split('.')[0];
+            a.download = `generation_params_${timestamp}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            return Array(32).fill(null);
+        }
+        """
     )
     
     results_section["save_btn_2"].click(
-        fn=save_metadata,
+        fn=None,
         inputs=[
             generation_section["task_type"],
             generation_section["captions"],
@@ -1975,7 +2106,73 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["complete_track_classes"],
             results_section["lm_metadata_state"],
         ],
-        outputs=[]
+        outputs=None,
+        js="""
+        (task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature, audio_duration,
+         batch_size_input, inference_steps, guidance_scale, seed, random_seed_checkbox,
+         use_adg, cfg_interval_start, cfg_interval_end, audio_format,
+         lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
+         use_cot_caption, use_cot_language, audio_cover_strength,
+         think_checkbox, text2music_audio_code_string, repainting_start, repainting_end,
+         track_name, complete_track_classes, lm_metadata) => {
+            // Create metadata object
+            const metadata = {
+                saved_at: new Date().toISOString(),
+                task_type: task_type,
+                caption: captions || "",
+                lyrics: lyrics || "",
+                vocal_language: vocal_language,
+                bpm: bpm,
+                keyscale: key_scale || "",
+                timesignature: time_signature || "",
+                duration: audio_duration,
+                batch_size: batch_size_input,
+                inference_steps: inference_steps,
+                guidance_scale: guidance_scale,
+                seed: seed,
+                random_seed: random_seed_checkbox,
+                use_adg: use_adg,
+                cfg_interval_start: cfg_interval_start,
+                cfg_interval_end: cfg_interval_end,
+                audio_format: audio_format,
+                lm_temperature: lm_temperature,
+                lm_cfg_scale: lm_cfg_scale,
+                lm_top_k: lm_top_k,
+                lm_top_p: lm_top_p,
+                lm_negative_prompt: lm_negative_prompt,
+                use_cot_caption: use_cot_caption,
+                use_cot_language: use_cot_language,
+                audio_cover_strength: audio_cover_strength,
+                think: think_checkbox,
+                audio_codes: text2music_audio_code_string || "",
+                repainting_start: repainting_start,
+                repainting_end: repainting_end,
+                track_name: track_name,
+                complete_track_classes: complete_track_classes || []
+            };
+            
+            if (lm_metadata) {
+                metadata.lm_generated_metadata = lm_metadata;
+            }
+            
+            // Create JSON string
+            const jsonStr = JSON.stringify(metadata, null, 2);
+            
+            // Create blob and download
+            const blob = new Blob([jsonStr], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').split('.')[0];
+            a.download = `generation_params_${timestamp}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            return Array(32).fill(null);
+        }
+        """
     )
     
     # Load metadata handler - triggered when file is uploaded via UploadButton
@@ -2016,5 +2213,153 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["complete_track_classes"],
             results_section["is_format_caption_state"]
         ]
+    )
+    
+    # Instrumental checkbox handler - auto-fill [Instrumental] when checked
+    def handle_instrumental_checkbox(instrumental_checked, current_lyrics):
+        """
+        Handle instrumental checkbox changes.
+        When checked: if no lyrics, fill with [Instrumental]
+        When unchecked: if lyrics is [Instrumental], clear it
+        """
+        if instrumental_checked:
+            # If checked and no lyrics, fill with [Instrumental]
+            if not current_lyrics or not current_lyrics.strip():
+                return "[Instrumental]"
+            else:
+                # Has lyrics, don't change
+                return current_lyrics
+        else:
+            # If unchecked and lyrics is exactly [Instrumental], clear it
+            if current_lyrics and current_lyrics.strip() == "[Instrumental]":
+                return ""
+            else:
+                # Has other lyrics, don't change
+                return current_lyrics
+    
+    generation_section["instrumental_checkbox"].change(
+        fn=handle_instrumental_checkbox,
+        inputs=[generation_section["instrumental_checkbox"], generation_section["lyrics"]],
+        outputs=[generation_section["lyrics"]]
+    )
+    
+    # Score calculation handlers
+    def calculate_score_handler(audio_codes_str, caption, lyrics, lm_metadata, bpm, key_scale, time_signature, audio_duration, vocal_language, score_scale):
+        """
+        Calculate perplexity-based quality score for generated audio.
+        
+        Args:
+            audio_codes_str: Generated audio codes string
+            caption: Caption text used for generation
+            lyrics: Lyrics text used for generation
+            lm_metadata: LM-generated metadata dictionary (from CoT generation)
+            bpm: BPM value
+            key_scale: Key scale value
+            time_signature: Time signature value
+            audio_duration: Audio duration value
+            vocal_language: Vocal language value
+            score_scale: Sensitivity scale parameter (lower = more sensitive)
+            
+        Returns:
+            Score display string
+        """
+        from acestep.test_time_scaling import calculate_perplexity, perplexity_to_score
+        
+        if not llm_handler.llm_initialized:
+            return "❌ LLM not initialized. Please initialize 5Hz LM first."
+        
+        if not audio_codes_str or not audio_codes_str.strip():
+            return "❌ No audio codes available. Please generate music first."
+        
+        try:
+            # Build metadata dictionary from both LM metadata and user inputs
+            metadata = {}
+            
+            # Priority 1: Use LM-generated metadata if available
+            if lm_metadata and isinstance(lm_metadata, dict):
+                metadata.update(lm_metadata)
+            
+            # Priority 2: Add user-provided metadata (if not already in LM metadata)
+            if bpm is not None and 'bpm' not in metadata:
+                try:
+                    metadata['bpm'] = int(bpm)
+                except:
+                    pass
+            
+            if caption and 'caption' not in metadata:
+                metadata['caption'] = caption
+            
+            if audio_duration is not None and audio_duration > 0 and 'duration' not in metadata:
+                try:
+                    metadata['duration'] = int(audio_duration)
+                except:
+                    pass
+            
+            if key_scale and key_scale.strip() and 'keyscale' not in metadata:
+                metadata['keyscale'] = key_scale.strip()
+            
+            if vocal_language and vocal_language.strip() and 'language' not in metadata:
+                metadata['language'] = vocal_language.strip()
+            
+            if time_signature and time_signature.strip() and 'timesignature' not in metadata:
+                metadata['timesignature'] = time_signature.strip()
+            
+            # Calculate perplexity
+            perplexity, status = calculate_perplexity(
+                llm_handler=llm_handler,
+                audio_codes=audio_codes_str,
+                caption=caption or "",
+                lyrics=lyrics or "",
+                metadata=metadata if metadata else None,
+                temperature=1.0
+            )
+            
+            # Convert perplexity to normalized score [0, 1] (higher is better)
+            normalized_score = perplexity_to_score(perplexity, scale=score_scale)
+            
+            # Format display string
+            if perplexity == float('inf'):
+                return f"❌ Scoring failed: {status}"
+            else:
+                return f"✅ Quality Score: {normalized_score:.4f} (range: 0-1, higher is better)\nPerplexity: {perplexity:.4f}\nSensitivity: {score_scale}\n{status}"
+                
+        except Exception as e:
+            import traceback
+            error_msg = f"❌ Error calculating score: {str(e)}\n{traceback.format_exc()}"
+            return error_msg
+    
+    # Connect score buttons to handlers
+    results_section["score_btn_1"].click(
+        fn=calculate_score_handler,
+        inputs=[
+            generation_section["text2music_audio_code_string"],
+            generation_section["captions"],
+            generation_section["lyrics"],
+            results_section["lm_metadata_state"],
+            generation_section["bpm"],
+            generation_section["key_scale"],
+            generation_section["time_signature"],
+            generation_section["audio_duration"],
+            generation_section["vocal_language"],
+            generation_section["score_scale"]
+        ],
+        outputs=[results_section["score_display_1"]]
+    )
+    
+    results_section["score_btn_2"].click(
+        fn=calculate_score_handler,
+        inputs=[
+            generation_section["text2music_audio_code_string"],
+            generation_section["captions"],
+            generation_section["lyrics"],
+            results_section["lm_metadata_state"],
+            generation_section["bpm"],
+            generation_section["key_scale"],
+            generation_section["time_signature"],
+            generation_section["audio_duration"],
+            generation_section["vocal_language"],
+            generation_section["score_scale"]
+        ],
+        outputs=[results_section["score_display_2"]]
     )
 
