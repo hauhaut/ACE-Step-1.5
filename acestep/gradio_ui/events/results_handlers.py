@@ -5,6 +5,7 @@ Contains event handlers and helper functions related to result display, scoring,
 import os
 import json
 import datetime
+import math
 import tempfile
 import shutil
 import zipfile
@@ -310,14 +311,10 @@ def generate_with_progress(
         
         if should_use_lm_batch:
             # BATCH LM GENERATION
-            import math
-            from acestep.handler import AceStepHandler
-            
             logger.info(f"Using LM batch generation for {batch_size_input} items...")
             
             # Prepare seeds for batch items
-            temp_handler = AceStepHandler()
-            actual_seed_list, _ = temp_handler.prepare_seeds(batch_size_input, seed, random_seed_checkbox)
+            actual_seed_list, _ = dit_handler.prepare_seeds(batch_size_input, seed, random_seed_checkbox)
             
             # Split batch into chunks (GPU memory constraint)
             max_inference_batch_size = int(lm_batch_chunk_size)

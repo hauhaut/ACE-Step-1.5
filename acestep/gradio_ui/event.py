@@ -9,6 +9,8 @@ import glob
 import time as time_module
 import tempfile
 import gradio as gr
+import math
+from loguru import logger
 from typing import Optional
 from acestep.constants import (
     TASK_TYPES_TURBO,
@@ -655,16 +657,11 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             user_metadata_to_pass = user_metadata if user_metadata else None
             
             if should_use_lm_batch:
-                # BATCH LM GENERATION
-                import math
-                from loguru import logger
-                
+                # BATCH LM GENERATION                
                 logger.info(f"Using LM batch generation for {batch_size_input} items...")
                 
                 # Prepare seeds for batch items
-                from acestep.handler import AceStepHandler
-                temp_handler = AceStepHandler()
-                actual_seed_list, _ = temp_handler.prepare_seeds(batch_size_input, seed, random_seed_checkbox)
+                actual_seed_list, _ = dit_handler.prepare_seeds(batch_size_input, seed, random_seed_checkbox)
                 
                 # Split batch into chunks (GPU memory constraint)
                 max_inference_batch_size = int(lm_batch_chunk_size)

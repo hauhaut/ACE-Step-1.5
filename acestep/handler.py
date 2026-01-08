@@ -37,12 +37,15 @@ warnings.filterwarnings("ignore")
 class AceStepHandler:
     """ACE-Step Business Logic Handler"""
     
-    def __init__(self):
+    def __init__(self, save_root = None):
         self.model = None
         self.config = None
         self.device = "cpu"
         self.dtype = torch.float32  # Will be set based on device in initialize_service
-        self.temp_dir = tempfile.mkdtemp()
+        if save_root is None:
+            self.temp_dir = tempfile.mkdtemp()
+        else:
+            self.temp_dir = save_root
         
         # VAE for audio encoding/decoding
         self.vae = None
