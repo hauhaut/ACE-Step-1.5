@@ -228,6 +228,97 @@ def _calculate_log_prob(
     return mean_log_prob
 
 
+def calculate_reward_score(
+    scores: Dict[str, float],
+    weights_config: Optional[Dict[str, float]] = None
+) -> Tuple[float, str]:
+    """
+    Reward Model Calculator: Computes a final reward based on user priorities.
+    
+    Priority Logic:
+        1. Caption (Highest): The overall vibe/style must match.
+        2. Lyrics (Medium): Content accuracy is important but secondary to vibe.
+        3. Metadata (Lowest): Technical constraints (BPM, Key) allow for slight deviations.
+    
+    Strategy: Dynamic Weighted Sum
+    - Metadata fields are aggregated into a single 'metadata' score first.
+    - Weights are dynamically renormalized if any component (e.g., lyrics) is missing.
+    
+    Args:
+        scores: Dictionary of raw scores (0.0 - 1.0) from the evaluation module.
+        weights_config: Optional custom weights. Defaults to:
+                        Caption (50%), Lyrics (30%), Metadata (20%).
+        
+    Returns:
+        final_reward: The calculated reward score (0.0 - 1.0).
+        explanation: A formatted string explaining how the score was derived.
+    """
+    
+    # 1. Default Preference Configuration
+    # These weights determine the relative importance of each component.
+    if weights_config is None:
+        weights_config = {
+            'caption': 0.50,  # High priority: Style/Vibe
+            'lyrics':  0.30,  # Medium priority: Content
+            'metadata': 0.20  # Low priority: Technical details
+        }
+    
+    # 2. Extract and Group Scores
+    # Caption and Lyrics are standalone high-level features.
+    caption_score = scores.get('caption')
+    lyrics_score = scores.get('lyrics')
+    
+    # Metadata fields (bpm, key, duration, etc.) are aggregated.
+    # We treat them as a single "Technical Score" to prevent them from 
+    # diluting the weight of Caption/Lyrics simply by having many fields.
+    meta_scores_list = [
+        val for key, val in scores.items() 
+        if key not in ['caption', 'lyrics']
+    ]
+    
+    # Calculate average of all metadata fields (if any exist)
+    meta_aggregate_score = None
+    if meta_scores_list:
+        meta_aggregate_score = sum(meta_scores_list) / len(meta_scores_list)
+    
+    # 3. specific Active Components & Dynamic Weighting
+    # We only include components that actually exist in this generation.
+    active_components = {}
+    
+    if caption_score is not None:
+        active_components['caption'] = (caption_score, weights_config['caption'])
+        
+    if lyrics_score is not None:
+        active_components['lyrics'] = (lyrics_score, weights_config['lyrics'])
+        
+    if meta_aggregate_score is not None:
+        active_components['metadata'] = (meta_aggregate_score, weights_config['metadata'])
+    
+    # 4. Calculate Final Weighted Score
+    total_base_weight = sum(w for _, w in active_components.values())
+    total_score = 0.0
+    
+    breakdown_lines = []
+    
+    if total_base_weight == 0:
+        return 0.0, "❌ No valid scores available to calculate reward."
+    
+    # Sort by weight (importance) for display
+    sorted_components = sorted(active_components.items(), key=lambda x: x[1][1], reverse=True)
+    
+    for name, (score, base_weight) in sorted_components:
+        # Renormalize weight: If lyrics are missing, caption/metadata weights scale up proportionately.
+        normalized_weight = base_weight / total_base_weight
+        weighted_contribution = score * normalized_weight
+        total_score += weighted_contribution
+        
+        breakdown_lines.append(
+            f"  • {name.title():<8} | Score: {score:.4f} | Weight: {normalized_weight:.2f} "
+            f"-> Contrib: +{weighted_contribution:.4f}"
+        )
+
+    return total_score, "\n".join(breakdown_lines)
+
 # ==============================================================================
 # Main Public API
 # ==============================================================================
@@ -300,16 +391,16 @@ def calculate_pmi_score_per_condition(
 
         # 4. Global Score
         global_score = sum(scores.values()) / len(scores)
+        global_score, breakdown_lines = calculate_reward_score(scores)
 
         # Status Message
-        status_lines = ["✅ Per-condition scores (0-1):"]
+        status_lines = [breakdown_lines, "\n✅ Per-condition scores (0-1):"]
         for key, score in sorted(scores.items()):
             metric = "Top-k Recall" if key in metadata_recall_keys else "PMI (Norm)"
             status_lines.append(f"  {key}: {score:.4f} ({metric})")
-        status_lines.append(f"Global score: {global_score:.4f}")
-
-        logger.info(f"Calculated scores: {global_score:.4f}")
-        return scores, global_score, "\n".join(status_lines)
+        status = "\n".join(status_lines)
+        logger.info(f"Calculated scores: {global_score:.4f}\n{status}")
+        return scores, global_score, status
 
     except Exception as e:
         import traceback

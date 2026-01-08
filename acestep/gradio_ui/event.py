@@ -1,1163 +1,20 @@
 """
-Gradio UI Components Module
-Contains all Gradio interface component definitions and layouts
+Gradio UI Event Handlers Module
+Contains all event handler definitions and connections
 """
 import os
 import json
 import random
 import glob
 import time as time_module
+import tempfile
 import gradio as gr
-from typing import Callable, Optional, Tuple
+from typing import Optional
 from acestep.constants import (
-    VALID_LANGUAGES,
-    TRACK_NAMES,
-    TASK_TYPES,
     TASK_TYPES_TURBO,
     TASK_TYPES_BASE,
-    DEFAULT_DIT_INSTRUCTION,
 )
-
-
-def create_gradio_interface(dit_handler, llm_handler, dataset_handler, init_params=None) -> gr.Blocks:
-    """
-    Create Gradio interface
-    
-    Args:
-        dit_handler: DiT handler instance
-        llm_handler: LM handler instance
-        dataset_handler: Dataset handler instance
-        init_params: Dictionary containing initialization parameters and state.
-                    If None, service will not be pre-initialized.
-        
-    Returns:
-        Gradio Blocks instance
-    """
-    with gr.Blocks(
-        title="ACE-Step V1.5 Demo",
-        theme=gr.themes.Soft(),
-        css="""
-        .main-header {
-            text-align: center;
-            margin-bottom: 2rem;
-        }
-        .section-header {
-            background: linear-gradient(90deg, #4CAF50, #45a049);
-            color: white;
-            padding: 10px;
-            border-radius: 5px;
-            margin: 10px 0;
-        }
-        .lm-hints-row {
-            align-items: stretch;
-        }
-        .lm-hints-col {
-            display: flex;
-        }
-        .lm-hints-col > div {
-            flex: 1;
-            display: flex;
-        }
-        .lm-hints-btn button {
-            height: 100%;
-            width: 100%;
-        }
-        """
-    ) as demo:
-        
-        gr.HTML("""
-        <div class="main-header">
-            <h1>♪ACE-Step V1.5 Demo</h1>
-            <p>Generate music from text captions and lyrics using diffusion models</p>
-        </div>
-        """)
-        
-        # Dataset Explorer Section
-        dataset_section = create_dataset_section(dataset_handler)
-        
-        # Generation Section (pass init_params to support pre-initialization)
-        generation_section = create_generation_section(dit_handler, llm_handler, init_params=init_params)
-        
-        # Results Section
-        results_section = create_results_section(dit_handler)
-        
-        # Connect event handlers
-        setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, dataset_section, generation_section, results_section)
-    
-    return demo
-
-
-def create_dataset_section(dataset_handler) -> dict:
-    """Create dataset explorer section"""
-    with gr.Accordion("📊 Dataset Explorer", open=False):
-        with gr.Row(equal_height=True):
-            dataset_type = gr.Dropdown(
-                choices=["train", "test"],
-                value="train",
-                label="Dataset",
-                info="Choose dataset to explore",
-                scale=2
-            )
-            import_dataset_btn = gr.Button("📥 Import Dataset", variant="primary", scale=1)
-            
-            search_type = gr.Dropdown(
-                choices=["keys", "idx", "random"],
-                value="random",
-                label="Search Type",
-                info="How to find items",
-                scale=1
-            )
-            search_value = gr.Textbox(
-                label="Search Value",
-                placeholder="Enter keys or index (leave empty for random)",
-                info="Keys: exact match, Index: 0 to dataset size-1",
-                scale=2
-            )
-
-        instruction_display = gr.Textbox(
-            label="📝 Instruction",
-            interactive=False,
-            placeholder="No instruction available",
-            lines=1
-        )
-        
-        repaint_viz_plot = gr.Plot()
-        
-        with gr.Accordion("📋 Item Metadata (JSON)", open=False):
-            item_info_json = gr.Code(
-                label="Complete Item Information",
-                language="json",
-                interactive=False,
-                lines=15
-            )
-        
-        with gr.Row(equal_height=True):
-            item_src_audio = gr.Audio(
-                label="Source Audio",
-                type="filepath",
-                interactive=False,
-                scale=8
-            )
-            get_item_btn = gr.Button("🔍 Get Item", variant="secondary", interactive=False, scale=2)
-        
-        with gr.Row(equal_height=True):
-            item_target_audio = gr.Audio(
-                label="Target Audio",
-                type="filepath",
-                interactive=False,
-                scale=8
-            )
-            item_refer_audio = gr.Audio(
-                label="Reference Audio",
-                type="filepath",
-                interactive=False,
-                scale=2
-            )
-        
-        with gr.Row():
-            use_src_checkbox = gr.Checkbox(
-                label="Use Source Audio from Dataset",
-                value=True,
-                info="Check to use the source audio from dataset"
-            )
-
-        data_status = gr.Textbox(label="📊 Data Status", interactive=False, value="❌ No dataset imported")
-        auto_fill_btn = gr.Button("📋 Auto-fill Generation Form", variant="primary")
-    
-    return {
-        "dataset_type": dataset_type,
-        "import_dataset_btn": import_dataset_btn,
-        "search_type": search_type,
-        "search_value": search_value,
-        "instruction_display": instruction_display,
-        "repaint_viz_plot": repaint_viz_plot,
-        "item_info_json": item_info_json,
-        "item_src_audio": item_src_audio,
-        "get_item_btn": get_item_btn,
-        "item_target_audio": item_target_audio,
-        "item_refer_audio": item_refer_audio,
-        "use_src_checkbox": use_src_checkbox,
-        "data_status": data_status,
-        "auto_fill_btn": auto_fill_btn,
-    }
-
-
-def create_generation_section(dit_handler, llm_handler, init_params=None) -> dict:
-    """Create generation section
-    
-    Args:
-        dit_handler: DiT handler instance
-        llm_handler: LM handler instance
-        init_params: Dictionary containing initialization parameters and state.
-                    If None, service will not be pre-initialized.
-    """
-    # Check if service is pre-initialized
-    service_pre_initialized = init_params is not None and init_params.get('pre_initialized', False)
-    
-    with gr.Group():
-        gr.HTML('<div class="section-header"><h3>🎼 ACE-Step V1.5 Demo </h3></div>')
-        
-        # Service Configuration - collapse if pre-initialized
-        accordion_open = not service_pre_initialized
-        with gr.Accordion("🔧 Service Configuration", open=accordion_open) as service_config_accordion:
-            # Dropdown options section - all dropdowns grouped together
-            with gr.Row(equal_height=True):
-                with gr.Column(scale=4):
-                    # Set checkpoint value from init_params if pre-initialized
-                    checkpoint_value = init_params.get('checkpoint') if service_pre_initialized else None
-                    checkpoint_dropdown = gr.Dropdown(
-                        label="Checkpoint File",
-                        choices=dit_handler.get_available_checkpoints(),
-                        value=checkpoint_value,
-                        info="Select a trained model checkpoint file (full path or filename)"
-                    )
-                with gr.Column(scale=1, min_width=90):
-                    refresh_btn = gr.Button("🔄 Refresh", size="sm")
-            
-            with gr.Row():
-                # Get available acestep-v15- model list
-                available_models = dit_handler.get_available_acestep_v15_models()
-                default_model = "acestep-v15-turbo" if "acestep-v15-turbo" in available_models else (available_models[0] if available_models else None)
-                
-                # Set config_path value from init_params if pre-initialized
-                config_path_value = init_params.get('config_path', default_model) if service_pre_initialized else default_model
-                config_path = gr.Dropdown(
-                    label="Main Model Path", 
-                    choices=available_models,
-                    value=config_path_value,
-                    info="Select the model configuration directory (auto-scanned from checkpoints)"
-                )
-                # Set device value from init_params if pre-initialized
-                device_value = init_params.get('device', 'auto') if service_pre_initialized else 'auto'
-                device = gr.Dropdown(
-                    choices=["auto", "cuda", "cpu"],
-                    value=device_value,
-                    label="Device",
-                    info="Processing device (auto-detect recommended)"
-                )
-            
-            with gr.Row():
-                # Get available 5Hz LM model list
-                available_lm_models = llm_handler.get_available_5hz_lm_models()
-                default_lm_model = "acestep-5Hz-lm-0.6B" if "acestep-5Hz-lm-0.6B" in available_lm_models else (available_lm_models[0] if available_lm_models else None)
-                
-                # Set lm_model_path value from init_params if pre-initialized
-                lm_model_path_value = init_params.get('lm_model_path', default_lm_model) if service_pre_initialized else default_lm_model
-                lm_model_path = gr.Dropdown(
-                    label="5Hz LM Model Path",
-                    choices=available_lm_models,
-                    value=lm_model_path_value,
-                    info="Select the 5Hz LM model checkpoint (auto-scanned from checkpoints)"
-                )
-                # Set backend value from init_params if pre-initialized
-                backend_value = init_params.get('backend', 'vllm') if service_pre_initialized else 'vllm'
-                backend_dropdown = gr.Dropdown(
-                    choices=["vllm", "pt"],
-                    value=backend_value,
-                    label="5Hz LM Backend",
-                    info="Select backend for 5Hz LM: vllm (faster) or pt (PyTorch, more compatible)"
-                )
-            
-            # Checkbox options section - all checkboxes grouped together
-            with gr.Row():
-                # Set init_llm value from init_params if pre-initialized
-                init_llm_value = init_params.get('init_llm', True) if service_pre_initialized else True
-                init_llm_checkbox = gr.Checkbox(
-                    label="Initialize 5Hz LM",
-                    value=init_llm_value,
-                    info="Check to initialize 5Hz LM during service initialization",
-                )
-                # Auto-detect flash attention availability
-                flash_attn_available = dit_handler.is_flash_attention_available()
-                # Set use_flash_attention value from init_params if pre-initialized
-                use_flash_attention_value = init_params.get('use_flash_attention', flash_attn_available) if service_pre_initialized else flash_attn_available
-                use_flash_attention_checkbox = gr.Checkbox(
-                    label="Use Flash Attention",
-                    value=use_flash_attention_value,
-                    interactive=flash_attn_available,
-                    info="Enable flash attention for faster inference (requires flash_attn package)" if flash_attn_available else "Flash attention not available (flash_attn package not installed)"
-                )
-                # Set offload_to_cpu value from init_params if pre-initialized
-                offload_to_cpu_value = init_params.get('offload_to_cpu', False) if service_pre_initialized else False
-                offload_to_cpu_checkbox = gr.Checkbox(
-                    label="Offload to CPU",
-                    value=offload_to_cpu_value,
-                    info="Offload models to CPU when not in use to save GPU memory"
-                )
-                # Set offload_dit_to_cpu value from init_params if pre-initialized
-                offload_dit_to_cpu_value = init_params.get('offload_dit_to_cpu', False) if service_pre_initialized else False
-                offload_dit_to_cpu_checkbox = gr.Checkbox(
-                    label="Offload DiT to CPU",
-                    value=offload_dit_to_cpu_value,
-                    info="Offload DiT to CPU (needs Offload to CPU)"
-                )
-            
-            init_btn = gr.Button("Initialize Service", variant="primary", size="lg")
-            # Set init_status value from init_params if pre-initialized
-            init_status_value = init_params.get('init_status', '') if service_pre_initialized else ''
-            init_status = gr.Textbox(label="Status", interactive=False, lines=3, value=init_status_value)
-        
-        # Inputs
-        with gr.Row():
-            with gr.Column(scale=2):
-                with gr.Accordion("📝 Required Inputs", open=True):
-                    # Task type
-                    # Determine initial task_type choices based on default model
-                    default_model_lower = (default_model or "").lower()
-                    if "turbo" in default_model_lower:
-                        initial_task_choices = TASK_TYPES_TURBO
-                    else:
-                        initial_task_choices = TASK_TYPES_BASE
-                    
-                    with gr.Row(equal_height=True):
-                        with gr.Column(scale=2):
-                            task_type = gr.Dropdown(
-                                choices=initial_task_choices,
-                                value="text2music",
-                                label="Task Type",
-                                info="Select the task type for generation",
-                            )
-                        with gr.Column(scale=7):
-                            instruction_display_gen = gr.Textbox(
-                                label="Instruction",
-                                value=DEFAULT_DIT_INSTRUCTION,
-                                interactive=False,
-                                lines=1,
-                                info="Instruction is automatically generated based on task type",
-                            )
-                        with gr.Column(scale=1, min_width=100):
-                            load_file = gr.UploadButton(
-                                "Load",
-                                file_types=[".json"],
-                                file_count="single",
-                                variant="secondary",
-                                size="sm",
-                            )
-                    
-                    track_name = gr.Dropdown(
-                        choices=TRACK_NAMES,
-                        value=None,
-                        label="Track Name",
-                        info="Select track name for lego/extract tasks",
-                        visible=False
-                    )
-                    
-                    complete_track_classes = gr.CheckboxGroup(
-                        choices=TRACK_NAMES,
-                        label="Track Names",
-                        info="Select multiple track classes for complete task",
-                        visible=False
-                    )
-                    
-                    # Audio uploads
-                    audio_uploads_accordion = gr.Accordion("🎵 Audio Uploads", open=False)
-                    with audio_uploads_accordion:
-                        with gr.Row(equal_height=True):
-                            with gr.Column(scale=2):
-                                reference_audio = gr.Audio(
-                                    label="Reference Audio (optional)",
-                                    type="filepath",
-                                )
-                            with gr.Column(scale=7):
-                                src_audio = gr.Audio(
-                                    label="Source Audio (optional)",
-                                    type="filepath",
-                                )
-                            with gr.Column(scale=1, min_width=80):
-                                convert_src_to_codes_btn = gr.Button(
-                                    "Convert to Codes",
-                                    variant="secondary",
-                                    size="sm"
-                                )
-                        
-                    # Audio Codes for text2music (dynamic display based on batch size and allow_lm_batch)
-                    with gr.Accordion("🎼 LM Codes Hints", open=False, visible=True) as text2music_audio_codes_group:
-                        # Single codes input (default mode)
-                        with gr.Row(equal_height=True, visible=True) as codes_single_row:
-                            text2music_audio_code_string = gr.Textbox(
-                                label="LM Codes Hints",
-                                placeholder="<|audio_code_10695|><|audio_code_54246|>...",
-                                lines=6,
-                                info="Paste LM codes hints for text2music generation",
-                                scale=9,
-                            )
-                            transcribe_btn = gr.Button(
-                                "Transcribe",
-                                variant="secondary",
-                                size="sm",
-                                scale=1,
-                            )
-                        
-                        # Multiple codes inputs (batch mode when allow_lm_batch is enabled)
-                        with gr.Row(visible=False) as codes_batch_row:
-                            with gr.Column(visible=True) as codes_col_1:
-                                text2music_audio_code_string_1 = gr.Textbox(
-                                    label="LM Codes Hints (Sample 1)",
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info="Codes for sample 1",
-                                )
-                            with gr.Column(visible=True) as codes_col_2:
-                                text2music_audio_code_string_2 = gr.Textbox(
-                                    label="LM Codes Hints (Sample 2)",
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info="Codes for sample 2",
-                                )
-                            with gr.Column(visible=False) as codes_col_3:
-                                text2music_audio_code_string_3 = gr.Textbox(
-                                    label="LM Codes Hints (Sample 3)",
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info="Codes for sample 3",
-                                )
-                            with gr.Column(visible=False) as codes_col_4:
-                                text2music_audio_code_string_4 = gr.Textbox(
-                                    label="LM Codes Hints (Sample 4)",
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info="Codes for sample 4",
-                                )
-                        
-                        # Additional row for codes 5-8
-                        with gr.Row(visible=False) as codes_batch_row_2:
-                            with gr.Column() as codes_col_5:
-                                text2music_audio_code_string_5 = gr.Textbox(
-                                    label="LM Codes Hints (Sample 5)",
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info="Codes for sample 5",
-                                )
-                            with gr.Column() as codes_col_6:
-                                text2music_audio_code_string_6 = gr.Textbox(
-                                    label="LM Codes Hints (Sample 6)",
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info="Codes for sample 6",
-                                )
-                            with gr.Column() as codes_col_7:
-                                text2music_audio_code_string_7 = gr.Textbox(
-                                    label="LM Codes Hints (Sample 7)",
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info="Codes for sample 7",
-                                )
-                            with gr.Column() as codes_col_8:
-                                text2music_audio_code_string_8 = gr.Textbox(
-                                    label="LM Codes Hints (Sample 8)",
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info="Codes for sample 8",
-                                )
-                    
-                    # Repainting controls
-                    with gr.Group(visible=False) as repainting_group:
-                        gr.HTML("<h5>🎨 Repainting Controls (seconds) </h5>")
-                        with gr.Row():
-                            repainting_start = gr.Number(
-                                label="Repainting Start",
-                                value=0.0,
-                                step=0.1,
-                            )
-                            repainting_end = gr.Number(
-                                label="Repainting End",
-                                value=-1,
-                                minimum=-1,
-                                step=0.1,
-                            )
-                
-                # Music Caption
-                with gr.Accordion("📝 Music Caption", open=True):
-                    with gr.Row(equal_height=True):
-                        captions = gr.Textbox(
-                            label="Music Caption (optional)",
-                            placeholder="A peaceful acoustic guitar melody with soft vocals...",
-                            lines=3,
-                            info="Describe the style, genre, instruments, and mood",
-                            scale=9,
-                        )
-                        sample_btn = gr.Button(
-                            "Sample",
-                            variant="secondary",
-                            size="sm",
-                            scale=1,
-                        )
-                
-                # Lyrics
-                with gr.Accordion("📝 Lyrics", open=True):
-                    lyrics = gr.Textbox(
-                        label="Lyrics (optional)",
-                        placeholder="[Verse 1]\nUnder the starry night\nI feel so alive...",
-                        lines=8,
-                        info="Song lyrics with structure"
-                    )
-                    instrumental_checkbox = gr.Checkbox(
-                        label="Instrumental",
-                        value=False,
-                        scale=1,
-                    )
-                
-                # Optional Parameters
-                with gr.Accordion("⚙️ Optional Parameters", open=True):
-                    with gr.Row():
-                        vocal_language = gr.Dropdown(
-                            choices=VALID_LANGUAGES,
-                            value="unknown",
-                            label="Vocal Language (optional)",
-                            allow_custom_value=True,
-                            info="use `unknown` for inst"
-                        )
-                        bpm = gr.Number(
-                            label="BPM (optional)",
-                            value=None,
-                            step=1,
-                            info="leave empty for N/A"
-                        )
-                        key_scale = gr.Textbox(
-                            label="KeyScale (optional)",
-                            placeholder="Leave empty for N/A",
-                            value="",
-                            info="A-G, #/♭, major/minor"
-                        )
-                        time_signature = gr.Dropdown(
-                            choices=["2", "3", "4", "N/A", ""],
-                            value="",
-                            label="Time Signature (optional)",
-                            allow_custom_value=True,
-                            info="2/4, 3/4, 4/4..."
-                        )
-                        audio_duration = gr.Number(
-                            label="Audio Duration (seconds)",
-                            value=-1,
-                            minimum=-1,
-                            maximum=600.0,
-                            step=0.1,
-                            info="Use -1 for random"
-                        )
-                        batch_size_input = gr.Number(
-                            label="Batch Size",
-                            value=2,
-                            minimum=1,
-                            maximum=8,
-                            step=1,
-                            info="Number of audio files to parallel generate (max 8)"
-                        )
-        
-        # Advanced Settings
-        with gr.Accordion("🔧 Advanced Settings", open=False):
-            with gr.Row():
-                inference_steps = gr.Slider(
-                    minimum=1,
-                    maximum=8,
-                    value=8,
-                    step=1,
-                    label="DiT Inference Steps",
-                    info="Turbo: max 8, Base: max 100"
-                )
-                guidance_scale = gr.Slider(
-                    minimum=1.0,
-                    maximum=15.0,
-                    value=7.0,
-                    step=0.1,
-                    label="DiT Guidance Scale (Only support for base model)",
-                    info="Higher values follow text more closely",
-                    visible=False
-                )
-                with gr.Column():
-                    seed = gr.Textbox(
-                        label="Seed",
-                        value="-1",
-                        info="Use comma-separated values for batches"
-                    )
-                    random_seed_checkbox = gr.Checkbox(
-                        label="Random Seed",
-                        value=True,
-                        info="Enable to auto-generate seeds"
-                    )
-                audio_format = gr.Dropdown(
-                    choices=["mp3", "flac"],
-                    value="mp3",
-                    label="Audio Format",
-                    info="Audio format for saved files"
-                )
-            
-            with gr.Row():
-                use_adg = gr.Checkbox(
-                    label="Use ADG",
-                    value=False,
-                    info="Enable Angle Domain Guidance",
-                    visible=False
-                )
-            
-            with gr.Row():
-                cfg_interval_start = gr.Slider(
-                    minimum=0.0,
-                    maximum=1.0,
-                    value=0.0,
-                    step=0.01,
-                    label="CFG Interval Start",
-                    visible=False
-                )
-                cfg_interval_end = gr.Slider(
-                    minimum=0.0,
-                    maximum=1.0,
-                    value=1.0,
-                    step=0.01,
-                    label="CFG Interval End",
-                    visible=False
-                )
-
-            # LM (Language Model) Parameters
-            gr.HTML("<h4>🤖 LM Generation Parameters</h4>")
-            with gr.Row():
-                lm_temperature = gr.Slider(
-                    label="LM Temperature",
-                    minimum=0.0,
-                    maximum=2.0,
-                    value=0.85,
-                    step=0.1,
-                    scale=1,
-                    info="5Hz LM temperature (higher = more random)"
-                )
-                lm_cfg_scale = gr.Slider(
-                    label="LM CFG Scale",
-                    minimum=1.0,
-                    maximum=3.0,
-                    value=2.0,
-                    step=0.1,
-                    scale=1,
-                    info="5Hz LM CFG (1.0 = no CFG)"
-                )
-                lm_top_k = gr.Slider(
-                    label="LM Top-K",
-                    minimum=0,
-                    maximum=100,
-                    value=0,
-                    step=1,
-                    scale=1,
-                    info="Top-K (0 = disabled)"
-                )
-                lm_top_p = gr.Slider(
-                    label="LM Top-P",
-                    minimum=0.0,
-                    maximum=1.0,
-                    value=0.9,
-                    step=0.01,
-                    scale=1,
-                    info="Top-P (1.0 = disabled)"
-                )
-            
-            with gr.Row():
-                lm_negative_prompt = gr.Textbox(
-                    label="LM Negative Prompt",
-                    value="NO USER INPUT",
-                    placeholder="Enter negative prompt for CFG (default: NO USER INPUT)",
-                    info="Negative prompt (use when LM CFG Scale > 1.0)",
-                    lines=2,
-                    scale=2,
-                )
-            
-            with gr.Row():
-                use_cot_metas = gr.Checkbox(
-                    label="CoT Metas",
-                    value=True,
-                    info="Use LM to generate CoT metadata (uncheck to skip LM CoT generation)",
-                    scale=1,
-                )
-                use_cot_language = gr.Checkbox(
-                    label="CoT Language",
-                    value=True,
-                    info="Generate language in CoT (chain-of-thought)",
-                    scale=1,
-                )
-                constrained_decoding_debug = gr.Checkbox(
-                    label="Constrained Decoding Debug",
-                    value=False,
-                    info="Enable debug logging for constrained decoding (check to see detailed logs)",
-                    scale=1,
-                )
-            
-            with gr.Row():
-                auto_score = gr.Checkbox(
-                    label="Auto Score",
-                    value=False,
-                    info="Automatically calculate quality scores for all generated audios",
-                    scale=1,
-                )
-                lm_batch_chunk_size = gr.Number(
-                    label="LM Batch Chunk Size",
-                    value=8,
-                    minimum=1,
-                    maximum=32,
-                    step=1,
-                    info="Max items per LM batch chunk (default: 8, limited by GPU memory)",
-                    scale=1,
-                )
-            
-            with gr.Row():
-                audio_cover_strength = gr.Slider(
-                    minimum=0.0,
-                    maximum=1.0,
-                    value=1.0,
-                    step=0.01,
-                    label="LM Codes Strength",
-                    info="Control how many denoising steps use LM-generated codes",
-                    scale=1,
-                )
-                score_scale = gr.Slider(
-                    minimum=0.01,
-                    maximum=1.0,
-                    value=0.5,
-                    step=0.01,
-                    label="Quality Score Sensitivity",
-                    info="Lower = more sensitive (default: 1.0). Adjusts how PMI maps to [0,1]",
-                    scale=1,
-                )
-                output_alignment_preference = gr.Checkbox(
-                    label="Output Attention Focus Score (disabled)",
-                    value=False,
-                    info="Output attention focus score analysis",
-                    interactive=False,
-                    scale=1,
-                )
-        
-        # Set generate_btn to interactive if service is pre-initialized
-        generate_btn_interactive = init_params.get('enable_generate', False) if service_pre_initialized else False
-        with gr.Row(equal_height=True):
-            think_checkbox = gr.Checkbox(
-                label="Think",
-                value=True,
-                scale=1,
-            )
-            allow_lm_batch = gr.Checkbox(
-                label="ParallelThinking",
-                value=True,
-                scale=1,
-            )
-            generate_btn = gr.Button("🎵 Generate Music", variant="primary", size="lg", interactive=generate_btn_interactive, scale=9)
-            autogen_checkbox = gr.Checkbox(
-                label="AutoGen",
-                value=True,
-                scale=1,
-            )
-            use_cot_caption = gr.Checkbox(
-                label="CaptionRewrite",
-                value=True,
-                scale=1,
-            )
-    
-    return {
-        "service_config_accordion": service_config_accordion,
-        "checkpoint_dropdown": checkpoint_dropdown,
-        "refresh_btn": refresh_btn,
-        "config_path": config_path,
-        "device": device,
-        "init_btn": init_btn,
-        "init_status": init_status,
-        "lm_model_path": lm_model_path,
-        "init_llm_checkbox": init_llm_checkbox,
-        "backend_dropdown": backend_dropdown,
-        "use_flash_attention_checkbox": use_flash_attention_checkbox,
-        "offload_to_cpu_checkbox": offload_to_cpu_checkbox,
-        "offload_dit_to_cpu_checkbox": offload_dit_to_cpu_checkbox,
-        "task_type": task_type,
-        "instruction_display_gen": instruction_display_gen,
-        "track_name": track_name,
-        "complete_track_classes": complete_track_classes,
-        "audio_uploads_accordion": audio_uploads_accordion,
-        "reference_audio": reference_audio,
-        "src_audio": src_audio,
-        "convert_src_to_codes_btn": convert_src_to_codes_btn,
-        "text2music_audio_code_string": text2music_audio_code_string,
-        "transcribe_btn": transcribe_btn,
-        "text2music_audio_codes_group": text2music_audio_codes_group,
-        "lm_temperature": lm_temperature,
-        "lm_cfg_scale": lm_cfg_scale,
-        "lm_top_k": lm_top_k,
-        "lm_top_p": lm_top_p,
-        "lm_negative_prompt": lm_negative_prompt,
-        "use_cot_metas": use_cot_metas,
-        "use_cot_caption": use_cot_caption,
-        "use_cot_language": use_cot_language,
-        "repainting_group": repainting_group,
-        "repainting_start": repainting_start,
-        "repainting_end": repainting_end,
-        "audio_cover_strength": audio_cover_strength,
-        "captions": captions,
-        "sample_btn": sample_btn,
-        "load_file": load_file,
-        "lyrics": lyrics,
-        "vocal_language": vocal_language,
-        "bpm": bpm,
-        "key_scale": key_scale,
-        "time_signature": time_signature,
-        "audio_duration": audio_duration,
-        "batch_size_input": batch_size_input,
-        "inference_steps": inference_steps,
-        "guidance_scale": guidance_scale,
-        "seed": seed,
-        "random_seed_checkbox": random_seed_checkbox,
-        "use_adg": use_adg,
-        "cfg_interval_start": cfg_interval_start,
-        "cfg_interval_end": cfg_interval_end,
-        "audio_format": audio_format,
-        "output_alignment_preference": output_alignment_preference,
-        "think_checkbox": think_checkbox,
-        "autogen_checkbox": autogen_checkbox,
-        "generate_btn": generate_btn,
-        "instrumental_checkbox": instrumental_checkbox,
-        "constrained_decoding_debug": constrained_decoding_debug,
-        "score_scale": score_scale,
-        "allow_lm_batch": allow_lm_batch,
-        "auto_score": auto_score,
-        "lm_batch_chunk_size": lm_batch_chunk_size,
-        "codes_single_row": codes_single_row,
-        "codes_batch_row": codes_batch_row,
-        "codes_batch_row_2": codes_batch_row_2,
-        "text2music_audio_code_string_1": text2music_audio_code_string_1,
-        "text2music_audio_code_string_2": text2music_audio_code_string_2,
-        "text2music_audio_code_string_3": text2music_audio_code_string_3,
-        "text2music_audio_code_string_4": text2music_audio_code_string_4,
-        "text2music_audio_code_string_5": text2music_audio_code_string_5,
-        "text2music_audio_code_string_6": text2music_audio_code_string_6,
-        "text2music_audio_code_string_7": text2music_audio_code_string_7,
-        "text2music_audio_code_string_8": text2music_audio_code_string_8,
-        "codes_col_1": codes_col_1,
-        "codes_col_2": codes_col_2,
-        "codes_col_3": codes_col_3,
-        "codes_col_4": codes_col_4,
-        "codes_col_5": codes_col_5,
-        "codes_col_6": codes_col_6,
-        "codes_col_7": codes_col_7,
-        "codes_col_8": codes_col_8,
-    }
-
-
-def create_results_section(dit_handler) -> dict:
-    """Create results display section"""
-    with gr.Group():
-        gr.HTML('<div class="section-header"><h3>🎧 Generated Results</h3></div>')
-        
-        # Hidden state to store LM-generated metadata
-        lm_metadata_state = gr.State(value=None)
-        
-        # Hidden state to track if caption/metadata is from formatted source (LM/transcription)
-        is_format_caption_state = gr.State(value=False)
-        
-        # Batch management states
-        current_batch_index = gr.State(value=0)  # Currently displayed batch index
-        total_batches = gr.State(value=1)  # Total number of batches generated
-        batch_queue = gr.State(value={})  # Dictionary storing all batch data
-        generation_params_state = gr.State(value={})  # Store generation parameters for next batches
-        is_generating_background = gr.State(value=False)  # Background generation flag
-        
-        status_output = gr.Textbox(label="Generation Status", interactive=False)
-        
-        # Batch navigation controls
-        with gr.Row(equal_height=True):
-            prev_batch_btn = gr.Button(
-                "◀ Previous",
-                variant="secondary",
-                interactive=False,
-                scale=1,
-                size="sm"
-            )
-            batch_indicator = gr.Textbox(
-                label="Current Batch",
-                value="Batch 1 / 1",
-                interactive=False,
-                scale=3
-            )
-            next_batch_status = gr.Textbox(
-                label="Next Batch Status",
-                value="",
-                interactive=False,
-                scale=3
-            )
-            next_batch_btn = gr.Button(
-                "Next ▶",
-                variant="primary",
-                interactive=False,
-                scale=1,
-                size="sm"
-            )
-        
-        # All audio components in one row with dynamic visibility
-        with gr.Row():
-            with gr.Column(visible=True) as audio_col_1:
-                generated_audio_1 = gr.Audio(
-                    label="🎵 Generated Music (Sample 1)",
-                    type="filepath",
-                    interactive=False
-                )
-                with gr.Row(equal_height=True):
-                    send_to_src_btn_1 = gr.Button(
-                        "🔗 Send To Src Audio",
-                        variant="secondary",
-                        size="sm",
-                        scale=1
-                    )
-                    save_btn_1 = gr.Button(
-                        "💾 Save",
-                        variant="primary",
-                        size="sm",
-                        scale=1
-                    )
-                    score_btn_1 = gr.Button(
-                        "📊 Score",
-                        variant="secondary",
-                        size="sm",
-                        scale=1
-                    )
-                score_display_1 = gr.Textbox(
-                    label="Quality Score (Sample 1)",
-                    interactive=False,
-                    placeholder="Click 'Score' to calculate perplexity-based quality score"
-                )
-            with gr.Column(visible=True) as audio_col_2:
-                generated_audio_2 = gr.Audio(
-                    label="🎵 Generated Music (Sample 2)",
-                    type="filepath",
-                    interactive=False
-                )
-                with gr.Row(equal_height=True):
-                    send_to_src_btn_2 = gr.Button(
-                        "🔗 Send To Src Audio",
-                        variant="secondary",
-                        size="sm",
-                        scale=1
-                    )
-                    save_btn_2 = gr.Button(
-                        "💾 Save",
-                        variant="primary",
-                        size="sm",
-                        scale=1
-                    )
-                    score_btn_2 = gr.Button(
-                        "📊 Score",
-                        variant="secondary",
-                        size="sm",
-                        scale=1
-                    )
-                score_display_2 = gr.Textbox(
-                    label="Quality Score (Sample 2)",
-                    interactive=False,
-                    placeholder="Click 'Score' to calculate perplexity-based quality score"
-                )
-            with gr.Column(visible=False) as audio_col_3:
-                generated_audio_3 = gr.Audio(
-                    label="🎵 Generated Music (Sample 3)",
-                    type="filepath",
-                    interactive=False
-                )
-                with gr.Row(equal_height=True):
-                    send_to_src_btn_3 = gr.Button(
-                        "🔗 Send To Src Audio",
-                        variant="secondary",
-                        size="sm",
-                        scale=1
-                    )
-                    save_btn_3 = gr.Button(
-                        "💾 Save",
-                        variant="primary",
-                        size="sm",
-                        scale=1
-                    )
-                    score_btn_3 = gr.Button(
-                        "📊 Score",
-                        variant="secondary",
-                        size="sm",
-                        scale=1
-                    )
-                score_display_3 = gr.Textbox(
-                    label="Quality Score (Sample 3)",
-                    interactive=False,
-                    placeholder="Click 'Score' to calculate perplexity-based quality score"
-                )
-            with gr.Column(visible=False) as audio_col_4:
-                generated_audio_4 = gr.Audio(
-                    label="🎵 Generated Music (Sample 4)",
-                    type="filepath",
-                    interactive=False
-                )
-                with gr.Row(equal_height=True):
-                    send_to_src_btn_4 = gr.Button(
-                        "🔗 Send To Src Audio",
-                        variant="secondary",
-                        size="sm",
-                        scale=1
-                    )
-                    save_btn_4 = gr.Button(
-                        "💾 Save",
-                        variant="primary",
-                        size="sm",
-                        scale=1
-                    )
-                    score_btn_4 = gr.Button(
-                        "📊 Score",
-                        variant="secondary",
-                        size="sm",
-                        scale=1
-                    )
-                score_display_4 = gr.Textbox(
-                    label="Quality Score (Sample 4)",
-                    interactive=False,
-                    placeholder="Click 'Score' to calculate perplexity-based quality score"
-                )
-        
-        # Second row for batch size 5-8 (initially hidden)
-        with gr.Row(visible=False) as audio_row_5_8:
-            with gr.Column() as audio_col_5:
-                generated_audio_5 = gr.Audio(
-                    label="🎵 Generated Music (Sample 5)",
-                    type="filepath",
-                    interactive=False
-                )
-                with gr.Row(equal_height=True):
-                    send_to_src_btn_5 = gr.Button("🔗 Send To Src Audio", variant="secondary", size="sm", scale=1)
-                    save_btn_5 = gr.Button("💾 Save", variant="primary", size="sm", scale=1)
-                    score_btn_5 = gr.Button("📊 Score", variant="secondary", size="sm", scale=1)
-                score_display_5 = gr.Textbox(
-                    label="Quality Score (Sample 5)",
-                    interactive=False,
-                    placeholder="Click 'Score' to calculate perplexity-based quality score"
-                )
-            with gr.Column() as audio_col_6:
-                generated_audio_6 = gr.Audio(
-                    label="🎵 Generated Music (Sample 6)",
-                    type="filepath",
-                    interactive=False
-                )
-                with gr.Row(equal_height=True):
-                    send_to_src_btn_6 = gr.Button("🔗 Send To Src Audio", variant="secondary", size="sm", scale=1)
-                    save_btn_6 = gr.Button("💾 Save", variant="primary", size="sm", scale=1)
-                    score_btn_6 = gr.Button("📊 Score", variant="secondary", size="sm", scale=1)
-                score_display_6 = gr.Textbox(
-                    label="Quality Score (Sample 6)",
-                    interactive=False,
-                    placeholder="Click 'Score' to calculate perplexity-based quality score"
-                )
-            with gr.Column() as audio_col_7:
-                generated_audio_7 = gr.Audio(
-                    label="🎵 Generated Music (Sample 7)",
-                    type="filepath",
-                    interactive=False
-                )
-                with gr.Row(equal_height=True):
-                    send_to_src_btn_7 = gr.Button("🔗 Send To Src Audio", variant="secondary", size="sm", scale=1)
-                    save_btn_7 = gr.Button("💾 Save", variant="primary", size="sm", scale=1)
-                    score_btn_7 = gr.Button("📊 Score", variant="secondary", size="sm", scale=1)
-                score_display_7 = gr.Textbox(
-                    label="Quality Score (Sample 7)",
-                    interactive=False,
-                    placeholder="Click 'Score' to calculate perplexity-based quality score"
-                )
-            with gr.Column() as audio_col_8:
-                generated_audio_8 = gr.Audio(
-                    label="🎵 Generated Music (Sample 8)",
-                    type="filepath",
-                    interactive=False
-                )
-                with gr.Row(equal_height=True):
-                    send_to_src_btn_8 = gr.Button("🔗 Send To Src Audio", variant="secondary", size="sm", scale=1)
-                    save_btn_8 = gr.Button("💾 Save", variant="primary", size="sm", scale=1)
-                    score_btn_8 = gr.Button("📊 Score", variant="secondary", size="sm", scale=1)
-                score_display_8 = gr.Textbox(
-                    label="Quality Score (Sample 8)",
-                    interactive=False,
-                    placeholder="Click 'Score' to calculate perplexity-based quality score"
-                )
-
-        with gr.Accordion("📁 Batch Results & Generation Details", open=False):
-            generated_audio_batch = gr.File(
-                label="📁 All Generated Files (Download)",
-                file_count="multiple",
-                interactive=False
-            )
-            generation_info = gr.Markdown(label="Generation Details")
-
-        with gr.Accordion("⚖️ Attention Focus Score Analysis", open=False):
-            with gr.Row():
-                with gr.Column():
-                    align_score_1 = gr.Textbox(label="Attention Focus Score (Sample 1)", interactive=False)
-                    align_text_1 = gr.Textbox(label="Lyric Timestamps (Sample 1)", interactive=False, lines=10)
-                    align_plot_1 = gr.Plot(label="Attention Focus Score Heatmap (Sample 1)")
-                with gr.Column():
-                    align_score_2 = gr.Textbox(label="Attention Focus Score (Sample 2)", interactive=False)
-                    align_text_2 = gr.Textbox(label="Lyric Timestamps (Sample 2)", interactive=False, lines=10)
-                    align_plot_2 = gr.Plot(label="Attention Focus Score Heatmap (Sample 2)")
-    
-    return {
-        "lm_metadata_state": lm_metadata_state,
-        "is_format_caption_state": is_format_caption_state,
-        "current_batch_index": current_batch_index,
-        "total_batches": total_batches,
-        "batch_queue": batch_queue,
-        "generation_params_state": generation_params_state,
-        "is_generating_background": is_generating_background,
-        "status_output": status_output,
-        "prev_batch_btn": prev_batch_btn,
-        "batch_indicator": batch_indicator,
-        "next_batch_btn": next_batch_btn,
-        "next_batch_status": next_batch_status,
-        "generated_audio_1": generated_audio_1,
-        "generated_audio_2": generated_audio_2,
-        "generated_audio_3": generated_audio_3,
-        "generated_audio_4": generated_audio_4,
-        "generated_audio_5": generated_audio_5,
-        "generated_audio_6": generated_audio_6,
-        "generated_audio_7": generated_audio_7,
-        "generated_audio_8": generated_audio_8,
-        "audio_row_5_8": audio_row_5_8,
-        "audio_col_1": audio_col_1,
-        "audio_col_2": audio_col_2,
-        "audio_col_3": audio_col_3,
-        "audio_col_4": audio_col_4,
-        "audio_col_5": audio_col_5,
-        "audio_col_6": audio_col_6,
-        "audio_col_7": audio_col_7,
-        "audio_col_8": audio_col_8,
-        "send_to_src_btn_1": send_to_src_btn_1,
-        "send_to_src_btn_2": send_to_src_btn_2,
-        "send_to_src_btn_3": send_to_src_btn_3,
-        "send_to_src_btn_4": send_to_src_btn_4,
-        "send_to_src_btn_5": send_to_src_btn_5,
-        "send_to_src_btn_6": send_to_src_btn_6,
-        "send_to_src_btn_7": send_to_src_btn_7,
-        "send_to_src_btn_8": send_to_src_btn_8,
-        "save_btn_1": save_btn_1,
-        "save_btn_2": save_btn_2,
-        "save_btn_3": save_btn_3,
-        "save_btn_4": save_btn_4,
-        "save_btn_5": save_btn_5,
-        "save_btn_6": save_btn_6,
-        "save_btn_7": save_btn_7,
-        "save_btn_8": save_btn_8,
-        "score_btn_1": score_btn_1,
-        "score_btn_2": score_btn_2,
-        "score_btn_3": score_btn_3,
-        "score_btn_4": score_btn_4,
-        "score_btn_5": score_btn_5,
-        "score_btn_6": score_btn_6,
-        "score_btn_7": score_btn_7,
-        "score_btn_8": score_btn_8,
-        "score_display_1": score_display_1,
-        "score_display_2": score_display_2,
-        "score_display_3": score_display_3,
-        "score_display_4": score_display_4,
-        "score_display_5": score_display_5,
-        "score_display_6": score_display_6,
-        "score_display_7": score_display_7,
-        "score_display_8": score_display_8,
-        "generated_audio_batch": generated_audio_batch,
-        "generation_info": generation_info,
-        "align_score_1": align_score_1,
-        "align_text_1": align_text_1,
-        "align_plot_1": align_plot_1,
-        "align_score_2": align_score_2,
-        "align_text_2": align_text_2,
-        "align_plot_2": align_plot_2,
-    }
+from acestep.gradio_ui.i18n import t
 
 
 def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, dataset_section, generation_section, results_section):
@@ -1175,6 +32,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         allow_lm_batch=False,
         batch_size=2,
         generation_params=None,
+        lm_generated_metadata=None,
         status="completed"
     ):
         """Store batch results in queue with ALL generation parameters
@@ -1185,6 +43,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             allow_lm_batch: Whether batch LM mode was used for this batch
             batch_size: Batch size used for this batch
             generation_params: Complete dictionary of ALL generation parameters used
+            lm_generated_metadata: LM-generated metadata for scoring (optional)
         """
         import datetime
         batch_queue[batch_index] = {
@@ -1197,13 +56,14 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             "allow_lm_batch": allow_lm_batch,  # Store batch mode setting
             "batch_size": batch_size,  # Store batch size
             "generation_params": generation_params if generation_params else {},  # Store ALL parameters
+            "lm_generated_metadata": lm_generated_metadata,  # Store LM metadata for scoring
             "timestamp": datetime.datetime.now().isoformat()
         }
         return batch_queue
     
     def update_batch_indicator(current_batch, total_batches):
         """Update batch indicator text"""
-        return f"Batch {current_batch + 1} / {total_batches}"
+        return t("results.batch_indicator", current=current_batch + 1, total=total_batches)
     
     def update_navigation_buttons(current_batch, total_batches):
         """Determine navigation button states"""
@@ -1211,8 +71,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         can_go_next = current_batch < total_batches - 1
         return can_go_previous, can_go_next
     
-    def save_metadata(
-        task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature, audio_duration,
+    def save_audio_and_metadata(
+        audio_path, task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature, audio_duration,
         batch_size_input, inference_steps, guidance_scale, seed, random_seed_checkbox,
         use_adg, cfg_interval_start, cfg_interval_end, audio_format,
         lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
@@ -1220,67 +80,96 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         think_checkbox, text2music_audio_code_string, repainting_start, repainting_end,
         track_name, complete_track_classes, lm_metadata
     ):
-        """Save all generation parameters to a JSON file"""
+        """Save audio file and its metadata as a zip package"""
         import datetime
+        import shutil
+        import zipfile
         
-        # Create metadata dictionary
-        metadata = {
-            "saved_at": datetime.datetime.now().isoformat(),
-            "task_type": task_type,
-            "caption": captions or "",
-            "lyrics": lyrics or "",
-            "vocal_language": vocal_language,
-            "bpm": bpm if bpm is not None else None,
-            "keyscale": key_scale or "",
-            "timesignature": time_signature or "",
-            "duration": audio_duration if audio_duration is not None else -1,
-            "batch_size": batch_size_input,
-            "inference_steps": inference_steps,
-            "guidance_scale": guidance_scale,
-            "seed": seed,
-            "random_seed": False, # Disable random seed for reproducibility
-            "use_adg": use_adg,
-            "cfg_interval_start": cfg_interval_start,
-            "cfg_interval_end": cfg_interval_end,
-            "audio_format": audio_format,
-            "lm_temperature": lm_temperature,
-            "lm_cfg_scale": lm_cfg_scale,
-            "lm_top_k": lm_top_k,
-            "lm_top_p": lm_top_p,
-            "lm_negative_prompt": lm_negative_prompt,
-            "use_cot_caption": use_cot_caption,
-            "use_cot_language": use_cot_language,
-            "audio_cover_strength": audio_cover_strength,
-            "think": think_checkbox,
-            "audio_codes": text2music_audio_code_string or "",
-            "repainting_start": repainting_start,
-            "repainting_end": repainting_end,
-            "track_name": track_name,
-            "complete_track_classes": complete_track_classes or [],
-        }
+        if audio_path is None:
+            gr.Warning(t("messages.no_audio_to_save"))
+            return None
         
-        # Add LM-generated metadata if available
-        if lm_metadata:
-            metadata["lm_generated_metadata"] = lm_metadata
-        
-        # Save to file
         try:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"generation_params_{timestamp}.json"
+            # Create metadata dictionary
+            metadata = {
+                "saved_at": datetime.datetime.now().isoformat(),
+                "task_type": task_type,
+                "caption": captions or "",
+                "lyrics": lyrics or "",
+                "vocal_language": vocal_language,
+                "bpm": bpm if bpm is not None else None,
+                "keyscale": key_scale or "",
+                "timesignature": time_signature or "",
+                "duration": audio_duration if audio_duration is not None else -1,
+                "batch_size": batch_size_input,
+                "inference_steps": inference_steps,
+                "guidance_scale": guidance_scale,
+                "seed": seed,
+                "random_seed": False,  # Disable random seed for reproducibility
+                "use_adg": use_adg,
+                "cfg_interval_start": cfg_interval_start,
+                "cfg_interval_end": cfg_interval_end,
+                "audio_format": audio_format,
+                "lm_temperature": lm_temperature,
+                "lm_cfg_scale": lm_cfg_scale,
+                "lm_top_k": lm_top_k,
+                "lm_top_p": lm_top_p,
+                "lm_negative_prompt": lm_negative_prompt,
+                "use_cot_caption": use_cot_caption,
+                "use_cot_language": use_cot_language,
+                "audio_cover_strength": audio_cover_strength,
+                "think": think_checkbox,
+                "audio_codes": text2music_audio_code_string or "",
+                "repainting_start": repainting_start,
+                "repainting_end": repainting_end,
+                "track_name": track_name,
+                "complete_track_classes": complete_track_classes or [],
+            }
             
-            with open(filename, 'w', encoding='utf-8') as f:
+            # Add LM-generated metadata if available
+            if lm_metadata:
+                metadata["lm_generated_metadata"] = lm_metadata
+            
+            # Generate timestamp and base name
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Extract audio filename extension
+            audio_ext = os.path.splitext(audio_path)[1]
+            
+            # Create temporary directory for packaging
+            temp_dir = tempfile.mkdtemp()
+            
+            # Save JSON metadata
+            json_path = os.path.join(temp_dir, f"metadata_{timestamp}.json")
+            with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, indent=2, ensure_ascii=False)
             
-            gr.Info(f"✅ Parameters saved to {filename}")
-            return filename
+            # Copy audio file
+            audio_copy_path = os.path.join(temp_dir, f"audio_{timestamp}{audio_ext}")
+            shutil.copy2(audio_path, audio_copy_path)
+            
+            # Create zip file
+            zip_path = os.path.join(tempfile.gettempdir(), f"music_package_{timestamp}.zip")
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                zipf.write(audio_copy_path, os.path.basename(audio_copy_path))
+                zipf.write(json_path, os.path.basename(json_path))
+            
+            # Clean up temp directory
+            shutil.rmtree(temp_dir)
+            
+            gr.Info(t("messages.save_success", filename=os.path.basename(zip_path)))
+            return zip_path
+            
         except Exception as e:
-            gr.Warning(f"❌ Failed to save parameters: {str(e)}")
+            gr.Warning(t("messages.save_failed", error=str(e)))
+            import traceback
+            traceback.print_exc()
             return None
     
     def load_metadata(file_obj):
         """Load generation parameters from a JSON file"""
         if file_obj is None:
-            gr.Warning("⚠️ No file selected")
+            gr.Warning(t("messages.no_file_selected"))
             return [None] * 31 + [False]  # Return None for all fields, False for is_format_caption
         
         try:
@@ -1346,7 +235,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             track_name = metadata.get('track_name')
             complete_track_classes = metadata.get('complete_track_classes', [])
             
-            gr.Info(f"✅ Parameters loaded from {os.path.basename(filepath)}")
+            gr.Info(t("messages.params_loaded", filename=os.path.basename(filepath)))
             
             return (
                 task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature,
@@ -1360,10 +249,10 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             )
             
         except json.JSONDecodeError as e:
-            gr.Warning(f"❌ Invalid JSON file: {str(e)}")
+            gr.Warning(t("messages.invalid_json", error=str(e)))
             return [None] * 31 + [False]
         except Exception as e:
-            gr.Warning(f"❌ Error loading file: {str(e)}")
+            gr.Warning(t("messages.load_error", error=str(e)))
             return [None] * 31 + [False]
     
     def load_random_example(task_type: str):
@@ -1378,7 +267,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         try:
             # Get the project root directory
             current_file = os.path.abspath(__file__)
-            project_root = os.path.dirname(os.path.dirname(current_file))
+            # event.py is in acestep/gradio_ui/, need 3 levels up to reach project root
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
             
             # Construct the examples directory path
             examples_dir = os.path.join(project_root, "examples", task_type)
@@ -1445,18 +335,18 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 if timesignature_value in [None, "N/A"]:
                     timesignature_value = ''
                 
-                gr.Info(f"📁 Loaded example from {os.path.basename(selected_file)}")
+                gr.Info(t("messages.example_loaded", filename=os.path.basename(selected_file)))
                 return caption_value, lyrics_value, think_value, bpm_value, duration_value, keyscale_value, language_value, timesignature_value
                 
             except json.JSONDecodeError as e:
-                gr.Warning(f"Failed to parse JSON file {os.path.basename(selected_file)}: {str(e)}")
+                gr.Warning(t("messages.example_failed", filename=os.path.basename(selected_file), error=str(e)))
                 return "", "", True, None, None, "", "", ""
             except Exception as e:
-                gr.Warning(f"Error reading file {os.path.basename(selected_file)}: {str(e)}")
+                gr.Warning(t("messages.example_error", error=str(e)))
                 return "", "", True, None, None, "", "", ""
                 
         except Exception as e:
-            gr.Warning(f"Error loading example: {str(e)}")
+            gr.Warning(t("messages.example_error", error=str(e)))
             return "", "", True, None, None, "", "", ""
     
     def sample_example_smart(task_type: str, constrained_decoding_debug: bool = False):
@@ -1513,14 +403,14 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                     if timesignature_value in [None, "N/A"]:
                         timesignature_value = ''
                     
-                    gr.Info("🤖 Generated example using LM")
+                    gr.Info(t("messages.lm_generated"))
                     return caption_value, lyrics_value, think_value, bpm_value, duration_value, keyscale_value, language_value, timesignature_value
                 else:
-                    gr.Warning("Failed to generate example using LM, falling back to examples directory")
+                    gr.Warning(t("messages.lm_fallback"))
                     return load_random_example(task_type)
                     
             except Exception as e:
-                gr.Warning(f"Error generating example with LM: {str(e)}, falling back to examples directory")
+                gr.Warning(t("messages.lm_fallback"))
                 return load_random_example(task_type)
         else:
             # LM not initialized, use examples directory
@@ -1612,7 +502,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         if init_llm:
             # Get checkpoint directory
             current_file = os.path.abspath(__file__)
-            project_root = os.path.dirname(os.path.dirname(current_file))
+            # event.py is in acestep/gradio_ui/, need 3 levels up to reach project root
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
             checkpoint_dir = os.path.join(project_root, "checkpoints")
             
             lm_status, lm_success = llm_handler.initialize(
@@ -2187,6 +1078,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         all_audio_paths = result[8]  # generated_audio_batch
         generation_info = result[9]
         seed_value_for_ui = result[11]
+        lm_generated_metadata = result[34]  # Index 34 is lm_metadata_state
         
         # --- FIXED: Corrected index offsets for codes extraction ---
         # Index 25 is score_display_8
@@ -2267,6 +1159,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             allow_lm_batch=allow_lm_batch,  # Store batch mode setting
             batch_size=int(batch_size_input),  # Store batch size
             generation_params=saved_params,  # <-- Use saved_params for accurate history
+            lm_generated_metadata=lm_generated_metadata,  # Store LM metadata for scoring
             status="completed"
         )
         
@@ -2283,7 +1176,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         # Prepare next batch status message
         next_batch_status_text = ""
         if autogen_checkbox:
-            next_batch_status_text = "🔄 AutoGen enabled - next batch will generate after this"
+            next_batch_status_text = t("messages.autogen_enabled")
         
         # Return original results plus batch management state updates
         return result + (
@@ -2295,6 +1188,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             gr.update(interactive=can_go_previous),  # prev_batch_btn
             gr.update(interactive=can_go_next),  # next_batch_btn
             next_batch_status_text,  # next_batch_status
+            gr.update(interactive=True),  # restore_params_btn - Enable after generation
         )
     
     # Background generation function
@@ -2330,7 +1224,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             return (
                 batch_queue,
                 total_batches,
-                f"✅ Batch {next_batch_idx + 1} already ready!",
+                t("messages.batch_ready", n=next_batch_idx + 1),
                 gr.update(interactive=True),
             )
         
@@ -2338,7 +1232,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         total_batches = next_batch_idx + 1
         
         # Update status to show generation starting
-        gr.Info(f"🔄 Starting background generation for Batch {next_batch_idx + 1}...")
+        gr.Info(t("messages.batch_generating", n=next_batch_idx + 1))
         
         # Generate next batch using stored parameters
         params = generation_params.copy()
@@ -2450,6 +1344,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             all_audio_paths = result[8]  # generated_audio_batch
             generation_info = result[9]
             seed_value_for_ui = result[11]
+            lm_generated_metadata = result[34]  # Index 34 is lm_metadata_state
             
             # --- FIXED: Corrected index offsets for codes extraction ---
             # Index 25 is score_display_8
@@ -2489,13 +1384,14 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 allow_lm_batch=allow_lm_batch,  # Store batch mode setting
                 batch_size=int(batch_size),  # Store batch size
                 generation_params=params,  # Store ALL generation parameters used
+                lm_generated_metadata=lm_generated_metadata,  # Store LM metadata for scoring
                 status="completed"
             )
             
             logger.info(f"Batch {next_batch_idx + 1} stored in queue successfully")
             
             # Success message
-            next_batch_status = f"✅ Batch {next_batch_idx + 1} ready! Click 'Next' to view."
+            next_batch_status = t("messages.batch_ready", n=next_batch_idx + 1)
             
             # Enable next button now that batch is ready
             return (
@@ -2507,7 +1403,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         except Exception as e:
             # Handle generation errors
             import traceback
-            error_msg = f"❌ Background generation failed: {str(e)}"
+            error_msg = t("messages.batch_failed", error=str(e))
             gr.Warning(error_msg)
             
             # Mark batch as failed in queue
@@ -2621,6 +1517,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             results_section["prev_batch_btn"],  # NEW: Update prev button state
             results_section["next_batch_btn"],  # NEW: Update next button state
             results_section["next_batch_status"],  # NEW: Update next batch status
+            results_section["restore_params_btn"],  # NEW: Enable restore button after generation
         ]
     ).then(
         # Chain background generation with parameters already stored by generate_with_batch_management
@@ -2951,14 +1848,15 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             lm_metadata: Dictionary containing LM-generated metadata
             
         Returns:
-            Tuple of (audio_file, bpm, caption, duration, key_scale, language, time_signature, is_format_caption)
+            Tuple of (audio_file, bpm, caption, lyrics, duration, key_scale, language, time_signature, is_format_caption)
         """
         if audio_file is None:
-            return None, None, None, None, None, None, None, True  # Keep is_format_caption as True
+            return None, None, None, None, None, None, None, None, True  # Keep is_format_caption as True
         
         # Extract metadata fields if available
         bpm_value = None
         caption_value = None
+        lyrics_value = None
         duration_value = None
         key_scale_value = None
         language_value = None
@@ -2977,6 +1875,10 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             # Caption (Rewritten Caption)
             if lm_metadata.get('caption'):
                 caption_value = lm_metadata.get('caption')
+            
+            # Lyrics
+            if lm_metadata.get('lyrics'):
+                lyrics_value = lm_metadata.get('lyrics')
             
             # Duration
             if lm_metadata.get('duration'):
@@ -3009,6 +1911,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             audio_file,
             bpm_value,
             caption_value,
+            lyrics_value,
             duration_value,
             key_scale_value,
             language_value,
@@ -3026,6 +1929,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["src_audio"],
             generation_section["bpm"],
             generation_section["captions"],
+            generation_section["lyrics"],
             generation_section["audio_duration"],
             generation_section["key_scale"],
             generation_section["vocal_language"],
@@ -3044,6 +1948,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["src_audio"],
             generation_section["bpm"],
             generation_section["captions"],
+            generation_section["lyrics"],
             generation_section["audio_duration"],
             generation_section["key_scale"],
             generation_section["vocal_language"],
@@ -3093,7 +1998,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             Tuple of (status_message, caption, lyrics, bpm, duration, keyscale, language, timesignature)
         """
         if not llm_handler.llm_initialized:
-            return "❌ 5Hz LM not initialized. Please initialize it first.", "", "", None, None, "", "", ""
+            return t("messages.lm_not_initialized"), "", "", None, None, "", "", ""
         
         # If codes are empty, this becomes a "generate example" task
         # Use "NO USER INPUT" as the input to generate a sample
@@ -3244,10 +2149,11 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         outputs=[generation_section["audio_uploads_accordion"]]
     )
     
-    # Save metadata handlers - use JavaScript to trigger automatic download
+    # Save audio and metadata handlers - downloads as zip package
     results_section["save_btn_1"].click(
-        fn=None,
+        fn=save_audio_and_metadata,
         inputs=[
+            results_section["generated_audio_1"],
             generation_section["task_type"],
             generation_section["captions"],
             generation_section["lyrics"],
@@ -3281,78 +2187,13 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["complete_track_classes"],
             results_section["lm_metadata_state"],
         ],
-        outputs=None,
-        js="""
-        (task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature, audio_duration,
-         batch_size_input, inference_steps, guidance_scale, seed, random_seed_checkbox,
-         use_adg, cfg_interval_start, cfg_interval_end, audio_format,
-         lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
-         use_cot_caption, use_cot_language, audio_cover_strength,
-         think_checkbox, text2music_audio_code_string, repainting_start, repainting_end,
-         track_name, complete_track_classes, lm_metadata) => {
-            // Create metadata object
-            const metadata = {
-                saved_at: new Date().toISOString(),
-                task_type: task_type,
-                caption: captions || "",
-                lyrics: lyrics || "",
-                vocal_language: vocal_language,
-                bpm: bpm,
-                keyscale: key_scale || "",
-                timesignature: time_signature || "",
-                duration: audio_duration,
-                batch_size: batch_size_input,
-                inference_steps: inference_steps,
-                guidance_scale: guidance_scale,
-                seed: seed,
-                random_seed: random_seed_checkbox,
-                use_adg: use_adg,
-                cfg_interval_start: cfg_interval_start,
-                cfg_interval_end: cfg_interval_end,
-                audio_format: audio_format,
-                lm_temperature: lm_temperature,
-                lm_cfg_scale: lm_cfg_scale,
-                lm_top_k: lm_top_k,
-                lm_top_p: lm_top_p,
-                lm_negative_prompt: lm_negative_prompt,
-                use_cot_caption: use_cot_caption,
-                use_cot_language: use_cot_language,
-                audio_cover_strength: audio_cover_strength,
-                think: think_checkbox,
-                audio_codes: text2music_audio_code_string || "",
-                repainting_start: repainting_start,
-                repainting_end: repainting_end,
-                track_name: track_name,
-                complete_track_classes: complete_track_classes || []
-            };
-            
-            if (lm_metadata) {
-                metadata.lm_generated_metadata = lm_metadata;
-            }
-            
-            // Create JSON string
-            const jsonStr = JSON.stringify(metadata, null, 2);
-            
-            // Create blob and download
-            const blob = new Blob([jsonStr], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').split('.')[0];
-            a.download = `generation_params_${timestamp}.json`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            
-            return Array(32).fill(null);
-        }
-        """
+        outputs=[gr.File(label="Download Package", visible=False)]
     )
     
     results_section["save_btn_2"].click(
-        fn=None,
+        fn=save_audio_and_metadata,
         inputs=[
+            results_section["generated_audio_2"],
             generation_section["task_type"],
             generation_section["captions"],
             generation_section["lyrics"],
@@ -3386,73 +2227,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["complete_track_classes"],
             results_section["lm_metadata_state"],
         ],
-        outputs=None,
-        js="""
-        (task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature, audio_duration,
-         batch_size_input, inference_steps, guidance_scale, seed, random_seed_checkbox,
-         use_adg, cfg_interval_start, cfg_interval_end, audio_format,
-         lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
-         use_cot_caption, use_cot_language, audio_cover_strength,
-         think_checkbox, text2music_audio_code_string, repainting_start, repainting_end,
-         track_name, complete_track_classes, lm_metadata) => {
-            // Create metadata object
-            const metadata = {
-                saved_at: new Date().toISOString(),
-                task_type: task_type,
-                caption: captions || "",
-                lyrics: lyrics || "",
-                vocal_language: vocal_language,
-                bpm: bpm,
-                keyscale: key_scale || "",
-                timesignature: time_signature || "",
-                duration: audio_duration,
-                batch_size: batch_size_input,
-                inference_steps: inference_steps,
-                guidance_scale: guidance_scale,
-                seed: seed,
-                random_seed: random_seed_checkbox,
-                use_adg: use_adg,
-                cfg_interval_start: cfg_interval_start,
-                cfg_interval_end: cfg_interval_end,
-                audio_format: audio_format,
-                lm_temperature: lm_temperature,
-                lm_cfg_scale: lm_cfg_scale,
-                lm_top_k: lm_top_k,
-                lm_top_p: lm_top_p,
-                lm_negative_prompt: lm_negative_prompt,
-                use_cot_caption: use_cot_caption,
-                use_cot_language: use_cot_language,
-                audio_cover_strength: audio_cover_strength,
-                think: think_checkbox,
-                audio_codes: text2music_audio_code_string || "",
-                repainting_start: repainting_start,
-                repainting_end: repainting_end,
-                track_name: track_name,
-                complete_track_classes: complete_track_classes || []
-            };
-            
-            if (lm_metadata) {
-                metadata.lm_generated_metadata = lm_metadata;
-            }
-            
-            // Create JSON string
-            const jsonStr = JSON.stringify(metadata, null, 2);
-            
-            // Create blob and download
-            const blob = new Blob([jsonStr], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').split('.')[0];
-            a.download = `generation_params_${timestamp}.json`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            
-            return Array(32).fill(null);
-        }
-        """
+        outputs=[gr.File(label="Download Package", visible=False)]
     )
     
     # Load metadata handler - triggered when file is uploaded via UploadButton
@@ -3533,47 +2308,59 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         return batch_queue
     
     def calculate_score_handler_with_selection(
-        allow_lm_batch,
-        codes_single, codes_1, codes_2, codes_3, codes_4, codes_5, codes_6, codes_7, codes_8,
         sample_idx,
-        caption, lyrics, lm_metadata, bpm, key_scale, time_signature, audio_duration, vocal_language, score_scale,
-        current_batch_index, batch_queue
+        score_scale,
+        current_batch_index,
+        batch_queue
     ):
         """
-        Calculate PMI-based quality score for generated audio.
-        Intelligently selects the correct codes based on mode and sample index.
+        Calculate PMI-based quality score - REFACTORED to read from batch_queue only.
+        This ensures scoring uses the actual generation parameters, not current UI values.
         
         Args:
-            allow_lm_batch: Whether batch mode is enabled (from UI, may not match batch settings)
-            codes_single: Codes from single input (when allow_lm_batch=False)
-            codes_1/2/3/4/5/6/7/8: Codes from batch inputs (when allow_lm_batch=True)
             sample_idx: Which sample to score (1-8)
+            score_scale: Sensitivity scale parameter (tool setting, can be from UI)
             current_batch_index: Current batch index
-            batch_queue: Batch queue to update with score
-            ... (other parameters same as before)
+            batch_queue: Batch queue containing historical generation data
         """
-        # CRITICAL FIX: Use the stored batch settings, not the current UI values
-        # This ensures that when we switch between batches, we use the correct codes
-        batch_allow_lm_batch = allow_lm_batch  # Default to UI value
-        if current_batch_index in batch_queue:
-            batch_data = batch_queue[current_batch_index]
-            # Use stored batch setting if available
-            if "allow_lm_batch" in batch_data:
-                batch_allow_lm_batch = batch_data["allow_lm_batch"]
+        if current_batch_index not in batch_queue:
+            return t("messages.scoring_failed"), batch_queue
         
-        # Select the correct audio codes based on the STORED batch mode setting
-        if batch_allow_lm_batch:
-            # Batch mode: use corresponding batch codes
-            codes_map = {
-                1: codes_1, 2: codes_2, 3: codes_3, 4: codes_4,
-                5: codes_5, 6: codes_6, 7: codes_7, 8: codes_8
-            }
-            audio_codes_str = codes_map.get(sample_idx, codes_single)
+        batch_data = batch_queue[current_batch_index]
+        params = batch_data.get("generation_params", {})
+        
+        # Read ALL parameters from historical batch data
+        caption = params.get("captions", "")
+        lyrics = params.get("lyrics", "")
+        bpm = params.get("bpm")
+        key_scale = params.get("key_scale", "")
+        time_signature = params.get("time_signature", "")
+        audio_duration = params.get("audio_duration", -1)
+        vocal_language = params.get("vocal_language", "")
+        
+        # Get LM metadata from batch_data (if it was saved during generation)
+        lm_metadata = batch_data.get("lm_generated_metadata", None)
+        
+        # Get codes from batch_data
+        stored_codes = batch_data.get("codes", "")
+        stored_allow_lm_batch = batch_data.get("allow_lm_batch", False)
+        
+        # Select correct codes for this sample
+        audio_codes_str = ""
+        if stored_allow_lm_batch and isinstance(stored_codes, list):
+            # Batch mode: use specific sample's codes
+            if 0 <= sample_idx - 1 < len(stored_codes):
+                audio_codes_str = stored_codes[sample_idx - 1]
         else:
-            # Single mode: all use same codes
-            audio_codes_str = codes_single
+            # Single mode: all samples use same codes
+            audio_codes_str = stored_codes if isinstance(stored_codes, str) else ""
         
-        score_display = calculate_score_handler(audio_codes_str, caption, lyrics, lm_metadata, bpm, key_scale, time_signature, audio_duration, vocal_language, score_scale)
+        # Calculate score using historical parameters
+        score_display = calculate_score_handler(
+            audio_codes_str, caption, lyrics, lm_metadata,
+            bpm, key_scale, time_signature, audio_duration, vocal_language,
+            score_scale
+        )
         
         # Update batch_queue with the calculated score
         batch_queue = update_batch_score(current_batch_index, batch_queue, sample_idx, score_display)
@@ -3605,10 +2392,10 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         from acestep.test_time_scaling import calculate_pmi_score_per_condition
         
         if not llm_handler.llm_initialized:
-            return "❌ LLM not initialized. Please initialize 5Hz LM first."
+            return t("messages.lm_not_initialized")
         
         if not audio_codes_str or not audio_codes_str.strip():
-            return "❌ No audio codes available. Please generate music first."
+            return t("messages.no_codes")
         
         try:
             # Build metadata dictionary from both LM metadata and user inputs
@@ -3659,7 +2446,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             
             # Format display string with per-condition breakdown
             if global_score == 0.0 and not scores_per_condition:
-                return f"❌ Scoring failed: {status}"
+                return t("messages.score_failed", error=status)
             else:
                 # Build per-condition scores display
                 condition_lines = []
@@ -3678,33 +2465,15 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 
         except Exception as e:
             import traceback
-            error_msg = f"❌ Error calculating score: {str(e)}\n{traceback.format_exc()}"
+            error_msg = t("messages.score_error", error=str(e)) + f"\n{traceback.format_exc()}"
             return error_msg
     
-    # Connect score buttons to handlers with correct codes selection
-    # Define common inputs template for score buttons
+    # Connect score buttons - REFACTORED: Read from batch_queue only, not UI
     def get_score_btn_inputs(sample_idx):
+        """Simplified score inputs - only batch data, no UI components"""
         return [
-            generation_section["allow_lm_batch"],
-            generation_section["text2music_audio_code_string"],
-            generation_section["text2music_audio_code_string_1"],
-            generation_section["text2music_audio_code_string_2"],
-            generation_section["text2music_audio_code_string_3"],
-            generation_section["text2music_audio_code_string_4"],
-            generation_section["text2music_audio_code_string_5"],
-            generation_section["text2music_audio_code_string_6"],
-            generation_section["text2music_audio_code_string_7"],
-            generation_section["text2music_audio_code_string_8"],
             gr.State(value=sample_idx),
-            generation_section["captions"],
-            generation_section["lyrics"],
-            results_section["lm_metadata_state"],
-            generation_section["bpm"],
-            generation_section["key_scale"],
-            generation_section["time_signature"],
-            generation_section["audio_duration"],
-            generation_section["vocal_language"],
-            generation_section["score_scale"],
+            generation_section["score_scale"],  # Only UI param is the tool setting
             results_section["current_batch_index"],
             results_section["batch_queue"],
         ]
@@ -3768,6 +2537,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["src_audio"],
             generation_section["bpm"],
             generation_section["captions"],
+            generation_section["lyrics"],
             generation_section["audio_duration"],
             generation_section["key_scale"],
             generation_section["vocal_language"],
@@ -3786,6 +2556,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["src_audio"],
             generation_section["bpm"],
             generation_section["captions"],
+            generation_section["lyrics"],
             generation_section["audio_duration"],
             generation_section["key_scale"],
             generation_section["vocal_language"],
@@ -3800,8 +2571,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         inputs=[results_section["generated_audio_5"], results_section["lm_metadata_state"]],
         outputs=[
             generation_section["src_audio"], generation_section["bpm"], generation_section["captions"],
-            generation_section["audio_duration"], generation_section["key_scale"], generation_section["vocal_language"],
-            generation_section["time_signature"], results_section["is_format_caption_state"]
+            generation_section["lyrics"], generation_section["audio_duration"], generation_section["key_scale"],
+            generation_section["vocal_language"], generation_section["time_signature"], results_section["is_format_caption_state"]
         ]
     )
     
@@ -3810,8 +2581,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         inputs=[results_section["generated_audio_6"], results_section["lm_metadata_state"]],
         outputs=[
             generation_section["src_audio"], generation_section["bpm"], generation_section["captions"],
-            generation_section["audio_duration"], generation_section["key_scale"], generation_section["vocal_language"],
-            generation_section["time_signature"], results_section["is_format_caption_state"]
+            generation_section["lyrics"], generation_section["audio_duration"], generation_section["key_scale"],
+            generation_section["vocal_language"], generation_section["time_signature"], results_section["is_format_caption_state"]
         ]
     )
     
@@ -3820,8 +2591,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         inputs=[results_section["generated_audio_7"], results_section["lm_metadata_state"]],
         outputs=[
             generation_section["src_audio"], generation_section["bpm"], generation_section["captions"],
-            generation_section["audio_duration"], generation_section["key_scale"], generation_section["vocal_language"],
-            generation_section["time_signature"], results_section["is_format_caption_state"]
+            generation_section["lyrics"], generation_section["audio_duration"], generation_section["key_scale"],
+            generation_section["vocal_language"], generation_section["time_signature"], results_section["is_format_caption_state"]
         ]
     )
     
@@ -3830,30 +2601,28 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         inputs=[results_section["generated_audio_8"], results_section["lm_metadata_state"]],
         outputs=[
             generation_section["src_audio"], generation_section["bpm"], generation_section["captions"],
-            generation_section["audio_duration"], generation_section["key_scale"], generation_section["vocal_language"],
-            generation_section["time_signature"], results_section["is_format_caption_state"]
+            generation_section["lyrics"], generation_section["audio_duration"], generation_section["key_scale"],
+            generation_section["vocal_language"], generation_section["time_signature"], results_section["is_format_caption_state"]
         ]
     )
     
-    # Navigation button handlers
+    # Navigation button handlers - REFACTORED: Only update results, never touch input UI
     def navigate_to_previous_batch(
         current_batch_index,
         batch_queue,
-        allow_lm_batch,
-        batch_size_input
     ):
-        """Navigate to previous batch and restore ALL its parameters"""
+        """Navigate to previous batch (Result View Only - Never touches Input UI)"""
         if current_batch_index <= 0:
-            gr.Warning("Already at first batch")
-            return [None] * 56  # Extended to include all restored parameters
+            gr.Warning(t("messages.at_first_batch"))
+            return [gr.update()] * 24
         
         # Move to previous batch
         new_batch_index = current_batch_index - 1
         
         # Load batch data from queue
         if new_batch_index not in batch_queue:
-            gr.Warning(f"Batch {new_batch_index + 1} not found in queue")
-            return [None] * 56
+            gr.Warning(t("messages.batch_not_found", n=new_batch_index + 1))
+            return [gr.update()] * 24
         
         batch_data = batch_queue[new_batch_index]
         audio_paths = batch_data.get("audio_paths", [])
@@ -3871,30 +2640,9 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         # Update button states
         can_go_previous, can_go_next = update_navigation_buttons(new_batch_index, total_batches)
         
-        # Restore score displays from batch queue (if available)
+        # Restore score displays from batch queue
         stored_scores = batch_data.get("scores", [""] * 8)
         score_displays = stored_scores if stored_scores else [""] * 8
-        
-        # CRITICAL FIX: Restore codes based on STORED batch settings, not current UI settings
-        stored_codes = batch_data.get("codes", "")
-        stored_allow_lm_batch = batch_data.get("allow_lm_batch", False)
-        codes_outputs = [""] * 9  # 1 single + 8 batch codes
-        
-        if stored_codes:
-            if stored_allow_lm_batch and isinstance(stored_codes, list):
-                # This batch was generated in batch mode: restore to batch codes inputs
-                codes_outputs[0] = stored_codes[0] if stored_codes else ""  # Main display shows first
-                for idx in range(min(len(stored_codes), 8)):
-                    codes_outputs[idx + 1] = stored_codes[idx]
-            else:
-                # This batch was generated in single mode: restore to single code input
-                codes_outputs[0] = stored_codes if isinstance(stored_codes, str) else (stored_codes[0] if stored_codes else "")
-                # Clear batch codes since this wasn't a batch mode generation
-                for idx in range(1, 9):
-                    codes_outputs[idx] = ""
-        
-        # NEW: Restore ALL generation parameters from stored state
-        stored_params = batch_data.get("generation_params", {})
         
         return (
             audio_outputs[0],  # generated_audio_1
@@ -3911,44 +2659,17 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             batch_indicator_text,  # batch_indicator
             gr.update(interactive=can_go_previous),  # prev_batch_btn
             gr.update(interactive=can_go_next),  # next_batch_btn
-            f"✅ Viewing Batch {new_batch_index + 1}",  # status_output
-            score_displays[0],  # score_display_1 - restored
-            score_displays[1],  # score_display_2 - restored
-            score_displays[2],  # score_display_3 - restored
-            score_displays[3],  # score_display_4 - restored
-            score_displays[4],  # score_display_5 - restored
-            score_displays[5],  # score_display_6 - restored
-            score_displays[6],  # score_display_7 - restored
-            score_displays[7],  # score_display_8 - restored
-            codes_outputs[0],  # text2music_audio_code_string - restored
-            codes_outputs[1],  # text2music_audio_code_string_1 - restored
-            codes_outputs[2],  # text2music_audio_code_string_2 - restored
-            codes_outputs[3],  # text2music_audio_code_string_3 - restored
-            codes_outputs[4],  # text2music_audio_code_string_4 - restored
-            codes_outputs[5],  # text2music_audio_code_string_5 - restored
-            codes_outputs[6],  # text2music_audio_code_string_6 - restored
-            codes_outputs[7],  # text2music_audio_code_string_7 - restored
-            codes_outputs[8],  # text2music_audio_code_string_8 - restored
-            # NEW: Restore ALL generation parameters
-            stored_params.get("captions", ""),  # captions
-            stored_params.get("lyrics", ""),  # lyrics
-            stored_params.get("bpm", None),  # bpm
-            stored_params.get("key_scale", ""),  # key_scale
-            stored_params.get("time_signature", ""),  # time_signature
-            stored_params.get("vocal_language", "unknown"),  # vocal_language
-            stored_params.get("audio_duration", -1),  # audio_duration
-            stored_params.get("batch_size_input", 2),  # batch_size_input
-            stored_params.get("inference_steps", 8),  # inference_steps
-            stored_params.get("lm_temperature", 0.85),  # lm_temperature
-            stored_params.get("lm_cfg_scale", 2.0),  # lm_cfg_scale
-            stored_params.get("lm_top_k", 0),  # lm_top_k
-            stored_params.get("lm_top_p", 0.9),  # lm_top_p
-            stored_params.get("think_checkbox", True),  # think_checkbox
-            stored_params.get("use_cot_caption", True),  # use_cot_caption
-            stored_params.get("use_cot_language", True),  # use_cot_language
-            stored_params.get("allow_lm_batch", True),  # allow_lm_batch (restore UI checkbox)
-            stored_params.get("track_name", None),  # track_name - ADDED
-            stored_params.get("complete_track_classes", []),  # complete_track_classes - ADDED
+            t("messages.viewing_batch", n=new_batch_index + 1),  # status_output
+            score_displays[0],  # score_display_1
+            score_displays[1],  # score_display_2
+            score_displays[2],  # score_display_3
+            score_displays[3],  # score_display_4
+            score_displays[4],  # score_display_5
+            score_displays[5],  # score_display_6
+            score_displays[6],  # score_display_7
+            score_displays[7],  # score_display_8
+            gr.update(interactive=True),  # restore_params_btn - Enable when viewing batch
+            # NO generation_section outputs - Input UI remains untouched!
         )
     
     def navigate_to_next_batch(
@@ -3956,23 +2677,19 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         current_batch_index,
         total_batches,
         batch_queue,
-        generation_params,
-        is_format_caption,
-        allow_lm_batch,
-        batch_size_input
     ):
-        """Navigate to next batch and restore ALL its parameters"""
+        """Navigate to next batch (Result View Only - Never touches Input UI)"""
         if current_batch_index >= total_batches - 1:
-            gr.Warning("No next batch available")
-            return [None] * 57  # Extended to include all restored parameters + next_batch_status
+            gr.Warning(t("messages.at_last_batch"))
+            return [gr.update()] * 25
         
         # Move to next batch
         new_batch_index = current_batch_index + 1
         
         # Load batch data from queue
         if new_batch_index not in batch_queue:
-            gr.Warning(f"Batch {new_batch_index + 1} not found in queue")
-            return [None] * 57
+            gr.Warning(t("messages.batch_not_found", n=new_batch_index + 1))
+            return [gr.update()] * 25
         
         batch_data = batch_queue[new_batch_index]
         audio_paths = batch_data.get("audio_paths", [])
@@ -3991,34 +2708,13 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         
         # Prepare next batch status message
         next_batch_status_text = ""
-        if autogen_enabled and new_batch_index == total_batches - 1:
-            # User is viewing the latest batch, indicate next generation will start
+        is_latest_view = (new_batch_index == total_batches - 1)
+        if autogen_enabled and is_latest_view:
             next_batch_status_text = "🔄 AutoGen will generate next batch in background..."
         
-        # Restore score displays from batch queue (if available)
+        # Restore score displays from batch queue
         stored_scores = batch_data.get("scores", [""] * 8)
         score_displays = stored_scores if stored_scores else [""] * 8
-        
-        # CRITICAL FIX: Restore codes based on STORED batch settings, not current UI settings
-        stored_codes = batch_data.get("codes", "")
-        stored_allow_lm_batch = batch_data.get("allow_lm_batch", False)
-        codes_outputs = [""] * 9  # 1 single + 8 batch codes
-        
-        if stored_codes:
-            if stored_allow_lm_batch and isinstance(stored_codes, list):
-                # This batch was generated in batch mode: restore to batch codes inputs
-                codes_outputs[0] = stored_codes[0] if stored_codes else ""  # Main display shows first
-                for idx in range(min(len(stored_codes), 8)):
-                    codes_outputs[idx + 1] = stored_codes[idx]
-            else:
-                # This batch was generated in single mode: restore to single code input
-                codes_outputs[0] = stored_codes if isinstance(stored_codes, str) else (stored_codes[0] if stored_codes else "")
-                # Clear batch codes since this wasn't a batch mode generation
-                for idx in range(1, 9):
-                    codes_outputs[idx] = ""
-        
-        # NEW: Restore ALL generation parameters from stored state
-        stored_params = batch_data.get("generation_params", {})
         
         return (
             audio_outputs[0],  # generated_audio_1
@@ -4034,56 +2730,108 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             new_batch_index,  # current_batch_index
             batch_indicator_text,  # batch_indicator
             gr.update(interactive=can_go_previous),  # prev_batch_btn
-            gr.update(interactive=can_go_next),  # next_batch_btn - will be disabled if at latest
-            f"✅ Viewing Batch {new_batch_index + 1}",  # status_output
+            gr.update(interactive=can_go_next),  # next_batch_btn
+            t("messages.viewing_batch", n=new_batch_index + 1),  # status_output
             next_batch_status_text,  # next_batch_status
-            score_displays[0],  # score_display_1 - restored
-            score_displays[1],  # score_display_2 - restored
-            score_displays[2],  # score_display_3 - restored
-            score_displays[3],  # score_display_4 - restored
-            score_displays[4],  # score_display_5 - restored
-            score_displays[5],  # score_display_6 - restored
-            score_displays[6],  # score_display_7 - restored
-            score_displays[7],  # score_display_8 - restored
-            codes_outputs[0],  # text2music_audio_code_string - restored
-            codes_outputs[1],  # text2music_audio_code_string_1 - restored
-            codes_outputs[2],  # text2music_audio_code_string_2 - restored
-            codes_outputs[3],  # text2music_audio_code_string_3 - restored
-            codes_outputs[4],  # text2music_audio_code_string_4 - restored
-            codes_outputs[5],  # text2music_audio_code_string_5 - restored
-            codes_outputs[6],  # text2music_audio_code_string_6 - restored
-            codes_outputs[7],  # text2music_audio_code_string_7 - restored
-            codes_outputs[8],  # text2music_audio_code_string_8 - restored
-            # NEW: Restore ALL generation parameters
-            stored_params.get("captions", ""),  # captions
-            stored_params.get("lyrics", ""),  # lyrics
-            stored_params.get("bpm", None),  # bpm
-            stored_params.get("key_scale", ""),  # key_scale
-            stored_params.get("time_signature", ""),  # time_signature
-            stored_params.get("vocal_language", "unknown"),  # vocal_language
-            stored_params.get("audio_duration", -1),  # audio_duration
-            stored_params.get("batch_size_input", 2),  # batch_size_input
-            stored_params.get("inference_steps", 8),  # inference_steps
-            stored_params.get("lm_temperature", 0.85),  # lm_temperature
-            stored_params.get("lm_cfg_scale", 2.0),  # lm_cfg_scale
-            stored_params.get("lm_top_k", 0),  # lm_top_k
-            stored_params.get("lm_top_p", 0.9),  # lm_top_p
-            stored_params.get("think_checkbox", True),  # think_checkbox
-            stored_params.get("use_cot_caption", True),  # use_cot_caption
-            stored_params.get("use_cot_language", True),  # use_cot_language
-            stored_params.get("allow_lm_batch", True),  # allow_lm_batch (restore UI checkbox)
-            stored_params.get("track_name", None),  # track_name - ADDED
-            stored_params.get("complete_track_classes", []),  # complete_track_classes - ADDED
+            score_displays[0],  # score_display_1
+            score_displays[1],  # score_display_2
+            score_displays[2],  # score_display_3
+            score_displays[3],  # score_display_4
+            score_displays[4],  # score_display_5
+            score_displays[5],  # score_display_6
+            score_displays[6],  # score_display_7
+            score_displays[7],  # score_display_8
+            gr.update(interactive=True),  # restore_params_btn - Enable when viewing batch
+            # NO generation_section outputs - Input UI remains untouched!
         )
     
-    # Wire up navigation buttons
+    def restore_batch_parameters(current_batch_index, batch_queue):
+        """
+        Restore parameters from currently viewed batch to Input UI.
+        This is the bridge allowing users to "reuse" historical settings.
+        """
+        if current_batch_index not in batch_queue:
+            gr.Warning(t("messages.no_batch_data"))
+            return [gr.update()] * 29  # Match number of outputs
+        
+        batch_data = batch_queue[current_batch_index]
+        params = batch_data.get("generation_params", {})
+        
+        # Extract all parameters with defaults
+        captions = params.get("captions", "")
+        lyrics = params.get("lyrics", "")
+        bpm = params.get("bpm", None)
+        key_scale = params.get("key_scale", "")
+        time_signature = params.get("time_signature", "")
+        vocal_language = params.get("vocal_language", "unknown")
+        audio_duration = params.get("audio_duration", -1)
+        batch_size_input = params.get("batch_size_input", 2)
+        inference_steps = params.get("inference_steps", 8)
+        lm_temperature = params.get("lm_temperature", 0.85)
+        lm_cfg_scale = params.get("lm_cfg_scale", 2.0)
+        lm_top_k = params.get("lm_top_k", 0)
+        lm_top_p = params.get("lm_top_p", 0.9)
+        think_checkbox = params.get("think_checkbox", True)
+        use_cot_caption = params.get("use_cot_caption", True)
+        use_cot_language = params.get("use_cot_language", True)
+        allow_lm_batch = params.get("allow_lm_batch", True)
+        track_name = params.get("track_name", None)
+        complete_track_classes = params.get("complete_track_classes", [])
+        
+        # Extract and process codes (prefer actual codes from batch_data over params)
+        stored_codes = batch_data.get("codes", "")
+        stored_allow_lm_batch = params.get("allow_lm_batch", False)
+        
+        codes_outputs = [""] * 9  # [Main, 1-8]
+        if stored_codes:
+            if stored_allow_lm_batch and isinstance(stored_codes, list):
+                # Batch mode: populate codes 1-8, main shows first
+                codes_outputs[0] = stored_codes[0] if stored_codes else ""
+                for idx in range(min(len(stored_codes), 8)):
+                    codes_outputs[idx + 1] = stored_codes[idx]
+            else:
+                # Single mode: populate main, clear 1-8
+                codes_outputs[0] = stored_codes if isinstance(stored_codes, str) else (stored_codes[0] if stored_codes else "")
+        
+        gr.Info(t("messages.params_restored", n=current_batch_index + 1))
+        
+        return (
+            codes_outputs[0],  # text2music_audio_code_string
+            codes_outputs[1],  # text2music_audio_code_string_1
+            codes_outputs[2],  # text2music_audio_code_string_2
+            codes_outputs[3],  # text2music_audio_code_string_3
+            codes_outputs[4],  # text2music_audio_code_string_4
+            codes_outputs[5],  # text2music_audio_code_string_5
+            codes_outputs[6],  # text2music_audio_code_string_6
+            codes_outputs[7],  # text2music_audio_code_string_7
+            codes_outputs[8],  # text2music_audio_code_string_8
+            captions,
+            lyrics,
+            bpm,
+            key_scale,
+            time_signature,
+            vocal_language,
+            audio_duration,
+            batch_size_input,
+            inference_steps,
+            lm_temperature,
+            lm_cfg_scale,
+            lm_top_k,
+            lm_top_p,
+            think_checkbox,
+            use_cot_caption,
+            use_cot_language,
+            allow_lm_batch,
+            track_name,
+            complete_track_classes
+        )
+    
+    # Wire up navigation buttons - REFACTORED: Results-only outputs
     results_section["prev_batch_btn"].click(
         fn=navigate_to_previous_batch,
         inputs=[
             results_section["current_batch_index"],
             results_section["batch_queue"],
-            generation_section["allow_lm_batch"],
-            generation_section["batch_size_input"],
         ],
         outputs=[
             results_section["generated_audio_1"],
@@ -4109,107 +2857,14 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             results_section["score_display_6"],
             results_section["score_display_7"],
             results_section["score_display_8"],
-            generation_section["text2music_audio_code_string"],
-            generation_section["text2music_audio_code_string_1"],
-            generation_section["text2music_audio_code_string_2"],
-            generation_section["text2music_audio_code_string_3"],
-            generation_section["text2music_audio_code_string_4"],
-            generation_section["text2music_audio_code_string_5"],
-            generation_section["text2music_audio_code_string_6"],
-            generation_section["text2music_audio_code_string_7"],
-            generation_section["text2music_audio_code_string_8"],
-            # NEW: Restore all generation parameters
-            generation_section["captions"],
-            generation_section["lyrics"],
-            generation_section["bpm"],
-            generation_section["key_scale"],
-            generation_section["time_signature"],
-            generation_section["vocal_language"],
-            generation_section["audio_duration"],
-            generation_section["batch_size_input"],
-            generation_section["inference_steps"],
-            generation_section["lm_temperature"],
-            generation_section["lm_cfg_scale"],
-            generation_section["lm_top_k"],
-            generation_section["lm_top_p"],
-            generation_section["think_checkbox"],
-            generation_section["use_cot_caption"],
-            generation_section["use_cot_language"],
-            generation_section["allow_lm_batch"],
-            generation_section["track_name"],  # ADDED
-            generation_section["complete_track_classes"],  # ADDED
+            results_section["restore_params_btn"],  # Enable restore button
+            # NO generation_section outputs - Input UI preserved across navigation!
         ]
     )
     
+    # REFACTORED: Capture->Navigate->Generate chain with Input/Result decoupling
     results_section["next_batch_btn"].click(
-        fn=navigate_to_next_batch,
-        inputs=[
-            generation_section["autogen_checkbox"],
-            results_section["current_batch_index"],
-            results_section["total_batches"],
-            results_section["batch_queue"],
-            results_section["generation_params_state"],
-            results_section["is_format_caption_state"],
-            generation_section["allow_lm_batch"],
-            generation_section["batch_size_input"],
-        ],
-        outputs=[
-            results_section["generated_audio_1"],
-            results_section["generated_audio_2"],
-            results_section["generated_audio_3"],
-            results_section["generated_audio_4"],
-            results_section["generated_audio_5"],
-            results_section["generated_audio_6"],
-            results_section["generated_audio_7"],
-            results_section["generated_audio_8"],
-            results_section["generated_audio_batch"],
-            results_section["generation_info"],
-            results_section["current_batch_index"],
-            results_section["batch_indicator"],
-            results_section["prev_batch_btn"],
-            results_section["next_batch_btn"],
-            results_section["status_output"],
-            results_section["next_batch_status"],
-            results_section["score_display_1"],
-            results_section["score_display_2"],
-            results_section["score_display_3"],
-            results_section["score_display_4"],
-            results_section["score_display_5"],
-            results_section["score_display_6"],
-            results_section["score_display_7"],
-            results_section["score_display_8"],
-            generation_section["text2music_audio_code_string"],
-            generation_section["text2music_audio_code_string_1"],
-            generation_section["text2music_audio_code_string_2"],
-            generation_section["text2music_audio_code_string_3"],
-            generation_section["text2music_audio_code_string_4"],
-            generation_section["text2music_audio_code_string_5"],
-            generation_section["text2music_audio_code_string_6"],
-            generation_section["text2music_audio_code_string_7"],
-            generation_section["text2music_audio_code_string_8"],
-            # NEW: Restore all generation parameters
-            generation_section["captions"],
-            generation_section["lyrics"],
-            generation_section["bpm"],
-            generation_section["key_scale"],
-            generation_section["time_signature"],
-            generation_section["vocal_language"],
-            generation_section["audio_duration"],
-            generation_section["batch_size_input"],
-            generation_section["inference_steps"],
-            generation_section["lm_temperature"],
-            generation_section["lm_cfg_scale"],
-            generation_section["lm_top_k"],
-            generation_section["lm_top_p"],
-            generation_section["think_checkbox"],
-            generation_section["use_cot_caption"],
-            generation_section["use_cot_language"],
-            generation_section["allow_lm_batch"],
-            generation_section["track_name"],  # ADDED
-            generation_section["complete_track_classes"],  # ADDED
-        ]
-    ).then(
-        # First capture current UI parameters (in case user modified them after navigation)
+        # Step 1: Capture current UI parameters (user's modifications like BS=8)
         fn=capture_current_params,
         inputs=[
             generation_section["captions"],
@@ -4250,14 +2905,53 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["auto_score"],
             generation_section["score_scale"],
             generation_section["lm_batch_chunk_size"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
         ],
         outputs=[results_section["generation_params_state"]]
     ).then(
-        # Then chain background generation with updated parameters
+        # Step 2: Navigate to next batch (updates results only, preserves input UI)
+        fn=navigate_to_next_batch,
+        inputs=[
+            generation_section["autogen_checkbox"],
+            results_section["current_batch_index"],
+            results_section["total_batches"],
+            results_section["batch_queue"],
+        ],
+        outputs=[
+            results_section["generated_audio_1"],
+            results_section["generated_audio_2"],
+            results_section["generated_audio_3"],
+            results_section["generated_audio_4"],
+            results_section["generated_audio_5"],
+            results_section["generated_audio_6"],
+            results_section["generated_audio_7"],
+            results_section["generated_audio_8"],
+            results_section["generated_audio_batch"],
+            results_section["generation_info"],
+            results_section["current_batch_index"],
+            results_section["batch_indicator"],
+            results_section["prev_batch_btn"],
+            results_section["next_batch_btn"],
+            results_section["status_output"],
+            results_section["next_batch_status"],
+            results_section["score_display_1"],
+            results_section["score_display_2"],
+            results_section["score_display_3"],
+            results_section["score_display_4"],
+            results_section["score_display_5"],
+            results_section["score_display_6"],
+            results_section["score_display_7"],
+            results_section["score_display_8"],
+            results_section["restore_params_btn"],  # Enable restore button
+            # NO generation_section outputs - Input UI preserved across navigation!
+        ]
+    ).then(
+        # Step 3: Generate next batch in background (uses captured params from Step 1)
         fn=generate_next_batch_background,
         inputs=[
             generation_section["autogen_checkbox"],
-            results_section["generation_params_state"],  # Now contains updated params
+            results_section["generation_params_state"],  # Uses Step 1 captured params
             results_section["current_batch_index"],
             results_section["total_batches"],
             results_section["batch_queue"],
@@ -4268,6 +2962,45 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             results_section["total_batches"],
             results_section["next_batch_status"],
             results_section["next_batch_btn"],
+        ]
+    )
+    
+    # Bind restore parameters button - Bridge between Result View and Input View
+    results_section["restore_params_btn"].click(
+        fn=restore_batch_parameters,
+        inputs=[
+            results_section["current_batch_index"],
+            results_section["batch_queue"]
+        ],
+        outputs=[
+            generation_section["text2music_audio_code_string"],
+            generation_section["text2music_audio_code_string_1"],
+            generation_section["text2music_audio_code_string_2"],
+            generation_section["text2music_audio_code_string_3"],
+            generation_section["text2music_audio_code_string_4"],
+            generation_section["text2music_audio_code_string_5"],
+            generation_section["text2music_audio_code_string_6"],
+            generation_section["text2music_audio_code_string_7"],
+            generation_section["text2music_audio_code_string_8"],
+            generation_section["captions"],
+            generation_section["lyrics"],
+            generation_section["bpm"],
+            generation_section["key_scale"],
+            generation_section["time_signature"],
+            generation_section["vocal_language"],
+            generation_section["audio_duration"],
+            generation_section["batch_size_input"],
+            generation_section["inference_steps"],
+            generation_section["lm_temperature"],
+            generation_section["lm_cfg_scale"],
+            generation_section["lm_top_k"],
+            generation_section["lm_top_p"],
+            generation_section["think_checkbox"],
+            generation_section["use_cot_caption"],
+            generation_section["use_cot_language"],
+            generation_section["allow_lm_batch"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
         ]
     )
 

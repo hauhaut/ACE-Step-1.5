@@ -1,0 +1,619 @@
+"""
+Generation Input Handlers Module
+Contains event handlers and helper functions related to generation inputs
+"""
+import os
+import json
+import random
+import glob
+import gradio as gr
+from typing import Optional
+from acestep.constants import (
+    TASK_TYPES_TURBO,
+    TASK_TYPES_BASE,
+)
+from acestep.gradio_ui.i18n import t
+
+
+def load_metadata(file_obj):
+    """Load generation parameters from a JSON file"""
+    if file_obj is None:
+        gr.Warning(t("messages.no_file_selected"))
+        return [None] * 31 + [False]  # Return None for all fields, False for is_format_caption
+    
+    try:
+        # Read the uploaded file
+        if hasattr(file_obj, 'name'):
+            filepath = file_obj.name
+        else:
+            filepath = file_obj
+        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+        
+        # Extract all fields
+        task_type = metadata.get('task_type', 'text2music')
+        captions = metadata.get('caption', '')
+        lyrics = metadata.get('lyrics', '')
+        vocal_language = metadata.get('vocal_language', 'unknown')
+        
+        # Convert bpm
+        bpm_value = metadata.get('bpm')
+        if bpm_value is not None and bpm_value != "N/A":
+            try:
+                bpm = int(bpm_value) if bpm_value else None
+            except:
+                bpm = None
+        else:
+            bpm = None
+        
+        key_scale = metadata.get('keyscale', '')
+        time_signature = metadata.get('timesignature', '')
+        
+        # Convert duration
+        duration_value = metadata.get('duration', -1)
+        if duration_value is not None and duration_value != "N/A":
+            try:
+                audio_duration = float(duration_value)
+            except:
+                audio_duration = -1
+        else:
+            audio_duration = -1
+        
+        batch_size = metadata.get('batch_size', 2)
+        inference_steps = metadata.get('inference_steps', 8)
+        guidance_scale = metadata.get('guidance_scale', 7.0)
+        seed = metadata.get('seed', '-1')
+        random_seed = metadata.get('random_seed', True)
+        use_adg = metadata.get('use_adg', False)
+        cfg_interval_start = metadata.get('cfg_interval_start', 0.0)
+        cfg_interval_end = metadata.get('cfg_interval_end', 1.0)
+        audio_format = metadata.get('audio_format', 'mp3')
+        lm_temperature = metadata.get('lm_temperature', 0.85)
+        lm_cfg_scale = metadata.get('lm_cfg_scale', 2.0)
+        lm_top_k = metadata.get('lm_top_k', 0)
+        lm_top_p = metadata.get('lm_top_p', 0.9)
+        lm_negative_prompt = metadata.get('lm_negative_prompt', 'NO USER INPUT')
+        use_cot_caption = metadata.get('use_cot_caption', True)
+        use_cot_language = metadata.get('use_cot_language', True)
+        audio_cover_strength = metadata.get('audio_cover_strength', 1.0)
+        think = metadata.get('think', True)
+        audio_codes = metadata.get('audio_codes', '')
+        repainting_start = metadata.get('repainting_start', 0.0)
+        repainting_end = metadata.get('repainting_end', -1)
+        track_name = metadata.get('track_name')
+        complete_track_classes = metadata.get('complete_track_classes', [])
+        
+        gr.Info(t("messages.params_loaded", filename=os.path.basename(filepath)))
+        
+        return (
+            task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature,
+            audio_duration, batch_size, inference_steps, guidance_scale, seed, random_seed,
+            use_adg, cfg_interval_start, cfg_interval_end, audio_format,
+            lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
+            use_cot_caption, use_cot_language, audio_cover_strength,
+            think, audio_codes, repainting_start, repainting_end,
+            track_name, complete_track_classes,
+            True  # Set is_format_caption to True when loading from file
+        )
+        
+    except json.JSONDecodeError as e:
+        gr.Warning(t("messages.invalid_json", error=str(e)))
+        return [None] * 31 + [False]
+    except Exception as e:
+        gr.Warning(t("messages.load_error", error=str(e)))
+        return [None] * 31 + [False]
+
+
+def load_random_example(task_type: str):
+    """Load a random example from the task-specific examples directory
+    
+    Args:
+        task_type: The task type (e.g., "text2music")
+        
+    Returns:
+        Tuple of (caption, lyrics, think, bpm, duration, keyscale, language, timesignature) for updating UI components
+    """
+    try:
+        # Get the project root directory
+        current_file = os.path.abspath(__file__)
+        # This file is in acestep/gradio_ui/events/, need 4 levels up to reach project root
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file))))
+        
+        # Construct the examples directory path
+        examples_dir = os.path.join(project_root, "examples", task_type)
+        
+        # Check if directory exists
+        if not os.path.exists(examples_dir):
+            gr.Warning(f"Examples directory not found: examples/{task_type}/")
+            return "", "", True, None, None, "", "", ""
+        
+        # Find all JSON files in the directory
+        json_files = glob.glob(os.path.join(examples_dir, "*.json"))
+        
+        if not json_files:
+            gr.Warning(f"No JSON files found in examples/{task_type}/")
+            return "", "", True, None, None, "", "", ""
+        
+        # Randomly select one file
+        selected_file = random.choice(json_files)
+        
+        # Read and parse JSON
+        try:
+            with open(selected_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Extract caption (prefer 'caption', fallback to 'prompt')
+            caption_value = data.get('caption', data.get('prompt', ''))
+            if not isinstance(caption_value, str):
+                caption_value = str(caption_value) if caption_value else ''
+            
+            # Extract lyrics
+            lyrics_value = data.get('lyrics', '')
+            if not isinstance(lyrics_value, str):
+                lyrics_value = str(lyrics_value) if lyrics_value else ''
+            
+            # Extract think (default to True if not present)
+            think_value = data.get('think', True)
+            if not isinstance(think_value, bool):
+                think_value = True
+            
+            # Extract optional metadata fields
+            bpm_value = None
+            if 'bpm' in data and data['bpm'] not in [None, "N/A", ""]:
+                try:
+                    bpm_value = int(data['bpm'])
+                except (ValueError, TypeError):
+                    pass
+            
+            duration_value = None
+            if 'duration' in data and data['duration'] not in [None, "N/A", ""]:
+                try:
+                    duration_value = float(data['duration'])
+                except (ValueError, TypeError):
+                    pass
+            
+            keyscale_value = data.get('keyscale', '')
+            if keyscale_value in [None, "N/A"]:
+                keyscale_value = ''
+            
+            language_value = data.get('language', '')
+            if language_value in [None, "N/A"]:
+                language_value = ''
+            
+            timesignature_value = data.get('timesignature', '')
+            if timesignature_value in [None, "N/A"]:
+                timesignature_value = ''
+            
+            gr.Info(t("messages.example_loaded", filename=os.path.basename(selected_file)))
+            return caption_value, lyrics_value, think_value, bpm_value, duration_value, keyscale_value, language_value, timesignature_value
+            
+        except json.JSONDecodeError as e:
+            gr.Warning(t("messages.example_failed", filename=os.path.basename(selected_file), error=str(e)))
+            return "", "", True, None, None, "", "", ""
+        except Exception as e:
+            gr.Warning(t("messages.example_error", error=str(e)))
+            return "", "", True, None, None, "", "", ""
+            
+    except Exception as e:
+        gr.Warning(t("messages.example_error", error=str(e)))
+        return "", "", True, None, None, "", "", ""
+
+
+def sample_example_smart(llm_handler, task_type: str, constrained_decoding_debug: bool = False):
+    """Smart sample function that uses LM if initialized, otherwise falls back to examples
+    
+    Args:
+        llm_handler: LLM handler instance
+        task_type: The task type (e.g., "text2music")
+        constrained_decoding_debug: Whether to enable debug logging for constrained decoding
+        
+    Returns:
+        Tuple of (caption, lyrics, think, bpm, duration, keyscale, language, timesignature) for updating UI components
+    """
+    # Check if LM is initialized
+    if llm_handler.llm_initialized:
+        # Use LM to generate example
+        try:
+            # Generate example using LM with empty input (NO USER INPUT)
+            metadata, status = llm_handler.understand_audio_from_codes(
+                audio_codes="NO USER INPUT",
+                use_constrained_decoding=True,
+                temperature=0.85,
+                constrained_decoding_debug=constrained_decoding_debug,
+            )
+            
+            if metadata:
+                caption_value = metadata.get('caption', '')
+                lyrics_value = metadata.get('lyrics', '')
+                think_value = True  # Always enable think when using LM-generated examples
+                
+                # Extract optional metadata fields
+                bpm_value = None
+                if 'bpm' in metadata and metadata['bpm'] not in [None, "N/A", ""]:
+                    try:
+                        bpm_value = int(metadata['bpm'])
+                    except (ValueError, TypeError):
+                        pass
+                
+                duration_value = None
+                if 'duration' in metadata and metadata['duration'] not in [None, "N/A", ""]:
+                    try:
+                        duration_value = float(metadata['duration'])
+                    except (ValueError, TypeError):
+                        pass
+                
+                keyscale_value = metadata.get('keyscale', '')
+                if keyscale_value in [None, "N/A"]:
+                    keyscale_value = ''
+                
+                language_value = metadata.get('language', '')
+                if language_value in [None, "N/A"]:
+                    language_value = ''
+                
+                timesignature_value = metadata.get('timesignature', '')
+                if timesignature_value in [None, "N/A"]:
+                    timesignature_value = ''
+                
+                gr.Info(t("messages.lm_generated"))
+                return caption_value, lyrics_value, think_value, bpm_value, duration_value, keyscale_value, language_value, timesignature_value
+            else:
+                gr.Warning(t("messages.lm_fallback"))
+                return load_random_example(task_type)
+                
+        except Exception as e:
+            gr.Warning(t("messages.lm_fallback"))
+            return load_random_example(task_type)
+    else:
+        # LM not initialized, use examples directory
+        return load_random_example(task_type)
+
+
+def refresh_checkpoints(dit_handler):
+    """Refresh available checkpoints"""
+    choices = dit_handler.get_available_checkpoints()
+    return gr.update(choices=choices)
+
+
+def update_model_type_settings(config_path):
+    """Update UI settings based on model type"""
+    if config_path is None:
+        config_path = ""
+    config_path_lower = config_path.lower()
+    
+    if "turbo" in config_path_lower:
+        # Turbo model: max 8 steps, hide CFG/ADG, only show text2music/repaint/cover
+        return (
+            gr.update(value=8, maximum=8, minimum=1),  # inference_steps
+            gr.update(visible=False),  # guidance_scale
+            gr.update(visible=False),  # use_adg
+            gr.update(visible=False),  # cfg_interval_start
+            gr.update(visible=False),  # cfg_interval_end
+            gr.update(choices=TASK_TYPES_TURBO),  # task_type
+        )
+    elif "base" in config_path_lower:
+        # Base model: max 100 steps, show CFG/ADG, show all task types
+        return (
+            gr.update(value=32, maximum=100, minimum=1),  # inference_steps
+            gr.update(visible=True),  # guidance_scale
+            gr.update(visible=True),  # use_adg
+            gr.update(visible=True),  # cfg_interval_start
+            gr.update(visible=True),  # cfg_interval_end
+            gr.update(choices=TASK_TYPES_BASE),  # task_type
+        )
+    else:
+        # Default to turbo settings
+        return (
+            gr.update(value=8, maximum=8, minimum=1),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(choices=TASK_TYPES_TURBO),  # task_type
+        )
+
+
+def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, device, init_llm, lm_model_path, backend, use_flash_attention, offload_to_cpu, offload_dit_to_cpu):
+    """Wrapper for service initialization, returns status, button state, and accordion state"""
+    # Initialize DiT handler
+    status, enable = dit_handler.initialize_service(
+        checkpoint, config_path, device,
+        use_flash_attention=use_flash_attention, compile_model=False, 
+        offload_to_cpu=offload_to_cpu, offload_dit_to_cpu=offload_dit_to_cpu
+    )
+    
+    # Initialize LM handler if requested
+    if init_llm:
+        # Get checkpoint directory
+        current_file = os.path.abspath(__file__)
+        # This file is in acestep/gradio_ui/events/, need 4 levels up to reach project root
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file))))
+        checkpoint_dir = os.path.join(project_root, "checkpoints")
+        
+        lm_status, lm_success = llm_handler.initialize(
+            checkpoint_dir=checkpoint_dir,
+            lm_model_path=lm_model_path,
+            backend=backend,
+            device=device,
+            offload_to_cpu=offload_to_cpu,
+            dtype=dit_handler.dtype
+        )
+        
+        if lm_success:
+            status += f"\n{lm_status}"
+        else:
+            status += f"\n{lm_status}"
+            # Don't fail the entire initialization if LM fails, but log it
+            # Keep enable as is (DiT initialization result) even if LM fails
+    
+    # Check if model is initialized - if so, collapse the accordion
+    is_model_initialized = dit_handler.model is not None
+    accordion_state = gr.update(open=not is_model_initialized)
+    
+    return status, gr.update(interactive=enable), accordion_state
+
+
+def update_negative_prompt_visibility(init_llm_checked):
+    """Update negative prompt visibility: show if Initialize 5Hz LM checkbox is checked"""
+    return gr.update(visible=init_llm_checked)
+
+
+def update_audio_cover_strength_visibility(task_type_value, init_llm_checked):
+    """Update audio_cover_strength visibility and label"""
+    # Show if task is cover OR if LM is initialized
+    is_visible = (task_type_value == "cover") or init_llm_checked
+    # Change label based on context
+    if init_llm_checked and task_type_value != "cover":
+        label = "LM codes strength"
+        info = "Control how many denoising steps use LM-generated codes"
+    else:
+        label = "Audio Cover Strength"
+        info = "Control how many denoising steps use cover mode"
+    
+    return gr.update(visible=is_visible, label=label, info=info)
+
+
+def convert_src_audio_to_codes_wrapper(dit_handler, src_audio):
+    """Wrapper for converting src audio to codes"""
+    codes_string = dit_handler.convert_src_audio_to_codes(src_audio)
+    return codes_string
+
+
+def update_instruction_ui(
+    dit_handler,
+    task_type_value: str, 
+    track_name_value: Optional[str], 
+    complete_track_classes_value: list, 
+    audio_codes_content: str = "",
+    init_llm_checked: bool = False
+) -> tuple:
+    """Update instruction and UI visibility based on task type."""
+    instruction = dit_handler.generate_instruction(
+        task_type=task_type_value,
+        track_name=track_name_value,
+        complete_track_classes=complete_track_classes_value
+    )
+    
+    # Show track_name for lego and extract
+    track_name_visible = task_type_value in ["lego", "extract"]
+    # Show complete_track_classes for complete
+    complete_visible = task_type_value == "complete"
+    # Show audio_cover_strength for cover OR when LM is initialized
+    audio_cover_strength_visible = (task_type_value == "cover") or init_llm_checked
+    # Determine label and info based on context
+    if init_llm_checked and task_type_value != "cover":
+        audio_cover_strength_label = "LM codes strength"
+        audio_cover_strength_info = "Control how many denoising steps use LM-generated codes"
+    else:
+        audio_cover_strength_label = "Audio Cover Strength"
+        audio_cover_strength_info = "Control how many denoising steps use cover mode"
+    # Show repainting controls for repaint and lego
+    repainting_visible = task_type_value in ["repaint", "lego"]
+    # Show text2music_audio_codes if task is text2music OR if it has content
+    # This allows it to stay visible even if user switches task type but has codes
+    has_audio_codes = audio_codes_content and str(audio_codes_content).strip()
+    text2music_audio_codes_visible = task_type_value == "text2music" or has_audio_codes
+    
+    return (
+        instruction,  # instruction_display_gen
+        gr.update(visible=track_name_visible),  # track_name
+        gr.update(visible=complete_visible),  # complete_track_classes
+        gr.update(visible=audio_cover_strength_visible, label=audio_cover_strength_label, info=audio_cover_strength_info),  # audio_cover_strength
+        gr.update(visible=repainting_visible),  # repainting_group
+        gr.update(visible=text2music_audio_codes_visible),  # text2music_audio_codes_group
+    )
+
+
+def transcribe_audio_codes(llm_handler, audio_code_string, constrained_decoding_debug):
+    """
+    Transcribe audio codes to metadata using LLM understanding.
+    If audio_code_string is empty, generate a sample example instead.
+    
+    Args:
+        llm_handler: LLM handler instance
+        audio_code_string: String containing audio codes (or empty for example generation)
+        constrained_decoding_debug: Whether to enable debug logging for constrained decoding
+        
+    Returns:
+        Tuple of (status_message, caption, lyrics, bpm, duration, keyscale, language, timesignature)
+    """
+    if not llm_handler.llm_initialized:
+        return t("messages.lm_not_initialized"), "", "", None, None, "", "", ""
+    
+    # If codes are empty, this becomes a "generate example" task
+    # Use "NO USER INPUT" as the input to generate a sample
+    if not audio_code_string or not audio_code_string.strip():
+        audio_code_string = "NO USER INPUT"
+    
+    # Call LLM understanding
+    metadata, status = llm_handler.understand_audio_from_codes(
+        audio_codes=audio_code_string,
+        use_constrained_decoding=True,
+        constrained_decoding_debug=constrained_decoding_debug,
+    )
+    
+    # Extract fields for UI update
+    caption = metadata.get('caption', '')
+    lyrics = metadata.get('lyrics', '')
+    bpm = metadata.get('bpm')
+    duration = metadata.get('duration')
+    keyscale = metadata.get('keyscale', '')
+    language = metadata.get('language', '')
+    timesignature = metadata.get('timesignature', '')
+    
+    # Convert to appropriate types
+    try:
+        bpm = int(bpm) if bpm and bpm != 'N/A' else None
+    except:
+        bpm = None
+    
+    try:
+        duration = float(duration) if duration and duration != 'N/A' else None
+    except:
+        duration = None
+    
+    return (
+        status,
+        caption,
+        lyrics,
+        bpm,
+        duration,
+        keyscale,
+        language,
+        timesignature,
+        True  # Set is_format_caption to True (from Transcribe/LM understanding)
+    )
+
+
+def update_transcribe_button_text(audio_code_string):
+    """
+    Update the transcribe button text based on input content.
+    If empty: "Generate Example"
+    If has content: "Transcribe"
+    """
+    if not audio_code_string or not audio_code_string.strip():
+        return gr.update(value="Generate Example")
+    else:
+        return gr.update(value="Transcribe")
+
+
+def reset_format_caption_flag():
+    """Reset is_format_caption to False when user manually edits caption/metadata"""
+    return False
+
+
+def update_audio_uploads_accordion(reference_audio, src_audio):
+    """Update Audio Uploads accordion open state based on whether audio files are present"""
+    has_audio = (reference_audio is not None) or (src_audio is not None)
+    return gr.update(open=has_audio)
+
+
+def handle_instrumental_checkbox(instrumental_checked, current_lyrics):
+    """
+    Handle instrumental checkbox changes.
+    When checked: if no lyrics, fill with [Instrumental]
+    When unchecked: if lyrics is [Instrumental], clear it
+    """
+    if instrumental_checked:
+        # If checked and no lyrics, fill with [Instrumental]
+        if not current_lyrics or not current_lyrics.strip():
+            return "[Instrumental]"
+        else:
+            # Has lyrics, don't change
+            return current_lyrics
+    else:
+        # If unchecked and lyrics is exactly [Instrumental], clear it
+        if current_lyrics and current_lyrics.strip() == "[Instrumental]":
+            return ""
+        else:
+            # Has other lyrics, don't change
+            return current_lyrics
+
+
+def update_audio_components_visibility(batch_size):
+    """Show/hide individual audio components based on batch size (1-8)
+    
+    Row 1: Components 1-4 (batch_size 1-4)
+    Row 2: Components 5-8 (batch_size 5-8)
+    """
+    # Clamp batch size to 1-8 range for UI
+    batch_size = min(max(int(batch_size), 1), 8)
+    
+    # Row 1 columns (1-4)
+    updates_row1 = (
+        gr.update(visible=True),  # audio_col_1: always visible
+        gr.update(visible=batch_size >= 2),  # audio_col_2
+        gr.update(visible=batch_size >= 3),  # audio_col_3
+        gr.update(visible=batch_size >= 4),  # audio_col_4
+    )
+    
+    # Row 2 container and columns (5-8)
+    show_row_5_8 = batch_size >= 5
+    updates_row2 = (
+        gr.update(visible=show_row_5_8),  # audio_row_5_8 (container)
+        gr.update(visible=batch_size >= 5),  # audio_col_5
+        gr.update(visible=batch_size >= 6),  # audio_col_6
+        gr.update(visible=batch_size >= 7),  # audio_col_7
+        gr.update(visible=batch_size >= 8),  # audio_col_8
+    )
+    
+    return updates_row1 + updates_row2
+
+
+def update_codes_hints_visibility(src_audio, allow_lm_batch, batch_size):
+    """Switch between single/batch codes input based on src_audio presence
+    
+    When src_audio is present:
+        - Show single mode with transcribe button
+        - Clear codes (will be filled by transcription)
+    
+    When src_audio is absent:
+        - Hide transcribe button
+        - Show batch mode if allow_lm_batch=True and batch_size>=2
+        - Show single mode otherwise
+    
+    Row 1: Codes 1-4
+    Row 2: Codes 5-8 (batch_size >= 5)
+    """
+    batch_size = min(max(int(batch_size), 1), 8)
+    has_src_audio = src_audio is not None
+    
+    if has_src_audio:
+        # Has src_audio: show single mode with transcribe button
+        return (
+            gr.update(visible=True),   # codes_single_row
+            gr.update(visible=False),  # codes_batch_row
+            gr.update(visible=False),  # codes_batch_row_2
+            *[gr.update(visible=False)] * 8,  # Hide all batch columns
+            gr.update(visible=True),   # transcribe_btn: show when src_audio present
+        )
+    else:
+        # No src_audio: decide between single/batch mode based on settings
+        if allow_lm_batch and batch_size >= 2:
+            # Batch mode: hide single, show batch codes with dynamic columns
+            show_row_2 = batch_size >= 5
+            return (
+                gr.update(visible=False),  # codes_single_row
+                gr.update(visible=True),   # codes_batch_row (row 1)
+                gr.update(visible=show_row_2),  # codes_batch_row_2 (row 2)
+                # Row 1 columns (1-4)
+                gr.update(visible=True),   # codes_col_1: always visible in batch mode
+                gr.update(visible=batch_size >= 2),  # codes_col_2
+                gr.update(visible=batch_size >= 3),  # codes_col_3
+                gr.update(visible=batch_size >= 4),  # codes_col_4
+                # Row 2 columns (5-8)
+                gr.update(visible=batch_size >= 5),  # codes_col_5
+                gr.update(visible=batch_size >= 6),  # codes_col_6
+                gr.update(visible=batch_size >= 7),  # codes_col_7
+                gr.update(visible=batch_size >= 8),  # codes_col_8
+                gr.update(visible=False),  # transcribe_btn: hide when no src_audio
+            )
+        else:
+            # Single mode: show single, hide batch
+            return (
+                gr.update(visible=True),   # codes_single_row
+                gr.update(visible=False),  # codes_batch_row
+                gr.update(visible=False),  # codes_batch_row_2
+                *[gr.update(visible=False)] * 8,  # Hide all batch columns
+                gr.update(visible=False),  # transcribe_btn: hide when no src_audio
+            )

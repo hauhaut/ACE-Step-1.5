@@ -9,6 +9,7 @@ import tempfile
 import traceback
 import re
 import random
+import uuid
 from contextlib import contextmanager
 from typing import Optional, Dict, Any, Tuple, List, Union
 
@@ -25,23 +26,13 @@ from transformers.generation.streamers import BaseStreamer
 from diffusers.models import AutoencoderOobleck
 from acestep.constants import (
     TASK_INSTRUCTIONS,
-    TRACK_NAMES,
+    SFT_GEN_PROMPT,
     DEFAULT_DIT_INSTRUCTION,
 )
 
 
 warnings.filterwarnings("ignore")
 
-
-SFT_GEN_PROMPT = """# Instruction
-{}
-
-# Caption
-{}
-
-# Metas
-{}<|endoftext|>
-"""
 
 class AceStepHandler:
     """ACE-Step Business Logic Handler"""
@@ -2237,12 +2228,16 @@ class AceStepHandler:
                 audio_format_lower = "wav"
             
             saved_files = []
+            saved_uuids = []  # Store UUIDs for each file
             for i in range(actual_batch_size):
-                audio_file = os.path.join(self.temp_dir, f"generated_{i}_{actual_seed_list[i]}.{audio_format_lower}")
+                # Generate unique UUID for each audio file
+                file_uuid = str(uuid.uuid4())
+                audio_file = os.path.join(self.temp_dir, f"{file_uuid}.{audio_format_lower}")
                 # Convert to numpy: [channels, samples] -> [samples, channels]
                 audio_np = pred_wavs[i].cpu().float().numpy().T
                 sf.write(audio_file, audio_np, self.sample_rate)
                 saved_files.append(audio_file)
+                saved_uuids.append(file_uuid)
             
             # Prepare return values
             first_audio = saved_files[0] if len(saved_files) > 0 else None

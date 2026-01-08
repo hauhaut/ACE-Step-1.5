@@ -96,3 +96,12 @@ TRACK_NAMES = [
     "keyboard", "guitar", "bass", "drums", "backing_vocals", "vocals"
 ]
 
+SFT_GEN_PROMPT = """# Instruction
+{}
+
+# Caption
+{}
+
+# Metas
+{}<|endoftext|>
+"""

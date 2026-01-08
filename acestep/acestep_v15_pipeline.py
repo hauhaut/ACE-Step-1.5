@@ -26,7 +26,7 @@ except ImportError:
     from acestep.gradio_ui import create_gradio_interface
 
 
-def create_demo(init_params=None):
+def create_demo(init_params=None, language='en'):
     """
     Create Gradio demo interface
     
@@ -36,7 +36,9 @@ def create_demo(init_params=None):
                     Keys: 'pre_initialized' (bool), 'checkpoint', 'config_path', 'device',
                           'init_llm', 'lm_model_path', 'backend', 'use_flash_attention',
                           'offload_to_cpu', 'offload_dit_to_cpu', 'init_status',
-                          'dit_handler', 'llm_handler' (initialized handlers if pre-initialized)
+                          'dit_handler', 'llm_handler' (initialized handlers if pre-initialized),
+                          'language' (UI language code)
+        language: UI language code ('en', 'zh', 'ja', default: 'en')
     
     Returns:
         Gradio Blocks instance
@@ -52,20 +54,52 @@ def create_demo(init_params=None):
     dataset_handler = DatasetHandler()  # Dataset handler
     
     # Create Gradio interface with all handlers and initialization parameters
-    demo = create_gradio_interface(dit_handler, llm_handler, dataset_handler, init_params=init_params)
+    demo = create_gradio_interface(dit_handler, llm_handler, dataset_handler, init_params=init_params, language=language)
     
     return demo
+
+
+def get_gpu_memory_gb():
+    """
+    Get GPU memory in GB. Returns 0 if no GPU is available.
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            # Get total memory of the first GPU in GB
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            memory_gb = total_memory / (1024**3)  # Convert bytes to GB
+            return memory_gb
+        else:
+            return 0
+    except Exception as e:
+        print(f"Warning: Failed to detect GPU memory: {e}", file=sys.stderr)
+        return 0
 
 
 def main():
     """Main entry function"""
     import argparse
     
+    # Detect GPU memory to auto-configure offload settings
+    gpu_memory_gb = get_gpu_memory_gb()
+    auto_offload = gpu_memory_gb > 0 and gpu_memory_gb < 16
+    
+    if auto_offload:
+        print(f"Detected GPU memory: {gpu_memory_gb:.2f} GB (< 16GB)")
+        print("Auto-enabling CPU offload to reduce GPU memory usage")
+    elif gpu_memory_gb > 0:
+        print(f"Detected GPU memory: {gpu_memory_gb:.2f} GB (>= 16GB)")
+        print("CPU offload disabled by default")
+    else:
+        print("No GPU detected, running on CPU")
+    
     parser = argparse.ArgumentParser(description="Gradio Demo for ACE-Step V1.5")
     parser.add_argument("--port", type=int, default=7860, help="Port to run the gradio server on")
     parser.add_argument("--share", action="store_true", help="Create a public link")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--server-name", type=str, default="127.0.0.1", help="Server name (default: 127.0.0.1, use 0.0.0.0 for all interfaces)")
+    parser.add_argument("--language", type=str, default="en", choices=["en", "zh", "ja"], help="UI language: en (English), zh (中文), ja (日本語)")
     
     # Service initialization arguments
     parser.add_argument("--init_service", type=lambda x: x.lower() in ['true', '1', 'yes'], default=False, help="Initialize service on startup (default: False)")
@@ -76,7 +110,7 @@ def main():
     parser.add_argument("--lm_model_path", type=str, default=None, help="5Hz LM model path (e.g., 'acestep-5Hz-lm-0.6B')")
     parser.add_argument("--backend", type=str, default="vllm", choices=["vllm", "pt"], help="5Hz LM backend (default: vllm)")
     parser.add_argument("--use_flash_attention", type=lambda x: x.lower() in ['true', '1', 'yes'], default=None, help="Use flash attention (default: auto-detect)")
-    parser.add_argument("--offload_to_cpu", type=lambda x: x.lower() in ['true', '1', 'yes'], default=False, help="Offload models to CPU (default: False)")
+    parser.add_argument("--offload_to_cpu", type=lambda x: x.lower() in ['true', '1', 'yes'], default=auto_offload, help=f"Offload models to CPU (default: {'True' if auto_offload else 'False'}, auto-detected based on GPU VRAM)")
     parser.add_argument("--offload_dit_to_cpu", type=lambda x: x.lower() in ['true', '1', 'yes'], default=False, help="Offload DiT to CPU (default: False)")
     
     args = parser.parse_args()
@@ -176,14 +210,24 @@ def main():
                 'init_status': init_status,
                 'enable_generate': enable_generate,
                 'dit_handler': dit_handler,
-                'llm_handler': llm_handler
+                'llm_handler': llm_handler,
+                'language': args.language
             }
             
             print("Service initialization completed successfully!")
         
         # Create and launch demo
-        print("Creating Gradio interface...")
-        demo = create_demo(init_params=init_params)
+        print(f"Creating Gradio interface with language: {args.language}...")
+        demo = create_demo(init_params=init_params, language=args.language)
+        
+        # Enable queue for multi-user support
+        # This ensures proper request queuing and prevents concurrent generation conflicts
+        print("Enabling queue for multi-user support...")
+        demo.queue(
+            max_size=20,  # Maximum queue size (adjust based on your needs)
+            status_update_rate="auto",  # Update rate for queue status
+        )
+        
         print(f"Launching server on {args.server_name}:{args.port}...")
         demo.launch(
             server_name=args.server_name,
