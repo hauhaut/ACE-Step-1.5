@@ -337,6 +337,155 @@ class LLMHandler:
             output_text = str(outputs)
 
         return output_text
+    
+    def _run_vllm_batch(
+        self,
+        formatted_prompts: List[str],
+        temperature: float,
+        cfg_scale: float,
+        negative_prompt: str,
+        top_k: Optional[int],
+        top_p: Optional[float],
+        repetition_penalty: float,
+        use_constrained_decoding: bool = True,
+        constrained_decoding_debug: bool = False,
+        target_duration: Optional[float] = None,
+        generation_phase: str = "codes",
+        caption: str = "",
+        lyrics: str = "",
+        cot_text: str = "",
+        seeds: Optional[List[int]] = None,
+    ) -> List[str]:
+        """Batch generation using vllm backend"""
+        from nanovllm import SamplingParams
+        
+        batch_size = len(formatted_prompts)
+        
+        # Determine effective temperature for sampler
+        effective_sampler_temp = temperature
+        
+        # Use shared constrained processor if enabled
+        # Note: vllm batch mode uses same processor for all items
+        constrained_processor = None
+        if use_constrained_decoding:
+            # Reset processor state for new generation
+            self.constrained_processor.reset()
+            
+            self.constrained_processor.enabled = use_constrained_decoding
+            self.constrained_processor.debug = constrained_decoding_debug
+            self.constrained_processor.metadata_temperature = None
+            self.constrained_processor.codes_temperature = None
+            self.constrained_processor.set_target_duration(target_duration)
+            self.constrained_processor.set_user_metadata(None)
+            self.constrained_processor.set_stop_at_reasoning(False)
+            self.constrained_processor.set_skip_genres(True)
+            self.constrained_processor.set_skip_caption(True)
+            self.constrained_processor.set_skip_language(True)
+            self.constrained_processor.set_generation_phase(generation_phase)
+            
+            constrained_processor = self.constrained_processor
+        
+        # Build sampling params
+        sampling_params = SamplingParams(
+            max_tokens=self.max_model_len - 64,
+            temperature=effective_sampler_temp,
+            cfg_scale=cfg_scale,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            logits_processor=constrained_processor,
+            logits_processor_update_state=constrained_processor.update_state if constrained_processor else None,
+        )
+        
+        # Generate with or without CFG
+        if cfg_scale > 1.0:
+            # Build unconditional prompts
+            formatted_unconditional_prompt = self.build_formatted_prompt_with_cot(
+                caption, lyrics, cot_text, is_negative_prompt=True, negative_prompt=negative_prompt
+            )
+            unconditional_prompts = [formatted_unconditional_prompt] * batch_size
+            
+            outputs = self.llm.generate(
+                formatted_prompts,
+                sampling_params,
+                unconditional_prompts=unconditional_prompts,
+            )
+        else:
+            outputs = self.llm.generate(formatted_prompts, sampling_params)
+        
+        # Extract text from each output
+        output_texts = []
+        for output in outputs:
+            if hasattr(output, "outputs") and len(output.outputs) > 0:
+                output_texts.append(output.outputs[0].text)
+            elif hasattr(output, "text"):
+                output_texts.append(output.text)
+            elif isinstance(output, dict) and "text" in output:
+                output_texts.append(output["text"])
+            else:
+                output_texts.append(str(output))
+        
+        return output_texts
+
+    def _run_pt_batch(
+        self,
+        formatted_prompts: List[str],
+        temperature: float,
+        cfg_scale: float,
+        negative_prompt: str,
+        top_k: Optional[int],
+        top_p: Optional[float],
+        repetition_penalty: float,
+        use_constrained_decoding: bool = True,
+        constrained_decoding_debug: bool = False,
+        target_duration: Optional[float] = None,
+        generation_phase: str = "codes",
+        caption: str = "",
+        lyrics: str = "",
+        cot_text: str = "",
+        seeds: Optional[List[int]] = None,
+    ) -> List[str]:
+        """Batch generation using PyTorch backend"""
+        import random
+        
+        batch_size = len(formatted_prompts)
+        output_texts = []
+        
+        # Generate each item sequentially with different seeds
+        # (PyTorch backend doesn't support true batching efficiently)
+        for i, formatted_prompt in enumerate(formatted_prompts):
+            # Set seed for this item if provided
+            if seeds and i < len(seeds):
+                torch.manual_seed(seeds[i])
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seeds[i])
+            
+            # Generate using single-item method
+            output_text = self._run_pt_from_formatted(
+                formatted_prompt=formatted_prompt,
+                temperature=temperature,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                use_constrained_decoding=use_constrained_decoding,
+                constrained_decoding_debug=constrained_decoding_debug,
+                target_duration=target_duration,
+                user_metadata=None,
+                stop_at_reasoning=False,
+                skip_genres=True,
+                skip_caption=True,
+                skip_language=True,
+                generation_phase=generation_phase,
+                caption=caption,
+                lyrics=lyrics,
+                cot_text=cot_text,
+            )
+            
+            output_texts.append(output_text)
+        
+        return output_texts
 
     def _run_pt_from_formatted(
         self,
@@ -573,6 +722,8 @@ class LLMHandler:
             use_cot_caption: Whether to generate caption in CoT (default True).
             use_cot_language: Whether to generate language in CoT (default True).
         """
+        import time
+        
         infer_type = (infer_type or "").strip().lower()
         if infer_type not in {"dit", "llm_dit"}:
             return {}, "", f"❌ invalid infer_type: {infer_type!r} (expected 'dit' or 'llm_dit')"
@@ -581,10 +732,15 @@ class LLMHandler:
         audio_codes = ""
         has_all_metas = self.has_all_metas(user_metadata)
         
+        # Timing variables
+        phase1_time = 0.0
+        phase2_time = 0.0
+        
         # ========== PHASE 1: CoT Generation ==========
         # Always generate CoT unless all metadata are user-provided
         if not has_all_metas or not is_format_caption:
             logger.info("Phase 1: Generating CoT metadata...")
+            phase1_start = time.time()
             
             # Build formatted prompt for CoT phase
             formatted_prompt = self.build_formatted_prompt(caption, lyrics, generation_phase="cot")
@@ -615,12 +771,14 @@ class LLMHandler:
                 stop_at_reasoning=True,  # Always stop at </think> in Phase 1
             )
             
+            phase1_time = time.time() - phase1_start
+            
             if not cot_output_text:
                 return {}, "", status
             
             # Parse metadata from CoT output
             metadata, _ = self.parse_lm_output(cot_output_text)
-            logger.info(f"Phase 1 completed. Generated metadata: {list(metadata.keys())}")
+            logger.info(f"Phase 1 completed in {phase1_time:.2f}s. Generated metadata: {list(metadata.keys())}")
         else:
             # Use user-provided metadata
             logger.info("Phase 1: Using user-provided metadata (skipping generation)")
@@ -628,11 +786,12 @@ class LLMHandler:
         
         # If infer_type is 'dit', stop here and return only metadata
         if infer_type == "dit":
-            status_msg = f"✅ Generated CoT metadata successfully\nFields: {', '.join(metadata.keys())}"
+            status_msg = f"✅ Generated CoT metadata successfully\nFields: {', '.join(metadata.keys())}\nPhase1: {phase1_time:.2f}s"
             return metadata, "", status_msg
         
         # ========== PHASE 2: Audio Codes Generation ==========
         logger.info("Phase 2: Generating audio codes...")
+        phase2_start = time.time()
         
         # Format metadata as CoT using YAML (matching training format)
         cot_text = self._format_metadata_as_cot(metadata)
@@ -668,14 +827,192 @@ class LLMHandler:
         if not codes_output_text:
             return metadata, "", status
         
+        phase2_time = time.time() - phase2_start
+        
         # Parse audio codes from output (metadata should be same as Phase 1)
         _, audio_codes = self.parse_lm_output(codes_output_text)
         
         codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
-        logger.info(f"Phase 2 completed. Generated {codes_count} audio codes")
+        logger.info(f"Phase 2 completed in {phase2_time:.2f}s. Generated {codes_count} audio codes")
         
-        status_msg = f"✅ Generated successfully (2-phase)\nPhase 1: CoT metadata\nPhase 2: {codes_count} audio codes"
+        status_msg = f"✅ Generated successfully (2-phase)\nPhase 1: CoT metadata\nPhase 2: {codes_count} audio codes\nPhase1: {phase1_time:.2f}s, Phase2: {phase2_time:.2f}s"
         return metadata, audio_codes, status_msg
+    
+    def generate_with_stop_condition_batch(
+        self,
+        caption: str,
+        lyrics: str,
+        batch_size: int,
+        infer_type: str = "llm_dit",
+        temperature: float = 0.85,
+        cfg_scale: float = 1.0,
+        negative_prompt: str = "NO USER INPUT",
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        repetition_penalty: float = 1.0,
+        use_constrained_decoding: bool = True,
+        constrained_decoding_debug: bool = False,
+        target_duration: Optional[float] = None,
+        user_metadata: Optional[Dict[str, Optional[str]]] = None,
+        use_cot_caption: bool = True,
+        use_cot_language: bool = True,
+        is_format_caption: bool = False,
+        seeds: Optional[List[int]] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[str], str]:
+        """
+        Batch version of generate_with_stop_condition.
+        
+        Generates multiple audio codes with same conditions but different seeds (for diversity).
+        
+        Args:
+            caption: Same caption for all items
+            lyrics: Same lyrics for all items
+            batch_size: Number of items to generate
+            seeds: Optional list of seeds for each batch item (for reproducibility)
+            ... (other args same as generate_with_stop_condition)
+        
+        Returns:
+            Tuple of (metadata_list, audio_codes_list, status_message)
+            - metadata_list: List of metadata dicts (same metadata for all items)
+            - audio_codes_list: List of audio code strings (one per item, different due to sampling)
+            - status_message: Generation status
+        """
+        import random
+        import time
+        
+        infer_type = (infer_type or "").strip().lower()
+        if infer_type not in {"dit", "llm_dit"}:
+            return [], [], f"❌ invalid infer_type: {infer_type!r} (expected 'dit' or 'llm_dit')"
+        
+        # Generate seeds if not provided
+        if seeds is None:
+            seeds = [random.randint(0, 2**32 - 1) for _ in range(batch_size)]
+        elif len(seeds) < batch_size:
+            # Pad with random seeds if not enough provided
+            seeds = list(seeds) + [random.randint(0, 2**32 - 1) for _ in range(batch_size - len(seeds))]
+        else:
+            seeds = seeds[:batch_size]  # Truncate if too many
+        
+        # Timing variables
+        phase1_time = 0.0
+        phase2_time = 0.0
+        
+        # ========== PHASE 1: CoT Generation (ONCE for all items) ==========
+        has_all_metas = self.has_all_metas(user_metadata)
+        
+        if not has_all_metas or not is_format_caption:
+            logger.info("Batch Phase 1: Generating CoT metadata (once for all items)...")
+            phase1_start = time.time()
+            
+            # Generate CoT metadata once (same for all batch items)
+            metadata, _, status = self.generate_with_stop_condition(
+                caption=caption,
+                lyrics=lyrics,
+                infer_type="dit",  # Only generate metadata
+                temperature=temperature,
+                cfg_scale=cfg_scale,
+                negative_prompt=negative_prompt,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                use_constrained_decoding=use_constrained_decoding,
+                constrained_decoding_debug=constrained_decoding_debug,
+                target_duration=target_duration,
+                user_metadata=user_metadata,
+                use_cot_caption=use_cot_caption,
+                use_cot_language=use_cot_language,
+                is_format_caption=is_format_caption,
+            )
+            
+            phase1_time = time.time() - phase1_start
+            
+            if not metadata:
+                return [], [], status
+            
+            logger.info(f"Batch Phase 1 completed in {phase1_time:.2f}s. Generated metadata: {list(metadata.keys())}")
+        else:
+            # Use user-provided metadata
+            logger.info("Batch Phase 1: Using user-provided metadata (skipping generation)")
+            metadata = {k: v for k, v in user_metadata.items() if v is not None}
+        
+        # If infer_type is 'dit', stop here and return only metadata
+        if infer_type == "dit":
+            metadata_list = [metadata.copy() for _ in range(batch_size)]
+            status_msg = f"✅ Generated CoT metadata successfully (batch mode)\nFields: {', '.join(metadata.keys())}\nPhase1: {phase1_time:.2f}s"
+            return metadata_list, [""] * batch_size, status_msg
+        
+        # ========== PHASE 2: Audio Codes Generation (BATCH) ==========
+        logger.info(f"Batch Phase 2: Generating audio codes for {batch_size} items...")
+        phase2_start = time.time()
+        
+        # Format metadata as CoT
+        cot_text = self._format_metadata_as_cot(metadata)
+        
+        # Build formatted prompt with CoT
+        formatted_prompt = self.build_formatted_prompt_with_cot(caption, lyrics, cot_text)
+        
+        # Replicate prompt for batch (all items have same prompt, differ by seeds)
+        formatted_prompts = [formatted_prompt] * batch_size
+        
+        # Call backend-specific batch generation
+        try:
+            if self.llm_backend == "vllm":
+                codes_outputs = self._run_vllm_batch(
+                    formatted_prompts=formatted_prompts,
+                    temperature=temperature,
+                    cfg_scale=cfg_scale,
+                    negative_prompt=negative_prompt,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    use_constrained_decoding=use_constrained_decoding,
+                    constrained_decoding_debug=constrained_decoding_debug,
+                    target_duration=target_duration,
+                    generation_phase="codes",
+                    caption=caption,
+                    lyrics=lyrics,
+                    cot_text=cot_text,
+                    seeds=seeds,
+                )
+            else:  # pt backend
+                codes_outputs = self._run_pt_batch(
+                    formatted_prompts=formatted_prompts,
+                    temperature=temperature,
+                    cfg_scale=cfg_scale,
+                    negative_prompt=negative_prompt,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    use_constrained_decoding=use_constrained_decoding,
+                    constrained_decoding_debug=constrained_decoding_debug,
+                    target_duration=target_duration,
+                    generation_phase="codes",
+                    caption=caption,
+                    lyrics=lyrics,
+                    cot_text=cot_text,
+                    seeds=seeds,
+                )
+        except Exception as e:
+            error_msg = f"❌ Error in batch codes generation: {str(e)}"
+            logger.error(error_msg)
+            return [], [], error_msg
+        
+        # Parse audio codes from each output
+        audio_codes_list = []
+        metadata_list = []
+        for output_text in codes_outputs:
+            _, audio_codes = self.parse_lm_output(output_text)
+            audio_codes_list.append(audio_codes)
+            metadata_list.append(metadata.copy())  # Same metadata for all
+        
+        phase2_time = time.time() - phase2_start
+        
+        # Log results
+        codes_counts = [len(codes.split('<|audio_code_')) - 1 if codes else 0 for codes in audio_codes_list]
+        logger.info(f"Batch Phase 2 completed in {phase2_time:.2f}s. Generated codes: {codes_counts}")
+        
+        status_msg = f"✅ Batch generation completed ({batch_size} items)\nPhase 1: CoT metadata\nPhase 2: {sum(codes_counts)} total codes ({codes_counts})\nPhase1: {phase1_time:.2f}s, Phase2: {phase2_time:.2f}s"
+        return metadata_list, audio_codes_list, status_msg
 
     def build_formatted_prompt(self, caption: str, lyrics: str = "", is_negative_prompt: bool = False, generation_phase: str = "cot", negative_prompt: str = "NO USER INPUT") -> str:
         """
