@@ -332,10 +332,9 @@ def generate_with_progress(
                 logger.info(f"Generating LM batch chunk {chunk_idx+1}/{num_chunks} (size: {chunk_size}, seeds: {chunk_seeds})...")
                 
                 # Generate batch
-                metadata_list, audio_codes_list, status = llm_handler.generate_with_stop_condition_batch(
+                metadata_list, audio_codes_list, status = llm_handler.generate_with_stop_condition(
                     caption=captions or "",
                     lyrics=lyrics or "",
-                    batch_size=chunk_size,
                     infer_type="llm_dit",
                     temperature=lm_temperature,
                     cfg_scale=lm_cfg_scale,
@@ -347,6 +346,7 @@ def generate_with_progress(
                     use_cot_language=use_cot_language,
                     is_format_caption=is_format_caption,
                     constrained_decoding_debug=constrained_decoding_debug,
+                    batch_size=chunk_size,
                     seeds=chunk_seeds,
                 )
                 
@@ -474,9 +474,26 @@ def generate_with_progress(
         progress=progress
     )
     
-    # Extract results
-    first_audio, second_audio, all_audio_paths, generation_info, status_message, seed_value_for_ui, \
-        align_score_1, align_text_1, align_plot_1, align_score_2, align_text_2, align_plot_2 = result
+    # Extract results from new dict structure
+    if not isinstance(result, dict):
+        # Fallback for old tuple format (should not happen)
+        first_audio, second_audio, all_audio_paths, generation_info, status_message, seed_value_for_ui, \
+            align_score_1, align_text_1, align_plot_1, align_score_2, align_text_2, align_plot_2 = result
+    else:
+        audios = result.get("audios", [])
+        all_audio_paths = [audio.get("path") for audio in audios]
+        first_audio = all_audio_paths[0] if len(all_audio_paths) > 0 else None
+        second_audio = all_audio_paths[1] if len(all_audio_paths) > 1 else None
+        generation_info = result.get("generation_info", "")
+        status_message = result.get("status_message", "")
+        seed_value_for_ui = result.get("extra_outputs", {}).get("seed_value", "")
+        # Legacy alignment fields (no longer used)
+        align_score_1 = ""
+        align_text_1 = ""
+        align_plot_1 = None
+        align_score_2 = ""
+        align_text_2 = ""
+        align_plot_2 = None
     
     # Extract LM timing from status if available and prepend to generation_info
     if status:

@@ -3,12 +3,88 @@ from torch import nn
 from typing import Optional
 
 
+def apply_top_k_top_p(
+    logits: torch.Tensor,
+    k: Optional[torch.Tensor],
+    p: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Apply top-k and top-p masks to the logits (vLLM style).
+    
+    The logits tensor is updated in-place.
+    """
+    if p is None:
+        if k is None:
+            return logits
+        # Avoid sorting vocab for top-k only case
+        return apply_top_k_only(logits, k)
+
+    # Need to sort for top-p
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+
+    if k is not None:
+        # Apply top-k first
+        vocab_size = logits_sort.size(1)
+        # Clamp k to valid range
+        k_clamped = k.clamp(1, vocab_size).long()
+        top_k_mask_idx = vocab_size - k_clamped  # shape: [B]
+        # Get the threshold value for each batch
+        top_k_thresh = logits_sort.gather(1, top_k_mask_idx.unsqueeze(1))
+        top_k_mask = logits_sort < top_k_thresh
+        logits_sort.masked_fill_(top_k_mask, float('-inf'))
+
+    # Apply top-p
+    probs_sort = logits_sort.softmax(dim=-1)
+    probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)  # reuse buffer
+    top_p_mask = probs_sum <= (1.0 - p.unsqueeze(1))
+    # Ensure at least one token is kept
+    top_p_mask[:, -1] = False
+    logits_sort.masked_fill_(top_p_mask, float('-inf'))
+
+    # Re-sort back to original positions
+    logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
+    return logits
+
+
+def apply_top_k_only(
+    logits: torch.Tensor,
+    k: torch.Tensor,
+) -> torch.Tensor:
+    """Apply top-k mask without sorting the entire vocab (vLLM style).
+    
+    This is much faster than sorting for top-k only cases.
+    The logits tensor is updated in-place.
+    """
+    vocab_size = logits.shape[1]
+    # Handle cases where k >= vocab_size (no filtering needed)
+    no_top_k_mask = (k <= 0) | (k >= vocab_size)
+    # Set invalid k to 1 so we can still gather
+    k_safe = k.masked_fill(no_top_k_mask, 1).long()
+    # NOTE: This int() causes CPU-GPU sync, but torch.topk requires Python int
+    max_top_k = int(k_safe.max().clamp(max=vocab_size))
+    
+    # Get top-k values for all batches
+    # topk.values has shape [batch_size, max_top_k]
+    topk_values = logits.topk(max_top_k, dim=1).values
+    
+    # Convert k to 0-based index: we want the k-th largest value (index k-1)
+    # Clamp to valid range for gather
+    k_index = (k_safe - 1).clamp(0, max_top_k - 1).unsqueeze(1)  # shape: [B, 1]
+    # Gather the threshold value (the k-th largest)
+    top_k_thresh = topk_values.gather(1, k_index)
+    
+    # For rows with no top-k filtering, set threshold to -inf so nothing gets masked
+    top_k_thresh.masked_fill_(no_top_k_mask.unsqueeze(1), float('-inf'))
+    
+    # Mask all values below the threshold
+    logits.masked_fill_(logits < top_k_thresh, float('-inf'))
+    return logits
+
+
 class Sampler(nn.Module):
 
     def __init__(self):
         super().__init__()
 
-    @torch.compile
     def forward(
         self, 
         logits: torch.Tensor, 
@@ -19,56 +95,34 @@ class Sampler(nn.Module):
         input_ids: Optional[torch.Tensor] = None,
     ):
         """
-        Sample tokens from logits with optional top-k, top-p, and repetition penalty.
+        Sample tokens from logits with optional top-k and top-p filtering.
         
-        Args:
-            logits: [batch_size, vocab_size] logits tensor
-            temperatures: [batch_size] temperature values
-            top_ks: Optional [batch_size] top-k values (None or 0 means no top-k filtering)
-            top_ps: Optional [batch_size] top-p values (None or 1.0 means no top-p filtering)
-            repetition_penalties: Optional [batch_size] repetition penalty values (1.0 means no penalty)
-            input_ids: Optional [batch_size, seq_len] input token ids for repetition penalty
+        Condition checking is done OUTSIDE the compiled function to avoid
+        graph breaks from .any() calls.
         """
-        batch_size, vocab_size = logits.shape
-        
-        # Note: Repetition penalty is applied in ModelRunner before calling sampler
-        # This allows us to use the full sequence context
-        
         # Apply temperature
         logits = logits.float().div_(temperatures.unsqueeze(dim=1))
         
-        # Apply top-k filtering if specified
-        if top_ks is not None:
-            for i in range(batch_size):
-                top_k = top_ks[i].item()
-                if top_k > 0 and top_k < vocab_size:
-                    # Get top-k logits, set others to -inf
-                    top_k_logits, top_k_indices = torch.topk(logits[i], int(top_k), dim=-1)
-                    filtered_logits = torch.full_like(logits[i], float('-inf'))
-                    filtered_logits[top_k_indices] = top_k_logits
-                    logits[i] = filtered_logits
+        # Check conditions OUTSIDE compiled code to avoid graph breaks
+        # These .any() calls cause CPU-GPU sync, but we do it once here
+        # instead of inside the compiled function
+        need_topk = top_ks is not None and bool((top_ks > 0).any()) and bool((top_ks < logits.shape[1]).any())
+        need_topp = top_ps is not None and bool((top_ps < 1.0).any()) and bool((top_ps > 0.0).any())
         
-        # Apply top-p (nucleus) filtering if specified
-        if top_ps is not None:
-            probs = torch.softmax(logits, dim=-1)
-            for i in range(batch_size):
-                top_p = top_ps[i].item()
-                if 0.0 < top_p < 1.0:
-                    # Sort probabilities in descending order
-                    sorted_probs, sorted_indices = torch.sort(probs[i], descending=True)
-                    # Calculate cumulative probabilities
-                    cumsum_probs = torch.cumsum(sorted_probs, dim=-1)
-                    # Find the cutoff point
-                    cutoff_idx = (cumsum_probs <= top_p).sum().item()
-                    if cutoff_idx < len(sorted_indices):
-                        cutoff_idx += 1  # Include one more token to ensure we have at least one
-                    # Create mask for tokens to keep
-                    mask = torch.zeros_like(probs[i])
-                    mask[sorted_indices[:cutoff_idx]] = 1.0
-                    # Apply mask: set filtered tokens to -inf
-                    logits[i] = torch.where(mask > 0, logits[i], torch.tensor(float('-inf'), device=logits.device))
+        if need_topk or need_topp:
+            # Apply filtering (this part is not compiled due to dynamic control flow)
+            logits = apply_top_k_top_p(
+                logits,
+                top_ks if need_topk else None,
+                top_ps if need_topp else None,
+            )
         
-        # Sample using Gumbel-max trick (equivalent to sampling from softmax)
-        probs = torch.softmax(logits, dim=-1)
-        sample_tokens = probs.div_(torch.empty_like(probs).exponential_(1).clamp_min_(1e-10)).argmax(dim=-1)
-        return sample_tokens
+        # Sample using compiled function
+        return self._sample(logits)
+    
+    @torch.compile(dynamic=True)
+    def _sample(self, logits: torch.Tensor) -> torch.Tensor:
+        """Compiled sampling kernel - no graph breaks here."""
+        probs = logits.softmax(dim=-1, dtype=torch.float32)
+        q = torch.empty_like(probs).exponential_()
+        return probs.div(q).argmax(dim=-1)

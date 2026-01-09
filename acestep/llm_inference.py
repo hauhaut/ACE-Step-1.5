@@ -5,7 +5,7 @@ Handles all LM-related operations including initialization and generation
 import os
 import traceback
 import time
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Union
 from contextlib import contextmanager
 
 import yaml
@@ -85,6 +85,189 @@ class LLMHandler:
         except Exception as e:
             return 0.9, False
     
+    def _has_meaningful_negative_prompt(self, negative_prompt: str) -> bool:
+        """Check if negative prompt is meaningful (not default/empty)"""
+        return negative_prompt and negative_prompt.strip() and negative_prompt.strip() != "NO USER INPUT"
+    
+    def _build_logits_processor(self, repetition_penalty: float) -> LogitsProcessorList:
+        """Build logits processor list with repetition penalty if needed"""
+        logits_processor = LogitsProcessorList()
+        if repetition_penalty != 1.0:
+            logits_processor.append(RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty))
+        return logits_processor
+    
+    def _setup_constrained_processor(
+        self,
+        use_constrained_decoding: bool,
+        constrained_decoding_debug: bool,
+        target_duration: Optional[float],
+        user_metadata: Optional[Dict[str, Optional[str]]],
+        stop_at_reasoning: bool,
+        skip_genres: bool,
+        skip_caption: bool,
+        skip_language: bool,
+        generation_phase: str,
+        is_batch: bool = False,
+        metadata_temperature: Optional[float] = None,
+        codes_temperature: Optional[float] = None,
+    ) -> Optional[MetadataConstrainedLogitsProcessor]:
+        """Setup and configure constrained processor for generation"""
+        use_phase_temperatures = not is_batch and (metadata_temperature is not None or codes_temperature is not None)
+        
+        if not use_constrained_decoding and not use_phase_temperatures:
+            return None
+        
+        # Reset processor state for new generation
+        self.constrained_processor.reset()
+        
+        # Use shared processor, just update settings
+        self.constrained_processor.enabled = use_constrained_decoding
+        self.constrained_processor.debug = constrained_decoding_debug
+        
+        # Phase temperatures only supported in single mode
+        if use_phase_temperatures:
+            self.constrained_processor.metadata_temperature = metadata_temperature
+            self.constrained_processor.codes_temperature = codes_temperature
+        else:
+            self.constrained_processor.metadata_temperature = None
+            self.constrained_processor.codes_temperature = None
+        
+        self.constrained_processor.set_target_duration(target_duration)
+        
+        # Batch mode uses default/disabled settings for these options
+        if is_batch:
+            self.constrained_processor.set_user_metadata(None)
+            self.constrained_processor.set_stop_at_reasoning(False)
+            self.constrained_processor.set_skip_genres(True)
+            self.constrained_processor.set_skip_caption(True)
+            self.constrained_processor.set_skip_language(True)
+        else:
+            # Single mode uses provided settings
+            self.constrained_processor.set_user_metadata(user_metadata)
+            self.constrained_processor.set_stop_at_reasoning(stop_at_reasoning)
+            self.constrained_processor.set_skip_genres(skip_genres)
+            self.constrained_processor.set_skip_caption(skip_caption)
+            self.constrained_processor.set_skip_language(skip_language)
+        
+        # Set generation phase for phase-aware processing
+        self.constrained_processor.set_generation_phase(generation_phase)
+        
+        return self.constrained_processor
+    
+    def _build_unconditional_prompt(
+        self,
+        caption: str,
+        lyrics: str,
+        cot_text: str,
+        negative_prompt: str,
+        generation_phase: str,
+        is_batch: bool = False,
+    ) -> str:
+        """Build unconditional prompt for CFG based on generation phase and batch mode"""
+        if is_batch or generation_phase == "codes":
+            # Codes phase or batch mode: use empty CoT in unconditional prompt
+            return self.build_formatted_prompt_with_cot(
+                caption, lyrics, cot_text, is_negative_prompt=True, negative_prompt=negative_prompt
+            )
+        else:
+            # CoT phase (single mode only): unconditional prompt
+            # If negative_prompt is provided, use it as caption; otherwise remove caption and keep only lyrics
+            return self.build_formatted_prompt(
+                caption, lyrics, is_negative_prompt=True, generation_phase="cot", negative_prompt=negative_prompt
+            )
+    
+    def _load_pytorch_model(self, model_path: str, device: str) -> Tuple[bool, str]:
+        """Load PyTorch model from path and return (success, status_message)"""
+        try:
+            self.llm = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
+            if not self.offload_to_cpu:
+                self.llm = self.llm.to(device).to(self.dtype)
+            else:
+                self.llm = self.llm.to("cpu").to(self.dtype)
+            self.llm.eval()
+            self.llm_backend = "pt"
+            self.llm_initialized = True
+            logger.info(f"5Hz LM initialized successfully using PyTorch backend on {device}")
+            status_msg = f"✅ 5Hz LM initialized successfully\nModel: {model_path}\nBackend: PyTorch\nDevice: {device}"
+            return True, status_msg
+        except Exception as e:
+            return False, f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+    
+    def _apply_top_k_filter(self, logits: torch.Tensor, top_k: Optional[int]) -> torch.Tensor:
+        """Apply top-k filtering to logits"""
+        if top_k is not None and top_k > 0:
+            indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+            logits[indices_to_remove] = float('-inf')
+        return logits
+    
+    def _apply_top_p_filter(self, logits: torch.Tensor, top_p: Optional[float]) -> torch.Tensor:
+        """Apply top-p (nucleus) filtering to logits"""
+        if top_p is not None and 0.0 < top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+            logits[indices_to_remove] = float('-inf')
+        return logits
+    
+    def _sample_tokens(self, logits: torch.Tensor, temperature: float) -> torch.Tensor:
+        """Sample tokens from logits with temperature"""
+        if temperature > 0:
+            logits = logits / temperature
+            probs = torch.softmax(logits, dim=-1)
+            return torch.multinomial(probs, num_samples=1).squeeze(1)
+        else:
+            return torch.argmax(logits, dim=-1)
+    
+    def _check_eos_token(self, tokens: torch.Tensor, eos_token_id: int, pad_token_id: Optional[int]) -> bool:
+        """Check if any token in the batch is EOS or pad token"""
+        if torch.any(tokens == eos_token_id):
+            return True
+        if pad_token_id is not None and pad_token_id != eos_token_id:
+            if torch.any(tokens == pad_token_id):
+                return True
+        return False
+    
+    def _update_constrained_processor_state(self, constrained_processor: Optional[MetadataConstrainedLogitsProcessor], tokens: torch.Tensor):
+        """Update constrained processor state with generated tokens"""
+        if constrained_processor is not None:
+            for b in range(tokens.shape[0]):
+                constrained_processor.update_state(tokens[b].item())
+    
+    def _forward_pass(
+        self,
+        model: Any,
+        generated_ids: torch.Tensor,
+        model_kwargs: Dict[str, Any],
+        past_key_values: Optional[Any],
+        use_cache: bool,
+    ) -> Any:
+        """Perform forward pass with KV cache support"""
+        if past_key_values is None:
+            outputs = model(
+                input_ids=generated_ids,
+                **model_kwargs,
+                use_cache=use_cache,
+            )
+        else:
+            outputs = model(
+                input_ids=generated_ids[:, -1:],
+                past_key_values=past_key_values,
+                **model_kwargs,
+                use_cache=use_cache,
+            )
+        return outputs
+    
+    def _normalize_batch_input(self, formatted_prompts: Union[str, List[str]]) -> Tuple[List[str], bool]:
+        """Normalize batch input: convert single string to list and return (list, is_batch)"""
+        is_batch = isinstance(formatted_prompts, list)
+        if is_batch:
+            return formatted_prompts, is_batch
+        else:
+            return [formatted_prompts], is_batch
+    
     def initialize(
         self,
         checkpoint_dir: str,
@@ -150,41 +333,21 @@ class LLMHandler:
                     # vllm initialization failed, fallback to PyTorch
                     if not self.llm_initialized:
                         logger.warning("vllm initialization failed, falling back to PyTorch backend")
-                        try:
-                            self.llm = AutoModelForCausalLM.from_pretrained(full_lm_model_path, trust_remote_code=True)
-                            if not self.offload_to_cpu:
-                                self.llm = self.llm.to(device).to(self.dtype)
-                            else:
-                                self.llm = self.llm.to("cpu").to(self.dtype)
-                            self.llm.eval()
-                            self.llm_backend = "pt"
-                            self.llm_initialized = True
-                            logger.info("5Hz LM initialized successfully using PyTorch backend (fallback)")
-                            status_msg = f"✅ 5Hz LM initialized successfully (PyTorch fallback)\nModel: {full_lm_model_path}\nBackend: PyTorch"
-                        except Exception as e:
-                            return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", False
+                        success, status_msg = self._load_pytorch_model(full_lm_model_path, device)
+                        if not success:
+                            return status_msg, False
+                        status_msg = f"✅ 5Hz LM initialized successfully (PyTorch fallback)\nModel: {full_lm_model_path}\nBackend: PyTorch"
                 # If vllm initialization succeeded, self.llm_initialized should already be True
             else:
                 # Use PyTorch backend (pt)
-                try:
-                    self.llm = AutoModelForCausalLM.from_pretrained(full_lm_model_path, trust_remote_code=True)
-                    if not self.offload_to_cpu:
-                        self.llm = self.llm.to(device).to(self.dtype)
-                    else:
-                        self.llm = self.llm.to("cpu").to(self.dtype)
-                    self.llm.eval()
-                    self.llm_backend = "pt"
-                    self.llm_initialized = True
-                    logger.info(f"5Hz LM initialized successfully using PyTorch backend on {device}")
-                    status_msg = f"✅ 5Hz LM initialized successfully\nModel: {full_lm_model_path}\nBackend: PyTorch\nDevice: {device}"
-                except Exception as e:
-                    return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", False
+                success, status_msg = self._load_pytorch_model(full_lm_model_path, device)
+                if not success:
+                    return status_msg, False
             
             return status_msg, True
             
         except Exception as e:
-            error_msg = f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-            return error_msg, False
+            return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", False
     
     def _initialize_5hz_lm_vllm(self, model_path: str) -> str:
         """Initialize 5Hz LM model using vllm backend"""
@@ -230,12 +393,11 @@ class LLMHandler:
             return f"✅ 5Hz LM initialized successfully\nModel: {model_path}\nDevice: {device_name}\nGPU Memory Utilization: {gpu_memory_utilization:.2f}"
         except Exception as e:
             self.llm_initialized = False
-            error_msg = f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-            return error_msg
+            return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
 
-    def _run_vllm_from_formatted(
+    def _run_vllm(
         self,
-        formatted_prompt: str,
+        formatted_prompts: Union[str, List[str]],
         temperature: float,
         cfg_scale: float,
         negative_prompt: str,
@@ -244,7 +406,7 @@ class LLMHandler:
         repetition_penalty: float,
         use_constrained_decoding: bool = True,
         constrained_decoding_debug: bool = False,
-        metadata_temperature: Optional[float] = 0.85,
+        metadata_temperature: Optional[float] = None,
         codes_temperature: Optional[float] = None,
         target_duration: Optional[float] = None,
         user_metadata: Optional[Dict[str, Optional[str]]] = None,
@@ -256,37 +418,40 @@ class LLMHandler:
         caption: str = "",
         lyrics: str = "",
         cot_text: str = "",
-    ) -> str:
-        """Shared vllm path: accept prebuilt formatted prompt and return text."""
+        seeds: Optional[List[int]] = None,
+    ) -> Union[str, List[str]]:
+        """
+        Unified vllm generation function supporting both single and batch modes.
+        Accepts either a single formatted prompt (str) or a list of formatted prompts (List[str]).
+        Returns a single string for single mode, or a list of strings for batch mode.
+        """
         from nanovllm import SamplingParams
 
+        # Determine if batch mode
+        formatted_prompt_list, is_batch = self._normalize_batch_input(formatted_prompts)
+        batch_size = len(formatted_prompt_list)
+
         # Determine effective temperature for sampler
-        use_phase_temperatures = metadata_temperature is not None or codes_temperature is not None
+        # Batch mode doesn't support phase temperatures, so use simple temperature
+        # Single mode supports phase temperatures
+        use_phase_temperatures = not is_batch and (metadata_temperature is not None or codes_temperature is not None)
         effective_sampler_temp = 1.0 if use_phase_temperatures else temperature
 
-        # Use shared constrained processor if enabled
-        constrained_processor = None
-        if use_constrained_decoding or use_phase_temperatures:
-            # Reset processor state for new generation
-            self.constrained_processor.reset()
-            
-            # Use shared processor, just update caption and settings
-            self.constrained_processor.enabled = use_constrained_decoding
-            self.constrained_processor.debug = constrained_decoding_debug
-            self.constrained_processor.metadata_temperature = metadata_temperature if use_phase_temperatures else None
-            self.constrained_processor.codes_temperature = codes_temperature if use_phase_temperatures else None
-            self.constrained_processor.set_target_duration(target_duration)
-            # Always call set_user_metadata to ensure previous settings are cleared if None
-            self.constrained_processor.set_user_metadata(user_metadata)
-            self.constrained_processor.set_stop_at_reasoning(stop_at_reasoning)
-            # Set skip_caption and skip_language based on flags
-            self.constrained_processor.set_skip_genres(skip_genres)
-            self.constrained_processor.set_skip_caption(skip_caption)
-            self.constrained_processor.set_skip_language(skip_language)
-            # Set generation phase for phase-aware processing
-            self.constrained_processor.set_generation_phase(generation_phase)
-            
-            constrained_processor = self.constrained_processor
+        # Setup constrained processor
+        constrained_processor = self._setup_constrained_processor(
+            use_constrained_decoding=use_constrained_decoding or use_phase_temperatures,
+            constrained_decoding_debug=constrained_decoding_debug,
+            target_duration=target_duration,
+            user_metadata=user_metadata,
+            stop_at_reasoning=stop_at_reasoning,
+            skip_genres=skip_genres,
+            skip_caption=skip_caption,
+            skip_language=skip_language,
+            generation_phase=generation_phase,
+            is_batch=is_batch,
+            metadata_temperature=metadata_temperature,
+            codes_temperature=codes_temperature,
+        )
 
         sampling_params = SamplingParams(
             max_tokens=self.max_model_len - 64,
@@ -301,119 +466,25 @@ class LLMHandler:
 
         if cfg_scale > 1.0:
             # Build unconditional prompt based on generation phase
-            if generation_phase == "codes":
-                # Codes phase: use empty CoT in unconditional prompt
-                # formatted_prompt was built with build_formatted_prompt_with_cot(caption, lyrics, cot_text)
-                # For unconditional, we use empty CoT: build_formatted_prompt_with_cot(caption, lyrics, cot_text, is_negative_prompt=True, negative_prompt=...)
-                formatted_unconditional_prompt = self.build_formatted_prompt_with_cot(
-                    caption, lyrics, cot_text, is_negative_prompt=True, negative_prompt=negative_prompt
-                )
-            else:
-                # CoT phase: unconditional prompt
-                # If negative_prompt is provided, use it as caption; otherwise remove caption and keep only lyrics
-                formatted_unconditional_prompt = self.build_formatted_prompt(
-                    caption, lyrics, is_negative_prompt=True, generation_phase="cot", negative_prompt=negative_prompt
-                )
-            
-            outputs = self.llm.generate(
-                [formatted_prompt],
-                sampling_params,
-                unconditional_prompts=[formatted_unconditional_prompt],
-            )
-        else:
-            outputs = self.llm.generate([formatted_prompt], sampling_params)
-
-        # Extract text (retain original selection order/logic)
-        if isinstance(outputs, list) and len(outputs) > 0:
-            if hasattr(outputs[0], "outputs") and len(outputs[0].outputs) > 0:
-                output_text = outputs[0].outputs[0].text
-            elif hasattr(outputs[0], "text"):
-                output_text = outputs[0].text
-            elif isinstance(outputs[0], dict) and "text" in outputs[0]:
-                output_text = outputs[0]["text"]
-            else:
-                output_text = str(outputs[0])
-        else:
-            output_text = str(outputs)
-
-        return output_text
-    
-    def _run_vllm_batch(
-        self,
-        formatted_prompts: List[str],
-        temperature: float,
-        cfg_scale: float,
-        negative_prompt: str,
-        top_k: Optional[int],
-        top_p: Optional[float],
-        repetition_penalty: float,
-        use_constrained_decoding: bool = True,
-        constrained_decoding_debug: bool = False,
-        target_duration: Optional[float] = None,
-        generation_phase: str = "codes",
-        caption: str = "",
-        lyrics: str = "",
-        cot_text: str = "",
-        seeds: Optional[List[int]] = None,
-    ) -> List[str]:
-        """Batch generation using vllm backend"""
-        from nanovllm import SamplingParams
-        
-        batch_size = len(formatted_prompts)
-        
-        # Determine effective temperature for sampler
-        effective_sampler_temp = temperature
-        
-        # Use shared constrained processor if enabled
-        # Note: vllm batch mode uses same processor for all items
-        constrained_processor = None
-        if use_constrained_decoding:
-            # Reset processor state for new generation
-            self.constrained_processor.reset()
-            
-            self.constrained_processor.enabled = use_constrained_decoding
-            self.constrained_processor.debug = constrained_decoding_debug
-            self.constrained_processor.metadata_temperature = None
-            self.constrained_processor.codes_temperature = None
-            self.constrained_processor.set_target_duration(target_duration)
-            self.constrained_processor.set_user_metadata(None)
-            self.constrained_processor.set_stop_at_reasoning(False)
-            self.constrained_processor.set_skip_genres(True)
-            self.constrained_processor.set_skip_caption(True)
-            self.constrained_processor.set_skip_language(True)
-            self.constrained_processor.set_generation_phase(generation_phase)
-            
-            constrained_processor = self.constrained_processor
-        
-        # Build sampling params
-        sampling_params = SamplingParams(
-            max_tokens=self.max_model_len - 64,
-            temperature=effective_sampler_temp,
-            cfg_scale=cfg_scale,
-            top_k=top_k,
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            logits_processor=constrained_processor,
-            logits_processor_update_state=constrained_processor.update_state if constrained_processor else None,
-        )
-        
-        # Generate with or without CFG
-        if cfg_scale > 1.0:
-            # Build unconditional prompts
-            formatted_unconditional_prompt = self.build_formatted_prompt_with_cot(
-                caption, lyrics, cot_text, is_negative_prompt=True, negative_prompt=negative_prompt
+            formatted_unconditional_prompt = self._build_unconditional_prompt(
+                caption=caption,
+                lyrics=lyrics,
+                cot_text=cot_text,
+                negative_prompt=negative_prompt,
+                generation_phase=generation_phase,
+                is_batch=is_batch,
             )
             unconditional_prompts = [formatted_unconditional_prompt] * batch_size
             
             outputs = self.llm.generate(
-                formatted_prompts,
+                formatted_prompt_list,
                 sampling_params,
                 unconditional_prompts=unconditional_prompts,
             )
         else:
-            outputs = self.llm.generate(formatted_prompts, sampling_params)
-        
-        # Extract text from each output
+            outputs = self.llm.generate(formatted_prompt_list, sampling_params)
+
+        # Extract text from outputs
         output_texts = []
         for output in outputs:
             if hasattr(output, "outputs") and len(output.outputs) > 0:
@@ -424,70 +495,11 @@ class LLMHandler:
                 output_texts.append(output["text"])
             else:
                 output_texts.append(str(output))
-        
-        return output_texts
 
-    def _run_pt_batch(
-        self,
-        formatted_prompts: List[str],
-        temperature: float,
-        cfg_scale: float,
-        negative_prompt: str,
-        top_k: Optional[int],
-        top_p: Optional[float],
-        repetition_penalty: float,
-        use_constrained_decoding: bool = True,
-        constrained_decoding_debug: bool = False,
-        target_duration: Optional[float] = None,
-        generation_phase: str = "codes",
-        caption: str = "",
-        lyrics: str = "",
-        cot_text: str = "",
-        seeds: Optional[List[int]] = None,
-    ) -> List[str]:
-        """Batch generation using PyTorch backend"""
-        import random
-        
-        batch_size = len(formatted_prompts)
-        output_texts = []
-        
-        # Generate each item sequentially with different seeds
-        # (PyTorch backend doesn't support true batching efficiently)
-        for i, formatted_prompt in enumerate(formatted_prompts):
-            # Set seed for this item if provided
-            if seeds and i < len(seeds):
-                torch.manual_seed(seeds[i])
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seeds[i])
-            
-            # Generate using single-item method
-            output_text = self._run_pt_from_formatted(
-                formatted_prompt=formatted_prompt,
-                temperature=temperature,
-                cfg_scale=cfg_scale,
-                negative_prompt=negative_prompt,
-                top_k=top_k,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-                use_constrained_decoding=use_constrained_decoding,
-                constrained_decoding_debug=constrained_decoding_debug,
-                target_duration=target_duration,
-                user_metadata=None,
-                stop_at_reasoning=False,
-                skip_genres=True,
-                skip_caption=True,
-                skip_language=True,
-                generation_phase=generation_phase,
-                caption=caption,
-                lyrics=lyrics,
-                cot_text=cot_text,
-            )
-            
-            output_texts.append(output_text)
-        
-        return output_texts
+        # Return single string for single mode, list for batch mode
+        return output_texts[0] if not is_batch else output_texts
 
-    def _run_pt_from_formatted(
+    def _run_pt_single(
         self,
         formatted_prompt: str,
         temperature: float,
@@ -496,20 +508,20 @@ class LLMHandler:
         top_k: Optional[int],
         top_p: Optional[float],
         repetition_penalty: float,
-        use_constrained_decoding: bool = True,
-        constrained_decoding_debug: bool = False,
-        target_duration: Optional[float] = None,
-        user_metadata: Optional[Dict[str, Optional[str]]] = None,
-        stop_at_reasoning: bool = False,
-        skip_genres: bool = True,
-        skip_caption: bool = False,
-        skip_language: bool = False,
-        generation_phase: str = "cot",
-        caption: str = "",
-        lyrics: str = "",
-        cot_text: str = "",
+        use_constrained_decoding: bool,
+        constrained_decoding_debug: bool,
+        target_duration: Optional[float],
+        user_metadata: Optional[Dict[str, Optional[str]]],
+        stop_at_reasoning: bool,
+        skip_genres: bool,
+        skip_caption: bool,
+        skip_language: bool,
+        generation_phase: str,
+        caption: str,
+        lyrics: str,
+        cot_text: str,
     ) -> str:
-        """Shared PyTorch path: accept prebuilt formatted prompt and return text."""
+        """Internal helper function for single-item PyTorch generation."""
         inputs = self.llm_tokenizer(
             formatted_prompt,
             return_tensors="pt",
@@ -517,27 +529,19 @@ class LLMHandler:
             truncation=True,
         )
 
-        # Use shared constrained processor if enabled
-        constrained_processor = None
-        if use_constrained_decoding:
-            # Reset processor state for new generation
-            self.constrained_processor.reset()
-            
-            # Use shared processor, just update caption and settings
-            self.constrained_processor.enabled = use_constrained_decoding
-            self.constrained_processor.debug = constrained_decoding_debug
-            self.constrained_processor.set_target_duration(target_duration)
-            # Always call set_user_metadata to ensure previous settings are cleared if None
-            self.constrained_processor.set_user_metadata(user_metadata)
-            self.constrained_processor.set_stop_at_reasoning(stop_at_reasoning)
-            # Set skip_caption and skip_language based on flags
-            self.constrained_processor.set_skip_genres(skip_genres)
-            self.constrained_processor.set_skip_caption(skip_caption)
-            self.constrained_processor.set_skip_language(skip_language)
-            # Set generation phase for phase-aware processing
-            self.constrained_processor.set_generation_phase(generation_phase)
-            
-            constrained_processor = self.constrained_processor
+        # Setup constrained processor
+        constrained_processor = self._setup_constrained_processor(
+            use_constrained_decoding=use_constrained_decoding,
+            constrained_decoding_debug=constrained_decoding_debug,
+            target_duration=target_duration,
+            user_metadata=user_metadata,
+            stop_at_reasoning=stop_at_reasoning,
+            skip_genres=skip_genres,
+            skip_caption=skip_caption,
+            skip_language=skip_language,
+            generation_phase=generation_phase,
+            is_batch=False,
+        )
 
         with self._load_model_context():
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
@@ -546,25 +550,18 @@ class LLMHandler:
                 max_new_tokens = min(max_new_tokens, self.max_model_len - 64)
 
             # Build logits processor list (only for CFG and repetition penalty)
-            logits_processor = LogitsProcessorList()
-            
-            # Add repetition penalty if needed
-            if repetition_penalty != 1.0:
-                logits_processor.append(RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty))
+            logits_processor = self._build_logits_processor(repetition_penalty)
 
             if cfg_scale > 1.0:
                 # Build unconditional prompt based on generation phase
-                if generation_phase == "codes":
-                    # Codes phase: use empty CoT in unconditional prompt
-                    formatted_unconditional_prompt = self.build_formatted_prompt_with_cot(
-                        caption, lyrics, cot_text, is_negative_prompt=True, negative_prompt=negative_prompt
-                    )
-                else:
-                    # CoT phase: unconditional prompt
-                    # If negative_prompt is provided, use it as caption; otherwise remove caption and keep only lyrics
-                    formatted_unconditional_prompt = self.build_formatted_prompt(
-                        caption, lyrics, is_negative_prompt=True, generation_phase="cot", negative_prompt=negative_prompt
-                    )
+                formatted_unconditional_prompt = self._build_unconditional_prompt(
+                    caption=caption,
+                    lyrics=lyrics,
+                    cot_text=cot_text,
+                    negative_prompt=negative_prompt,
+                    generation_phase=generation_phase,
+                    is_batch=False,
+                )
                 
                 # Tokenize both prompts together to ensure same length (with left padding)
                 # Left padding is important for generation tasks
@@ -657,7 +654,101 @@ class LLMHandler:
         
         output_text = self.llm_tokenizer.decode(generated_ids, skip_special_tokens=False)
         return output_text
-    
+
+    def _run_pt(
+        self,
+        formatted_prompts: Union[str, List[str]],
+        temperature: float,
+        cfg_scale: float,
+        negative_prompt: str,
+        top_k: Optional[int],
+        top_p: Optional[float],
+        repetition_penalty: float,
+        use_constrained_decoding: bool = True,
+        constrained_decoding_debug: bool = False,
+        target_duration: Optional[float] = None,
+        user_metadata: Optional[Dict[str, Optional[str]]] = None,
+        stop_at_reasoning: bool = False,
+        skip_genres: bool = True,
+        skip_caption: bool = False,
+        skip_language: bool = False,
+        generation_phase: str = "cot",
+        caption: str = "",
+        lyrics: str = "",
+        cot_text: str = "",
+        seeds: Optional[List[int]] = None,
+    ) -> Union[str, List[str]]:
+        """
+        Unified PyTorch generation function supporting both single and batch modes.
+        Accepts either a single formatted prompt (str) or a list of formatted prompts (List[str]).
+        Returns a single string for single mode, or a list of strings for batch mode.
+        Note: PyTorch backend processes batch items sequentially (doesn't support true batching efficiently).
+        """
+        # Determine if batch mode
+        formatted_prompt_list, is_batch = self._normalize_batch_input(formatted_prompts)
+
+        # For batch mode, process each item sequentially with different seeds
+        if is_batch:
+            output_texts = []
+            for i, formatted_prompt in enumerate(formatted_prompt_list):
+                # Set seed for this item if provided
+                if seeds and i < len(seeds):
+                    torch.manual_seed(seeds[i])
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(seeds[i])
+                
+                # Generate using single-item method with batch-mode defaults
+                output_text = self._run_pt_single(
+                    formatted_prompt=formatted_prompt,
+                    temperature=temperature,
+                    cfg_scale=cfg_scale,
+                    negative_prompt=negative_prompt,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    use_constrained_decoding=use_constrained_decoding,
+                    constrained_decoding_debug=constrained_decoding_debug,
+                    target_duration=target_duration,
+                    user_metadata=None,
+                    stop_at_reasoning=False,
+                    skip_genres=True,
+                    skip_caption=True,
+                    skip_language=True,
+                    generation_phase=generation_phase,
+                    caption=caption,
+                    lyrics=lyrics,
+                    cot_text=cot_text,
+                )
+                
+                output_texts.append(output_text)
+            
+            return output_texts
+
+        # Single mode: process the formatted prompt
+        formatted_prompt = formatted_prompt_list[0]
+        
+        return self._run_pt_single(
+            formatted_prompt=formatted_prompt,
+            temperature=temperature,
+            cfg_scale=cfg_scale,
+            negative_prompt=negative_prompt,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            use_constrained_decoding=use_constrained_decoding,
+            constrained_decoding_debug=constrained_decoding_debug,
+            target_duration=target_duration,
+            user_metadata=user_metadata,
+            stop_at_reasoning=stop_at_reasoning,
+            skip_genres=skip_genres,
+            skip_caption=skip_caption,
+            skip_language=skip_language,
+            generation_phase=generation_phase,
+            caption=caption,
+            lyrics=lyrics,
+            cot_text=cot_text,
+        )
+
     def has_all_metas(self, user_metadata: Optional[Dict[str, Optional[str]]]) -> bool:
         """Check if all required metadata are present."""
         if user_metadata is None:
@@ -708,7 +799,9 @@ class LLMHandler:
         use_cot_caption: bool = True,
         use_cot_language: bool = True,
         is_format_caption: bool = False,
-    ) -> Tuple[Dict[str, Any], str, str]:
+        batch_size: Optional[int] = None,
+        seeds: Optional[List[int]] = None,
+    ) -> Union[Tuple[Dict[str, Any], str, str], Tuple[List[Dict[str, Any]], List[str], str]]:
         """Two-phase LM generation: CoT generation followed by audio codes generation.
 
         - infer_type='dit': Phase 1 only - generate CoT and return metas (no audio codes)
@@ -721,30 +814,56 @@ class LLMHandler:
                            If specified, constrained decoding will inject these values directly.
             use_cot_caption: Whether to generate caption in CoT (default True).
             use_cot_language: Whether to generate language in CoT (default True).
+            batch_size: Optional batch size for batch generation. If None or 1, returns single result.
+                       If > 1, returns batch results (lists).
+            seeds: Optional list of seeds for batch generation (for reproducibility).
+                  Only used when batch_size > 1.
+        
+        Returns:
+            If batch_size is None or 1: (metadata, audio_codes, status_msg)
+            If batch_size > 1: (metadata_list, audio_codes_list, status_msg)
         """
         import time
+        import random
         
         infer_type = (infer_type or "").strip().lower()
         if infer_type not in {"dit", "llm_dit"}:
+            if batch_size and batch_size > 1:
+                return [], [], f"❌ invalid infer_type: {infer_type!r} (expected 'dit' or 'llm_dit')"
             return {}, "", f"❌ invalid infer_type: {infer_type!r} (expected 'dit' or 'llm_dit')"
-
+        
+        # Determine if batch mode
+        is_batch = batch_size and batch_size > 1
+        actual_batch_size = batch_size if is_batch else 1
+        
+        # Initialize variables
         metadata = {}
         audio_codes = ""
         has_all_metas = self.has_all_metas(user_metadata)
-        
-        # Timing variables
         phase1_time = 0.0
         phase2_time = 0.0
         
+        # Handle seeds for batch mode
+        if is_batch:
+            if seeds is None:
+                seeds = [random.randint(0, 2**32 - 1) for _ in range(actual_batch_size)]
+            elif len(seeds) < actual_batch_size:
+                seeds = list(seeds) + [random.randint(0, 2**32 - 1) for _ in range(actual_batch_size - len(seeds))]
+            else:
+                seeds = seeds[:actual_batch_size]
+        
         # ========== PHASE 1: CoT Generation ==========
-        # Always generate CoT unless all metadata are user-provided
-        if not has_all_metas or not is_format_caption:
-            logger.info("Phase 1: Generating CoT metadata...")
+        # Skip CoT if all metadata are user-provided OR caption is already formatted
+        if not has_all_metas and not is_format_caption:
+            if is_batch:
+                logger.info("Batch Phase 1: Generating CoT metadata (once for all items)...")
+            else:
+                logger.info("Phase 1: Generating CoT metadata...")
             phase1_start = time.time()
             
             # Build formatted prompt for CoT phase
             formatted_prompt = self.build_formatted_prompt(caption, lyrics, generation_phase="cot")
-
+            
             logger.info(f"generate_with_stop_condition: formatted_prompt={formatted_prompt}")
             # Generate CoT (stop at </think>)
             cot_output_text, status = self.generate_from_formatted_prompt(
@@ -774,23 +893,39 @@ class LLMHandler:
             phase1_time = time.time() - phase1_start
             
             if not cot_output_text:
+                if is_batch:
+                    return [], [], status
                 return {}, "", status
             
             # Parse metadata from CoT output
             metadata, _ = self.parse_lm_output(cot_output_text)
-            logger.info(f"Phase 1 completed in {phase1_time:.2f}s. Generated metadata: {list(metadata.keys())}")
+            if is_batch:
+                logger.info(f"Batch Phase 1 completed in {phase1_time:.2f}s. Generated metadata: {list(metadata.keys())}")
+            else:
+                logger.info(f"Phase 1 completed in {phase1_time:.2f}s. Generated metadata: {list(metadata.keys())}")
         else:
             # Use user-provided metadata
-            logger.info("Phase 1: Using user-provided metadata (skipping generation)")
+            if is_batch:
+                logger.info("Batch Phase 1: Using user-provided metadata (skipping generation)")
+            else:
+                logger.info("Phase 1: Using user-provided metadata (skipping generation)")
             metadata = {k: v for k, v in user_metadata.items() if v is not None}
         
         # If infer_type is 'dit', stop here and return only metadata
         if infer_type == "dit":
-            status_msg = f"✅ Generated CoT metadata successfully\nFields: {', '.join(metadata.keys())}\nPhase1: {phase1_time:.2f}s"
-            return metadata, "", status_msg
+            if is_batch:
+                metadata_list = [metadata.copy() for _ in range(actual_batch_size)]
+                status_msg = f"✅ Generated CoT metadata successfully (batch mode)\nFields: {', '.join(metadata.keys())}\nPhase1: {phase1_time:.2f}s"
+                return metadata_list, [""] * actual_batch_size, status_msg
+            else:
+                status_msg = f"✅ Generated CoT metadata successfully\nFields: {', '.join(metadata.keys())}\nPhase1: {phase1_time:.2f}s"
+                return metadata, "", status_msg
         
         # ========== PHASE 2: Audio Codes Generation ==========
-        logger.info("Phase 2: Generating audio codes...")
+        if is_batch:
+            logger.info(f"Batch Phase 2: Generating audio codes for {actual_batch_size} items...")
+        else:
+            logger.info("Phase 2: Generating audio codes...")
         phase2_start = time.time()
         
         # Format metadata as CoT using YAML (matching training format)
@@ -799,221 +934,110 @@ class LLMHandler:
         # Build formatted prompt with CoT for codes generation phase
         formatted_prompt_with_cot = self.build_formatted_prompt_with_cot(caption, lyrics, cot_text)
         logger.info(f"generate_with_stop_condition: formatted_prompt_with_cot={formatted_prompt_with_cot}")
-        # Generate audio codes
-        codes_output_text, status = self.generate_from_formatted_prompt(
-            formatted_prompt=formatted_prompt_with_cot,
-            cfg={
-                "temperature": temperature,
-                "cfg_scale": cfg_scale,
-                "negative_prompt": negative_prompt,
-                "top_k": top_k,
-                "top_p": top_p,
-                "repetition_penalty": repetition_penalty,
-                "target_duration": target_duration,
-                "user_metadata": None,  # No user metadata injection in Phase 2
-                "skip_caption": True,  # Skip caption since CoT is already included
-                "skip_language": True,  # Skip language since CoT is already included
-                "generation_phase": "codes",
-                # Pass context for building unconditional prompt in codes phase
-                "caption": caption,
-                "lyrics": lyrics,
-                "cot_text": cot_text,
-            },
-            use_constrained_decoding=use_constrained_decoding,
-            constrained_decoding_debug=constrained_decoding_debug,
-            stop_at_reasoning=False,  # Generate codes until EOS
-        )
         
-        if not codes_output_text:
-            return metadata, "", status
-        
-        phase2_time = time.time() - phase2_start
-        
-        # Parse audio codes from output (metadata should be same as Phase 1)
-        _, audio_codes = self.parse_lm_output(codes_output_text)
-        
-        codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
-        logger.info(f"Phase 2 completed in {phase2_time:.2f}s. Generated {codes_count} audio codes")
-        
-        status_msg = f"✅ Generated successfully (2-phase)\nPhase 1: CoT metadata\nPhase 2: {codes_count} audio codes\nPhase1: {phase1_time:.2f}s, Phase2: {phase2_time:.2f}s"
-        return metadata, audio_codes, status_msg
-    
-    def generate_with_stop_condition_batch(
-        self,
-        caption: str,
-        lyrics: str,
-        batch_size: int,
-        infer_type: str = "llm_dit",
-        temperature: float = 0.85,
-        cfg_scale: float = 1.0,
-        negative_prompt: str = "NO USER INPUT",
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
-        repetition_penalty: float = 1.0,
-        use_constrained_decoding: bool = True,
-        constrained_decoding_debug: bool = False,
-        target_duration: Optional[float] = None,
-        user_metadata: Optional[Dict[str, Optional[str]]] = None,
-        use_cot_caption: bool = True,
-        use_cot_language: bool = True,
-        is_format_caption: bool = False,
-        seeds: Optional[List[int]] = None,
-    ) -> Tuple[List[Dict[str, Any]], List[str], str]:
-        """
-        Batch version of generate_with_stop_condition.
-        
-        Generates multiple audio codes with same conditions but different seeds (for diversity).
-        
-        Args:
-            caption: Same caption for all items
-            lyrics: Same lyrics for all items
-            batch_size: Number of items to generate
-            seeds: Optional list of seeds for each batch item (for reproducibility)
-            ... (other args same as generate_with_stop_condition)
-        
-        Returns:
-            Tuple of (metadata_list, audio_codes_list, status_message)
-            - metadata_list: List of metadata dicts (same metadata for all items)
-            - audio_codes_list: List of audio code strings (one per item, different due to sampling)
-            - status_message: Generation status
-        """
-        import random
-        import time
-        
-        infer_type = (infer_type or "").strip().lower()
-        if infer_type not in {"dit", "llm_dit"}:
-            return [], [], f"❌ invalid infer_type: {infer_type!r} (expected 'dit' or 'llm_dit')"
-        
-        # Generate seeds if not provided
-        if seeds is None:
-            seeds = [random.randint(0, 2**32 - 1) for _ in range(batch_size)]
-        elif len(seeds) < batch_size:
-            # Pad with random seeds if not enough provided
-            seeds = list(seeds) + [random.randint(0, 2**32 - 1) for _ in range(batch_size - len(seeds))]
-        else:
-            seeds = seeds[:batch_size]  # Truncate if too many
-        
-        # Timing variables
-        phase1_time = 0.0
-        phase2_time = 0.0
-        
-        # ========== PHASE 1: CoT Generation (ONCE for all items) ==========
-        has_all_metas = self.has_all_metas(user_metadata)
-        
-        if not has_all_metas or not is_format_caption:
-            logger.info("Batch Phase 1: Generating CoT metadata (once for all items)...")
-            phase1_start = time.time()
+        if is_batch:
+            # Batch mode: generate codes for all items
+            formatted_prompts = [formatted_prompt_with_cot] * actual_batch_size
             
-            # Generate CoT metadata once (same for all batch items)
-            metadata, _, status = self.generate_with_stop_condition(
-                caption=caption,
-                lyrics=lyrics,
-                infer_type="dit",  # Only generate metadata
-                temperature=temperature,
-                cfg_scale=cfg_scale,
-                negative_prompt=negative_prompt,
-                top_k=top_k,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
+            # Call backend-specific batch generation
+            try:
+                if self.llm_backend == "vllm":
+                    codes_outputs = self._run_vllm(
+                        formatted_prompts=formatted_prompts,
+                        temperature=temperature,
+                        cfg_scale=cfg_scale,
+                        negative_prompt=negative_prompt,
+                        top_k=top_k,
+                        top_p=top_p,
+                        repetition_penalty=repetition_penalty,
+                        use_constrained_decoding=use_constrained_decoding,
+                        constrained_decoding_debug=constrained_decoding_debug,
+                        target_duration=target_duration,
+                        generation_phase="codes",
+                        caption=caption,
+                        lyrics=lyrics,
+                        cot_text=cot_text,
+                        seeds=seeds,
+                    )
+                else:  # pt backend
+                    codes_outputs = self._run_pt(
+                        formatted_prompts=formatted_prompts,
+                        temperature=temperature,
+                        cfg_scale=cfg_scale,
+                        negative_prompt=negative_prompt,
+                        top_k=top_k,
+                        top_p=top_p,
+                        repetition_penalty=repetition_penalty,
+                        use_constrained_decoding=use_constrained_decoding,
+                        constrained_decoding_debug=constrained_decoding_debug,
+                        target_duration=target_duration,
+                        generation_phase="codes",
+                        caption=caption,
+                        lyrics=lyrics,
+                        cot_text=cot_text,
+                        seeds=seeds,
+                    )
+            except Exception as e:
+                error_msg = f"❌ Error in batch codes generation: {str(e)}"
+                logger.error(error_msg)
+                return [], [], error_msg
+            
+            # Parse audio codes from each output
+            audio_codes_list = []
+            metadata_list = []
+            for output_text in codes_outputs:
+                _, audio_codes_item = self.parse_lm_output(output_text)
+                audio_codes_list.append(audio_codes_item)
+                metadata_list.append(metadata.copy())  # Same metadata for all
+            
+            phase2_time = time.time() - phase2_start
+            
+            # Log results
+            codes_counts = [len(codes.split('<|audio_code_')) - 1 if codes else 0 for codes in audio_codes_list]
+            logger.info(f"Batch Phase 2 completed in {phase2_time:.2f}s. Generated codes: {codes_counts}")
+            
+            status_msg = f"✅ Batch generation completed ({actual_batch_size} items)\nPhase 1: CoT metadata\nPhase 2: {sum(codes_counts)} total codes ({codes_counts})\nPhase1: {phase1_time:.2f}s, Phase2: {phase2_time:.2f}s"
+            return metadata_list, audio_codes_list, status_msg
+        else:
+            # Single mode: generate codes for one item
+            codes_output_text, status = self.generate_from_formatted_prompt(
+                formatted_prompt=formatted_prompt_with_cot,
+                cfg={
+                    "temperature": temperature,
+                    "cfg_scale": cfg_scale,
+                    "negative_prompt": negative_prompt,
+                    "top_k": top_k,
+                    "top_p": top_p,
+                    "repetition_penalty": repetition_penalty,
+                    "target_duration": target_duration,
+                    "user_metadata": None,  # No user metadata injection in Phase 2
+                    "skip_caption": True,  # Skip caption since CoT is already included
+                    "skip_language": True,  # Skip language since CoT is already included
+                    "generation_phase": "codes",
+                    # Pass context for building unconditional prompt in codes phase
+                    "caption": caption,
+                    "lyrics": lyrics,
+                    "cot_text": cot_text,
+                },
                 use_constrained_decoding=use_constrained_decoding,
                 constrained_decoding_debug=constrained_decoding_debug,
-                target_duration=target_duration,
-                user_metadata=user_metadata,
-                use_cot_caption=use_cot_caption,
-                use_cot_language=use_cot_language,
-                is_format_caption=is_format_caption,
+                stop_at_reasoning=False,  # Generate codes until EOS
             )
             
-            phase1_time = time.time() - phase1_start
+            if not codes_output_text:
+                return metadata, "", status
             
-            if not metadata:
-                return [], [], status
+            phase2_time = time.time() - phase2_start
             
-            logger.info(f"Batch Phase 1 completed in {phase1_time:.2f}s. Generated metadata: {list(metadata.keys())}")
-        else:
-            # Use user-provided metadata
-            logger.info("Batch Phase 1: Using user-provided metadata (skipping generation)")
-            metadata = {k: v for k, v in user_metadata.items() if v is not None}
-        
-        # If infer_type is 'dit', stop here and return only metadata
-        if infer_type == "dit":
-            metadata_list = [metadata.copy() for _ in range(batch_size)]
-            status_msg = f"✅ Generated CoT metadata successfully (batch mode)\nFields: {', '.join(metadata.keys())}\nPhase1: {phase1_time:.2f}s"
-            return metadata_list, [""] * batch_size, status_msg
-        
-        # ========== PHASE 2: Audio Codes Generation (BATCH) ==========
-        logger.info(f"Batch Phase 2: Generating audio codes for {batch_size} items...")
-        phase2_start = time.time()
-        
-        # Format metadata as CoT
-        cot_text = self._format_metadata_as_cot(metadata)
-        
-        # Build formatted prompt with CoT
-        formatted_prompt = self.build_formatted_prompt_with_cot(caption, lyrics, cot_text)
-        
-        # Replicate prompt for batch (all items have same prompt, differ by seeds)
-        formatted_prompts = [formatted_prompt] * batch_size
-        
-        # Call backend-specific batch generation
-        try:
-            if self.llm_backend == "vllm":
-                codes_outputs = self._run_vllm_batch(
-                    formatted_prompts=formatted_prompts,
-                    temperature=temperature,
-                    cfg_scale=cfg_scale,
-                    negative_prompt=negative_prompt,
-                    top_k=top_k,
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
-                    use_constrained_decoding=use_constrained_decoding,
-                    constrained_decoding_debug=constrained_decoding_debug,
-                    target_duration=target_duration,
-                    generation_phase="codes",
-                    caption=caption,
-                    lyrics=lyrics,
-                    cot_text=cot_text,
-                    seeds=seeds,
-                )
-            else:  # pt backend
-                codes_outputs = self._run_pt_batch(
-                    formatted_prompts=formatted_prompts,
-                    temperature=temperature,
-                    cfg_scale=cfg_scale,
-                    negative_prompt=negative_prompt,
-                    top_k=top_k,
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
-                    use_constrained_decoding=use_constrained_decoding,
-                    constrained_decoding_debug=constrained_decoding_debug,
-                    target_duration=target_duration,
-                    generation_phase="codes",
-                    caption=caption,
-                    lyrics=lyrics,
-                    cot_text=cot_text,
-                    seeds=seeds,
-                )
-        except Exception as e:
-            error_msg = f"❌ Error in batch codes generation: {str(e)}"
-            logger.error(error_msg)
-            return [], [], error_msg
-        
-        # Parse audio codes from each output
-        audio_codes_list = []
-        metadata_list = []
-        for output_text in codes_outputs:
-            _, audio_codes = self.parse_lm_output(output_text)
-            audio_codes_list.append(audio_codes)
-            metadata_list.append(metadata.copy())  # Same metadata for all
-        
-        phase2_time = time.time() - phase2_start
-        
-        # Log results
-        codes_counts = [len(codes.split('<|audio_code_')) - 1 if codes else 0 for codes in audio_codes_list]
-        logger.info(f"Batch Phase 2 completed in {phase2_time:.2f}s. Generated codes: {codes_counts}")
-        
-        status_msg = f"✅ Batch generation completed ({batch_size} items)\nPhase 1: CoT metadata\nPhase 2: {sum(codes_counts)} total codes ({codes_counts})\nPhase1: {phase1_time:.2f}s, Phase2: {phase2_time:.2f}s"
-        return metadata_list, audio_codes_list, status_msg
-
+            # Parse audio codes from output (metadata should be same as Phase 1)
+            _, audio_codes = self.parse_lm_output(codes_output_text)
+            
+            codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
+            logger.info(f"Phase 2 completed in {phase2_time:.2f}s. Generated {codes_count} audio codes")
+            
+            status_msg = f"✅ Generated successfully (2-phase)\nPhase 1: CoT metadata\nPhase 2: {codes_count} audio codes\nPhase1: {phase1_time:.2f}s, Phase2: {phase2_time:.2f}s"
+            return metadata, audio_codes, status_msg
+    
     def build_formatted_prompt(self, caption: str, lyrics: str = "", is_negative_prompt: bool = False, generation_phase: str = "cot", negative_prompt: str = "NO USER INPUT") -> str:
         """
         Build the chat-formatted prompt for 5Hz LM from caption/lyrics.
@@ -1035,7 +1059,7 @@ class LLMHandler:
         if is_negative_prompt:
             # Unconditional prompt for CFG
             # Check if user provided a meaningful negative prompt (not the default)
-            has_negative_prompt = negative_prompt and negative_prompt.strip() and negative_prompt.strip() != "NO USER INPUT"
+            has_negative_prompt = self._has_meaningful_negative_prompt(negative_prompt)
             
             if generation_phase == "cot":
                 # CoT phase unconditional prompt
@@ -1086,7 +1110,7 @@ class LLMHandler:
         if is_negative_prompt:
             # Unconditional prompt for codes phase
             # Check if user provided a meaningful negative prompt
-            has_negative_prompt = negative_prompt and negative_prompt.strip() and negative_prompt.strip() != "NO USER INPUT"
+            has_negative_prompt = self._has_meaningful_negative_prompt(negative_prompt)
             
             # Use empty CoT for unconditional
             cot_for_prompt = "<think>\n</think>"
@@ -1369,8 +1393,8 @@ class LLMHandler:
 
         try:
             if self.llm_backend == "vllm":
-                output_text = self._run_vllm_from_formatted(
-                    formatted_prompt=formatted_prompt,
+                output_text = self._run_vllm(
+                    formatted_prompts=formatted_prompt,
                     temperature=temperature,
                     cfg_scale=cfg_scale,
                     negative_prompt=negative_prompt,
@@ -1393,8 +1417,8 @@ class LLMHandler:
                 return output_text, f"✅ Generated successfully (vllm) | length={len(output_text)}"
 
             # PyTorch backend
-            output_text = self._run_pt_from_formatted(
-                formatted_prompt=formatted_prompt,
+            output_text = self._run_pt(
+                formatted_prompts=formatted_prompt,
                 temperature=temperature,
                 cfg_scale=cfg_scale,
                 negative_prompt=negative_prompt,
@@ -1459,26 +1483,12 @@ class LLMHandler:
             eos_token_id = pad_token_id
         
         # Build logits processor for repetition penalty
-        logits_processor = LogitsProcessorList()
-        if repetition_penalty != 1.0:
-            logits_processor.append(RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty))
+        logits_processor = self._build_logits_processor(repetition_penalty)
         
         with torch.no_grad():
             for step in range(max_new_tokens):
                 # Forward pass
-                if past_key_values is None:
-                    outputs = model(
-                        input_ids=generated_ids,
-                        **model_kwargs,
-                        use_cache=use_cache,
-                    )
-                else:
-                    outputs = model(
-                        input_ids=generated_ids[:, -1:],
-                        past_key_values=past_key_values,
-                        **model_kwargs,
-                        use_cache=use_cache,
-                    )
+                outputs = self._forward_pass(model, generated_ids, model_kwargs, past_key_values, use_cache)
                 
                 # Get logits for the last position
                 next_token_logits = outputs.logits[:, -1, :]  # [batch_size, vocab_size]
@@ -1491,41 +1501,18 @@ class LLMHandler:
                 for processor in logits_processor:
                     next_token_logits = processor(generated_ids, next_token_logits)
                 
-                # Apply top-k filtering
-                if top_k is not None and top_k > 0:
-                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
-                    next_token_logits[indices_to_remove] = float('-inf')
-                
-                # Apply top-p filtering
-                if top_p is not None and 0.0 < top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-                    cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-                    sorted_indices_to_remove = cumulative_probs > top_p
-                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                    sorted_indices_to_remove[..., 0] = 0
-                    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-                    next_token_logits[indices_to_remove] = float('-inf')
+                # Apply top-k and top-p filtering
+                next_token_logits = self._apply_top_k_filter(next_token_logits, top_k)
+                next_token_logits = self._apply_top_p_filter(next_token_logits, top_p)
                 
                 # Apply temperature and sample
-                if temperature > 0:
-                    next_token_logits = next_token_logits / temperature
-                    probs = torch.softmax(next_token_logits, dim=-1)
-                    next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
-                else:
-                    next_tokens = torch.argmax(next_token_logits, dim=-1)
+                next_tokens = self._sample_tokens(next_token_logits, temperature)
                 
                 # Update constrained processor state
-                if constrained_processor is not None:
-                    for b in range(next_tokens.shape[0]):
-                        constrained_processor.update_state(next_tokens[b].item())
+                self._update_constrained_processor_state(constrained_processor, next_tokens)
                 
                 # Check for EOS token
-                should_stop = False
-                if torch.any(next_tokens == eos_token_id):
-                    should_stop = True
-                elif pad_token_id is not None and pad_token_id != eos_token_id:
-                    if torch.any(next_tokens == pad_token_id):
-                        should_stop = True
+                should_stop = self._check_eos_token(next_tokens, eos_token_id, pad_token_id)
                 
                 # Append token to sequence
                 next_tokens_unsqueezed = next_tokens.unsqueeze(1)
@@ -1601,28 +1588,12 @@ class LLMHandler:
             eos_token_id = pad_token_id
         
         # Build logits processor for non-CFG operations (repetition penalty, top_k, top_p)
-        logits_processor = LogitsProcessorList()
-        if repetition_penalty != 1.0:
-            logits_processor.append(RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty))
+        logits_processor = self._build_logits_processor(repetition_penalty)
         
         with torch.no_grad():
             for step in range(max_new_tokens):
                 # Forward pass for the entire batch (conditional + unconditional)
-                if past_key_values is None:
-                    # First step: full forward pass
-                    outputs = model(
-                        input_ids=generated_ids,
-                        **model_kwargs,
-                        use_cache=use_cache,
-                    )
-                else:
-                    # Subsequent steps: only forward the last token (utilizing KV cache)
-                    outputs = model(
-                        input_ids=generated_ids[:, -1:],
-                        past_key_values=past_key_values,
-                        **model_kwargs,
-                        use_cache=use_cache,
-                    )
+                outputs = self._forward_pass(model, generated_ids, model_kwargs, past_key_values, use_cache)
                 
                 # Get logits for the last position
                 next_token_logits = outputs.logits[:, -1, :]  # [batch_size*2, vocab_size]
@@ -1645,45 +1616,20 @@ class LLMHandler:
                 for processor in logits_processor:
                     cfg_logits = processor(current_input_ids, cfg_logits)
                 
-                # Apply top-k filtering
-                if top_k is not None and top_k > 0:
-                    indices_to_remove = cfg_logits < torch.topk(cfg_logits, top_k)[0][..., -1, None]
-                    cfg_logits[indices_to_remove] = float('-inf')
-                
-                # Apply top-p (nucleus) filtering
-                if top_p is not None and 0.0 < top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(cfg_logits, descending=True)
-                    cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-                    # Remove tokens with cumulative probability above the threshold
-                    sorted_indices_to_remove = cumulative_probs > top_p
-                    # Shift the indices to the right to keep also the first token above the threshold
-                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                    sorted_indices_to_remove[..., 0] = 0
-                    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-                    cfg_logits[indices_to_remove] = float('-inf')
+                # Apply top-k and top-p filtering
+                cfg_logits = self._apply_top_k_filter(cfg_logits, top_k)
+                cfg_logits = self._apply_top_p_filter(cfg_logits, top_p)
                 
                 # Apply temperature and sample
-                if temperature > 0:
-                    cfg_logits = cfg_logits / temperature
-                    probs = torch.softmax(cfg_logits, dim=-1)
-                    next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
-                else:
-                    next_tokens = torch.argmax(cfg_logits, dim=-1)
+                next_tokens = self._sample_tokens(cfg_logits, temperature)
                 
                 # Update constrained processor state AFTER sampling
-                if constrained_processor is not None:
-                    for b in range(next_tokens.shape[0]):
-                        constrained_processor.update_state(next_tokens[b].item())
+                self._update_constrained_processor_state(constrained_processor, next_tokens)
                 
                 # Check for EOS token in conditional sequences BEFORE unsqueezing
                 # Stop if any conditional sequence generates EOS token
                 # next_tokens shape: [batch_size] (only conditional tokens)
-                should_stop = False
-                if torch.any(next_tokens == eos_token_id):
-                    should_stop = True
-                elif pad_token_id is not None and pad_token_id != eos_token_id:
-                    if torch.any(next_tokens == pad_token_id):
-                        should_stop = True
+                should_stop = self._check_eos_token(next_tokens, eos_token_id, pad_token_id)
                 
                 # Apply the same sampled tokens to both conditional and unconditional sequences
                 next_tokens_unsqueezed = next_tokens.unsqueeze(1)

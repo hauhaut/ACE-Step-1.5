@@ -868,7 +868,7 @@ def create_app() -> FastAPI:
                     if s in {"", "N/A"}:
                         return None
                     return s
-                first, second, paths, gen_info, status_msg, seed_value, *_ = h.generate_music(
+                result = h.generate_music(
                     captions=req.caption,
                     lyrics=req.lyrics,
                     bpm=bpm_val,
@@ -896,10 +896,20 @@ def create_app() -> FastAPI:
                     use_tiled_decode=req.use_tiled_decode,
                     progress=None,
                 )
+                
+                # Extract values from new dict structure
+                audios = result.get("audios", [])
+                audio_paths = [audio.get("path") for audio in audios]
+                first = audio_paths[0] if len(audio_paths) > 0 else None
+                second = audio_paths[1] if len(audio_paths) > 1 else None
+                gen_info = result.get("generation_info", "")
+                status_msg = result.get("status_message", "")
+                seed_value = result.get("extra_outputs", {}).get("seed_value", "")
+                
                 return {
                     "first_audio_path": _path_to_audio_url(first) if first else None,
                     "second_audio_path": _path_to_audio_url(second) if second else None,
-                    "audio_paths": [_path_to_audio_url(p) for p in (paths or [])],
+                    "audio_paths": [_path_to_audio_url(p) for p in (audio_paths or [])],
                     "generation_info": gen_info,
                     "status_message": status_msg,
                     "seed_value": seed_value,
