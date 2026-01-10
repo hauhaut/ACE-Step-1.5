@@ -2077,7 +2077,6 @@ class AceStepHandler:
         if self.model is None or self.vae is None or self.text_tokenizer is None or self.text_encoder is None:
             return {
                 "audios": [],
-                "generation_info": "",
                 "status_message": "❌ Model not fully initialized. Please initialize all components first.",
                 "extra_outputs": {},
                 "success": False,
@@ -2101,7 +2100,7 @@ class AceStepHandler:
 
         logger.info("[generate_music] Starting generation...")
         if progress:
-            progress(0.05, desc="Preparing inputs...")
+            progress(0.51, desc="Preparing inputs...")
         logger.info("[generate_music] Preparing inputs...")
         
         # Reset offload cost
@@ -2123,8 +2122,6 @@ class AceStepHandler:
             repainting_end = None
             
         try:
-            progress(0.1, desc="Preparing inputs...")
-
             # 1. Process reference audio
             refer_audios = None
             if reference_audio is not None:
@@ -2176,7 +2173,7 @@ class AceStepHandler:
                 can_use_repainting
             )
             
-            progress(0.3, desc=f"Generating music (batch size: {actual_batch_size})...")
+            progress(0.52, desc=f"Generating music (batch size: {actual_batch_size})...")
             
             # Prepare audio_code_hints - use if audio_code_string is provided
             # This works for both text2music (auto-switched to cover) and cover tasks
@@ -2245,7 +2242,7 @@ class AceStepHandler:
             
             logger.info("[generate_music] VAE decode completed. Preparing audio tensors...")
             if progress:
-                progress(0.9, desc="Preparing audio data...")
+                progress(0.99, desc="Preparing audio data...")
             
             # Prepare audio tensors (no file I/O here, no UUID generation)
             # pred_wavs is already [batch, channels, samples] format
@@ -2257,23 +2254,6 @@ class AceStepHandler:
                 audio_tensor = pred_wavs[i].cpu().float()
                 audio_tensors.append(audio_tensor)
             
-            # Format time costs if available
-            time_costs_str = ""
-            if time_costs:
-                if isinstance(time_costs, dict):
-                    time_costs_str = "\n\n**⏱️ Time Costs:**\n"
-                    for key, value in time_costs.items():
-                        # Format key: encoder_time_cost -> Encoder
-                        formatted_key = key.replace("_time_cost", "").replace("_", " ").title()
-                        time_costs_str += f"  - {formatted_key}: {value:.2f}s\n"
-                elif isinstance(time_costs, (int, float)):
-                    time_costs_str = f"\n\n**⏱️ Time Cost:** {time_costs:.2f}s"
-            
-            generation_info = f"""**🎵 Generation Complete**
-
-    **Seeds:** {seed_value_for_ui}
-    **Steps:** {inference_steps}
-    **Audio Count:** {len(audio_tensors)} audio(s){time_costs_str}"""
             status_message = f"✅ Generation completed successfully!"
             logger.info(f"[generate_music] Done! Generated {len(audio_tensors)} audio tensors.")
             
@@ -2307,7 +2287,6 @@ class AceStepHandler:
             
             return {
                 "audios": audios,
-                "generation_info": generation_info,
                 "status_message": status_message,
                 "extra_outputs": extra_outputs,
                 "success": True,
@@ -2319,7 +2298,6 @@ class AceStepHandler:
             logger.exception("[generate_music] Generation failed")
             return {
                 "audios": [],
-                "generation_info": "",
                 "status_message": error_msg,
                 "extra_outputs": {},
                 "success": False,

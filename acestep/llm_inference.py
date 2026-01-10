@@ -5,6 +5,7 @@ Handles all LM-related operations including initialization and generation
 import os
 import traceback
 import time
+import random
 from typing import Optional, Dict, Any, Tuple, List, Union
 from contextlib import contextmanager
 
@@ -309,6 +310,7 @@ class LLMHandler:
             
             logger.info("loading 5Hz LM tokenizer...")
             start_time = time.time()
+            # TODO: load tokenizer too slow, not found solution yet
             llm_tokenizer = AutoTokenizer.from_pretrained(full_lm_model_path, use_fast=True)
             logger.info(f"5Hz LM tokenizer loaded successfully in {time.time() - start_time:.2f} seconds")
             self.llm_tokenizer = llm_tokenizer
@@ -796,12 +798,13 @@ class LLMHandler:
         constrained_decoding_debug: bool = False,
         target_duration: Optional[float] = None,
         user_metadata: Optional[Dict[str, Optional[str]]] = None,
+        use_cot_metas: bool = True,
         use_cot_caption: bool = True,
         use_cot_language: bool = True,
-        is_format_caption: bool = False,
         batch_size: Optional[int] = None,
         seeds: Optional[List[int]] = None,
-    ) -> Union[Tuple[Dict[str, Any], str, str], Tuple[List[Dict[str, Any]], List[str], str]]:
+        progress=None,
+    ) -> Dict[str, Any]:
         """Two-phase LM generation: CoT generation followed by audio codes generation.
 
         - infer_type='dit': Phase 1 only - generate CoT and return metas (no audio codes)
@@ -817,20 +820,30 @@ class LLMHandler:
             batch_size: Optional batch size for batch generation. If None or 1, returns single result.
                        If > 1, returns batch results (lists).
             seeds: Optional list of seeds for batch generation (for reproducibility).
-                  Only used when batch_size > 1.
+                  Only used when batch_size > 1. TODO: not used yet
         
         Returns:
-            If batch_size is None or 1: (metadata, audio_codes, status_msg)
-            If batch_size > 1: (metadata_list, audio_codes_list, status_msg)
+            Dictionary containing:
+                - metadata: Dict or List[Dict] - Generated metadata
+                - audio_codes: str or List[str] - Generated audio codes
+                - success: bool - Whether generation succeeded
+                - error: Optional[str] - Error message if failed
+                - extra_outputs: Dict with time_costs and other info
         """
-        import time
-        import random
-        
+        if progress is None:
+            def progress(*args, **kwargs):
+                pass
+
         infer_type = (infer_type or "").strip().lower()
         if infer_type not in {"dit", "llm_dit"}:
-            if batch_size and batch_size > 1:
-                return [], [], f"❌ invalid infer_type: {infer_type!r} (expected 'dit' or 'llm_dit')"
-            return {}, "", f"❌ invalid infer_type: {infer_type!r} (expected 'dit' or 'llm_dit')"
+            error_msg = f"invalid infer_type: {infer_type!r} (expected 'dit' or 'llm_dit')"
+            return {
+                "metadata": [] if (batch_size and batch_size > 1) else {},
+                "audio_codes": [] if (batch_size and batch_size > 1) else "",
+                "success": False,
+                "error": error_msg,
+                "extra_outputs": {"time_costs": {}},
+            }
         
         # Determine if batch mode
         is_batch = batch_size and batch_size > 1
@@ -854,7 +867,8 @@ class LLMHandler:
         
         # ========== PHASE 1: CoT Generation ==========
         # Skip CoT if all metadata are user-provided OR caption is already formatted
-        if not has_all_metas and not is_format_caption:
+        progress(0.1, f"Phase 1: Generating CoT metadata (once for all items)...")
+        if not has_all_metas and use_cot_metas:
             if is_batch:
                 logger.info("Batch Phase 1: Generating CoT metadata (once for all items)...")
             else:
@@ -893,9 +907,13 @@ class LLMHandler:
             phase1_time = time.time() - phase1_start
             
             if not cot_output_text:
-                if is_batch:
-                    return [], [], status
-                return {}, "", status
+                return {
+                    "metadata": [] if is_batch else {},
+                    "audio_codes": [] if is_batch else "",
+                    "success": False,
+                    "error": status,
+                    "extra_outputs": {"time_costs": {"phase1_time": phase1_time}},
+                }
             
             # Parse metadata from CoT output
             metadata, _ = self.parse_lm_output(cot_output_text)
@@ -915,11 +933,31 @@ class LLMHandler:
         if infer_type == "dit":
             if is_batch:
                 metadata_list = [metadata.copy() for _ in range(actual_batch_size)]
-                status_msg = f"✅ Generated CoT metadata successfully (batch mode)\nFields: {', '.join(metadata.keys())}\nPhase1: {phase1_time:.2f}s"
-                return metadata_list, [""] * actual_batch_size, status_msg
+                return {
+                    "metadata": metadata_list,
+                    "audio_codes": [""] * actual_batch_size,
+                    "success": True,
+                    "error": None,
+                    "extra_outputs": {
+                        "time_costs": {
+                            "phase1_time": phase1_time,
+                            "total_time": phase1_time,
+                        }
+                    },
+                }
             else:
-                status_msg = f"✅ Generated CoT metadata successfully\nFields: {', '.join(metadata.keys())}\nPhase1: {phase1_time:.2f}s"
-                return metadata, "", status_msg
+                return {
+                    "metadata": metadata,
+                    "audio_codes": "",
+                    "success": True,
+                    "error": None,
+                    "extra_outputs": {
+                        "time_costs": {
+                            "phase1_time": phase1_time,
+                            "total_time": phase1_time,
+                        }
+                    },
+                }
         
         # ========== PHASE 2: Audio Codes Generation ==========
         if is_batch:
@@ -935,6 +973,7 @@ class LLMHandler:
         formatted_prompt_with_cot = self.build_formatted_prompt_with_cot(caption, lyrics, cot_text)
         logger.info(f"generate_with_stop_condition: formatted_prompt_with_cot={formatted_prompt_with_cot}")
         
+        progress(0.5, f"Phase 2: Generating audio codes for {actual_batch_size} items...")
         if is_batch:
             # Batch mode: generate codes for all items
             formatted_prompts = [formatted_prompt_with_cot] * actual_batch_size
@@ -978,9 +1017,21 @@ class LLMHandler:
                         seeds=seeds,
                     )
             except Exception as e:
-                error_msg = f"❌ Error in batch codes generation: {str(e)}"
+                error_msg = f"Error in batch codes generation: {str(e)}"
                 logger.error(error_msg)
-                return [], [], error_msg
+                return {
+                    "metadata": [],
+                    "audio_codes": [],
+                    "success": False,
+                    "error": error_msg,
+                    "extra_outputs": {
+                        "time_costs": {
+                            "phase1_time": phase1_time,
+                            "phase2_time": 0.0,
+                            "total_time": phase1_time,
+                        }
+                    },
+                }
             
             # Parse audio codes from each output
             audio_codes_list = []
@@ -996,8 +1047,22 @@ class LLMHandler:
             codes_counts = [len(codes.split('<|audio_code_')) - 1 if codes else 0 for codes in audio_codes_list]
             logger.info(f"Batch Phase 2 completed in {phase2_time:.2f}s. Generated codes: {codes_counts}")
             
-            status_msg = f"✅ Batch generation completed ({actual_batch_size} items)\nPhase 1: CoT metadata\nPhase 2: {sum(codes_counts)} total codes ({codes_counts})\nPhase1: {phase1_time:.2f}s, Phase2: {phase2_time:.2f}s"
-            return metadata_list, audio_codes_list, status_msg
+            total_time = phase1_time + phase2_time
+            return {
+                "metadata": metadata_list,
+                "audio_codes": audio_codes_list,
+                "success": True,
+                "error": None,
+                "extra_outputs": {
+                    "time_costs": {
+                        "phase1_time": phase1_time,
+                        "phase2_time": phase2_time,
+                        "total_time": total_time,
+                    },
+                    "codes_counts": codes_counts,
+                    "total_codes": sum(codes_counts),
+                },
+            }
         else:
             # Single mode: generate codes for one item
             codes_output_text, status = self.generate_from_formatted_prompt(
@@ -1025,7 +1090,20 @@ class LLMHandler:
             )
             
             if not codes_output_text:
-                return metadata, "", status
+                total_time = phase1_time + phase2_time
+                return {
+                    "metadata": metadata,
+                    "audio_codes": "",
+                    "success": False,
+                    "error": status,
+                    "extra_outputs": {
+                        "time_costs": {
+                            "phase1_time": phase1_time,
+                            "phase2_time": phase2_time,
+                            "total_time": total_time,
+                        }
+                    },
+                }
             
             phase2_time = time.time() - phase2_start
             
@@ -1035,8 +1113,21 @@ class LLMHandler:
             codes_count = len(audio_codes.split('<|audio_code_')) - 1 if audio_codes else 0
             logger.info(f"Phase 2 completed in {phase2_time:.2f}s. Generated {codes_count} audio codes")
             
-            status_msg = f"✅ Generated successfully (2-phase)\nPhase 1: CoT metadata\nPhase 2: {codes_count} audio codes\nPhase1: {phase1_time:.2f}s, Phase2: {phase2_time:.2f}s"
-            return metadata, audio_codes, status_msg
+            total_time = phase1_time + phase2_time
+            return {
+                "metadata": metadata,
+                "audio_codes": audio_codes,
+                "success": True,
+                "error": None,
+                "extra_outputs": {
+                    "time_costs": {
+                        "phase1_time": phase1_time,
+                        "phase2_time": phase2_time,
+                        "total_time": total_time,
+                    },
+                    "codes_count": codes_count,
+                },
+            }
     
     def build_formatted_prompt(self, caption: str, lyrics: str = "", is_negative_prompt: bool = False, generation_phase: str = "cot", negative_prompt: str = "NO USER INPUT") -> str:
         """

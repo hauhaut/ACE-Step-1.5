@@ -85,6 +85,7 @@ class Sampler(nn.Module):
     def __init__(self):
         super().__init__()
 
+    @torch.compile
     def forward(
         self, 
         logits: torch.Tensor, 
@@ -102,27 +103,12 @@ class Sampler(nn.Module):
         """
         # Apply temperature
         logits = logits.float().div_(temperatures.unsqueeze(dim=1))
-        
-        # Check conditions OUTSIDE compiled code to avoid graph breaks
-        # These .any() calls cause CPU-GPU sync, but we do it once here
-        # instead of inside the compiled function
-        need_topk = top_ks is not None and bool((top_ks > 0).any()) and bool((top_ks < logits.shape[1]).any())
-        need_topp = top_ps is not None and bool((top_ps < 1.0).any()) and bool((top_ps > 0.0).any())
-        
-        if need_topk or need_topp:
-            # Apply filtering (this part is not compiled due to dynamic control flow)
-            logits = apply_top_k_top_p(
-                logits,
-                top_ks if need_topk else None,
-                top_ps if need_topp else None,
-            )
-        
-        # Sample using compiled function
-        return self._sample(logits)
-    
-    @torch.compile(dynamic=True)
-    def _sample(self, logits: torch.Tensor) -> torch.Tensor:
-        """Compiled sampling kernel - no graph breaks here."""
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
-        q = torch.empty_like(probs).exponential_()
-        return probs.div(q).argmax(dim=-1)
+
+        logits = apply_top_k_top_p(
+            logits,
+            top_ks,
+            top_ps,
+        )
+        probs = torch.softmax(logits, dim=-1)
+        sample_tokens = probs.div_(torch.empty_like(probs).exponential_(1).clamp_min_(1e-10)).argmax(dim=-1)
+        return sample_tokens

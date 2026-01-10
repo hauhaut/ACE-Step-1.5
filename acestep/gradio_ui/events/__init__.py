@@ -331,10 +331,11 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             ],
             outputs=[results_section[f"score_display_{btn_idx}"], results_section["batch_queue"]]
         )
-    
+    def generation_wrapper(*args):
+        yield from res_h.generate_with_batch_management(dit_handler, llm_handler, *args)
     # ========== Generation Handler ==========
     generation_section["generate_btn"].click(
-        fn=lambda *args: res_h.generate_with_batch_management(dit_handler, llm_handler, *args),
+        fn=generation_wrapper,
         inputs=[
             generation_section["captions"],
             generation_section["lyrics"],

@@ -98,7 +98,6 @@ class AudioSaver:
                     channels_first=True,
                     backend='ffmpeg',
                     compression=config,
-                    buffer_size=65536
                 )
             elif format in ["flac", "wav"]:
                 # FLAC and WAV use soundfile backend (fastest)
@@ -107,8 +106,7 @@ class AudioSaver:
                     audio_tensor,
                     sample_rate,
                     channels_first=True,
-                    backend='soundfile',
-                    buffer_size=65536
+                    backend='ffmpeg',
                 )
             else:
                 # Other formats use default backend
@@ -117,7 +115,6 @@ class AudioSaver:
                     audio_tensor,
                     sample_rate,
                     channels_first=True,
-                    buffer_size=65536
                 )
             
             logger.debug(f"[AudioSaver] Saved audio to {output_path} ({format}, {sample_rate}Hz)")
@@ -247,87 +244,17 @@ def get_audio_file_hash(audio_file) -> str:
         return hashlib.md5(str(audio_file).encode('utf-8')).hexdigest()
 
 
-def generate_uuid_from_params(
-    captions: str,
-    lyrics: str,
-    bpm: Optional[int],
-    key_scale: str,
-    time_signature: str,
-    vocal_language: str,
-    inference_steps: int,
-    guidance_scale: float,
-    seed: Union[str, float, int],
-    audio_duration: Optional[float],
-    audio_code_string: Union[str, List[str]],
-    repainting_start: float,
-    repainting_end: Optional[float],
-    instruction: str,
-    audio_cover_strength: float,
-    task_type: str,
-    use_adg: bool,
-    cfg_interval_start: float,
-    cfg_interval_end: float,
-    audio_format: str,
-    reference_audio=None,
-    src_audio=None,
-    batch_index: int = 0,
-) -> str:
+def generate_uuid_from_params(params_dict) -> str:
     """
     Generate deterministic UUID from generation parameters.
     Same parameters will always generate the same UUID.
     
     Args:
-        captions: Music caption
-        lyrics: Lyrics text
-        bpm: BPM value
-        key_scale: Musical key and scale
-        time_signature: Time signature
-        vocal_language: Vocal language code
-        inference_steps: Number of inference steps
-        guidance_scale: Guidance scale
-        seed: Random seed
-        audio_duration: Audio duration in seconds
-        audio_code_string: Audio code string or list
-        repainting_start: Repainting start time
-        repainting_end: Repainting end time
-        instruction: Task instruction
-        audio_cover_strength: Audio cover strength
-        task_type: Task type
-        use_adg: Whether to use ADG
-        cfg_interval_start: CFG interval start
-        cfg_interval_end: CFG interval end
-        audio_format: Audio format
-        reference_audio: Reference audio file path
-        src_audio: Source audio file path
-        batch_index: Index in batch (for audio_code_string list access)
+        params_dict: Dictionary of parameters
     
     Returns:
         UUID string
     """
-    params_dict = {
-        "captions": captions or "",
-        "lyrics": lyrics or "",
-        "bpm": bpm,
-        "key_scale": key_scale or "",
-        "time_signature": time_signature or "",
-        "vocal_language": vocal_language or "",
-        "inference_steps": inference_steps,
-        "guidance_scale": guidance_scale,
-        "seed": seed,
-        "audio_duration": audio_duration,
-        "audio_code_string": audio_code_string if isinstance(audio_code_string, str) else (audio_code_string[batch_index] if isinstance(audio_code_string, list) and batch_index < len(audio_code_string) else ""),
-        "repainting_start": repainting_start,
-        "repainting_end": repainting_end,
-        "instruction": instruction or "",
-        "audio_cover_strength": audio_cover_strength,
-        "task_type": task_type or "",
-        "use_adg": use_adg,
-        "cfg_interval_start": cfg_interval_start,
-        "cfg_interval_end": cfg_interval_end,
-        "audio_format": audio_format or "",
-        "reference_audio_hash": get_audio_file_hash(reference_audio),
-        "src_audio_hash": get_audio_file_hash(src_audio),
-    }
     
     params_json = json.dumps(params_dict, sort_keys=True, ensure_ascii=False)
     hash_obj = hashlib.sha256(params_json.encode('utf-8'))

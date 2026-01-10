@@ -67,19 +67,19 @@ class GenerationParams:
     # Required Inputs
     task_type: str = "text2music"
     instruction: str = "Fill the audio semantic mask based on the given conditions:"
-    
+
     # Audio Uploads
     reference_audio: Optional[str] = None
     src_audio: Optional[str] = None
-    
+
     # LM Codes Hints
     audio_codes: str = ""
-    
+
     # Text Inputs
     caption: str = ""
     lyrics: str = ""
     instrumental: bool = False
-    
+
     # Metadata
     vocal_language: str = "unknown"
     bpm: Optional[int] = None
@@ -98,7 +98,7 @@ class GenerationParams:
     repainting_start: float = 0.0
     repainting_end: float = -1
     audio_cover_strength: float = 1.0
-    
+
     # 5Hz Language Model Parameters
     thinking: bool = True
     lm_temperature: float = 0.85
@@ -108,8 +108,18 @@ class GenerationParams:
     lm_negative_prompt: str = "NO USER INPUT"
     use_cot_metas: bool = True
     use_cot_caption: bool = True
+    use_cot_lyrics: bool = False  # TODO: not used yet
     use_cot_language: bool = True
-    
+    use_constrained_decoding: bool = True
+
+    cot_bpm: Optional[int] = None
+    cot_keyscale: str = ""
+    cot_timesignature: str = ""
+    cot_duration: Optional[float] = None
+    cot_vocal_language: str = "unknown"
+    cot_caption: str = ""
+    cot_lyrics: str = ""
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for JSON serialization."""
         return asdict(self)
@@ -123,24 +133,26 @@ class GenerationConfig:
         batch_size: Number of audio samples to generate
         allow_lm_batch: Whether to allow batch processing in LM
         use_random_seed: Whether to use random seed
-        seed: Seed(s) for batch generation. Can be:
+        seeds: Seed(s) for batch generation. Can be:
             - None: Use random seeds (when use_random_seed=True) or params.seed (when use_random_seed=False)
             - List[int]: List of seeds, will be padded with random seeds if fewer than batch_size
             - int: Single seed value (will be converted to list and padded)
         lm_batch_chunk_size: Batch chunk size for LM processing
-        is_format_caption: Whether to format caption
         constrained_decoding_debug: Whether to enable constrained decoding debug
         audio_format: Output audio format, one of "mp3", "wav", "flac". Default: "flac"
     """
     batch_size: int = 2
     allow_lm_batch: bool = False
     use_random_seed: bool = True
-    seed: Optional[Union[int, List[int]]] = None
+    seeds: Optional[List[int]] = None
     lm_batch_chunk_size: int = 8
-    is_format_caption: bool = False
-    use_constrained_decoding: bool = True
     constrained_decoding_debug: bool = False
     audio_format: str = "flac"  # Default to FLAC for fast saving
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert config to dictionary for JSON serialization."""
+        return asdict(self)
+
 
 @dataclass
 class GenerationResult:
@@ -149,26 +161,71 @@ class GenerationResult:
     Attributes:
         # Audio Outputs
         audios: List of audio dictionaries with paths, keys, params
-        generation_info: Markdown-formatted generation information
         status_message: Status message from generation
         extra_outputs: Extra outputs from generation
         success: Whether generation completed successfully
         error: Error message if generation failed
     """
-    
+
     # Audio Outputs
     audios: List[Dict[str, Any]] = field(default_factory=list)
     # Generation Information
-    generation_info: str = ""
     status_message: str = ""
     extra_outputs: Dict[str, Any] = field(default_factory=dict)
     # Success Status
     success: bool = True
     error: Optional[str] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert result to dictionary for JSON serialization."""
         return asdict(self)
+
+
+def _update_metadata_from_lm(
+    metadata: Dict[str, Any],
+    bpm: Optional[int],
+    key_scale: str,
+    time_signature: str,
+    audio_duration: Optional[float],
+    vocal_language: str,
+    caption: str,
+    lyrics: str,
+) -> Tuple[Optional[int], str, str, Optional[float]]:
+    """Update metadata fields from LM output if not provided by user."""
+
+    if bpm is None and metadata.get('bpm'):
+        bpm_value = metadata.get('bpm')
+        if bpm_value not in ["N/A", ""]:
+            try:
+                bpm = int(bpm_value)
+            except (ValueError, TypeError):
+                pass
+
+    if not key_scale and metadata.get('keyscale'):
+        key_scale_value = metadata.get('keyscale', metadata.get('key_scale', ""))
+        if key_scale_value != "N/A":
+            key_scale = key_scale_value
+
+    if not time_signature and metadata.get('timesignature'):
+        time_signature_value = metadata.get('timesignature', metadata.get('time_signature', ""))
+        if time_signature_value != "N/A":
+            time_signature = time_signature_value
+
+    if audio_duration is None or audio_duration <= 0:
+        audio_duration_value = metadata.get('duration', -1)
+        if audio_duration_value not in ["N/A", ""]:
+            try:
+                audio_duration = float(audio_duration_value)
+            except (ValueError, TypeError):
+                pass
+
+    if not vocal_language and metadata.get('vocal_language'):
+        vocal_language = metadata.get('vocal_language')
+    if not caption and metadata.get('caption'):
+        caption = metadata.get('caption')
+    if not lyrics and metadata.get('lyrics'):
+        lyrics = metadata.get('lyrics')
+    return bpm, key_scale, time_signature, audio_duration, vocal_language, caption, lyrics
 
 
 def generate_music(
@@ -177,6 +234,7 @@ def generate_music(
     params: GenerationParams,
     config: GenerationConfig,
     save_dir: Optional[str] = None,
+    progress=None,
 ) -> GenerationResult:
     """Generate music using ACE-Step model with optional LM reasoning.
     
@@ -194,24 +252,31 @@ def generate_music(
         audio_code_string_to_use = params.audio_codes
         lm_generated_metadata = None
         lm_generated_audio_codes_list = []
-        
+        lm_total_time_costs = {
+            "phase1_time": 0.0,
+            "phase2_time": 0.0,
+            "total_time": 0.0,
+        }
+
         # Extract mutable copies of metadata (will be updated by LM if needed)
         bpm = params.bpm
         key_scale = params.keyscale
         time_signature = params.timesignature
         audio_duration = params.duration
-        
+        dit_input_caption = params.caption
+        dit_input_vocal_language = params.vocal_language
+        dit_input_lyrics = params.lyrics
         # Determine if we need to generate audio codes
         # If user has provided audio_codes, we don't need to generate them
         # Otherwise, check if we need audio codes (lm_dit mode) or just metas (dit mode)
         user_provided_audio_codes = bool(params.audio_codes and str(params.audio_codes).strip())
-        
+
         # Determine infer_type: use "llm_dit" if we need audio codes, "dit" if only metas needed
         # For now, we use "llm_dit" if batch mode or if user hasn't provided codes
         # Use "dit" if user has provided codes (only need metas) or if explicitly only need metas
         # Note: This logic can be refined based on specific requirements
         need_audio_codes = not user_provided_audio_codes
-        
+
         # Determine if we should use chunk-based LM generation (always use chunks for consistency)
         # Determine actual batch size for chunk processing
         actual_batch_size = config.batch_size if config.batch_size is not None else 1
@@ -219,80 +284,75 @@ def generate_music(
         # Prepare seeds for batch generation
         # Use config.seed if provided, otherwise fallback to params.seed
         # Convert config.seed (None, int, or List[int]) to format that prepare_seeds accepts
-        seed_for_generation = params.seed  # Default fallback
-        if config.seed is not None:
-            if isinstance(config.seed, list):
+        seed_for_generation = ""
+        if config.seeds is not None and len(config.seeds) > 0:
+            if isinstance(config.seeds, list):
                 # Convert List[int] to comma-separated string
-                seed_for_generation = ",".join(str(s) for s in config.seed)
-            elif isinstance(config.seed, int):
-                # Single int seed
-                seed_for_generation = config.seed
-        
+                seed_for_generation = ",".join(str(s) for s in config.seeds)
+
         # Use dit_handler.prepare_seeds to handle seed list generation and padding
         # This will handle all the logic: padding with random seeds if needed, etc.
-        actual_seed_list, _ = dit_handler.prepare_seeds(
-            actual_batch_size, seed_for_generation, config.use_random_seed
-        )
+        actual_seed_list, _ = dit_handler.prepare_seeds(actual_batch_size, seed_for_generation, config.use_random_seed)
 
         # LM-based Chain-of-Thought reasoning
-        if params.thinking and llm_handler.llm_initialized and params.use_cot_metas:
-            # Convert sampling parameters
-            top_k_value = None if params.lm_top_k == 0 else int(params.lm_top_k)
-            top_p_value = None if params.lm_top_p >= 1.0 else params.lm_top_p
-            
+        use_lm = params.thinking and llm_handler.llm_initialized
+        lm_status = []
+        if use_lm:
+            # Convert sampling parameters - handle None values safely
+            top_k_value = None if not params.lm_top_k or params.lm_top_k == 0 else int(params.lm_top_k)
+            top_p_value = None if not params.lm_top_p or params.lm_top_p >= 1.0 else params.lm_top_p
+
             # Build user_metadata from user-provided values
             user_metadata = {}
             if bpm is not None:
                 try:
                     bpm_value = float(bpm)
                     if bpm_value > 0:
-                        user_metadata['bpm'] = str(int(bpm_value))
+                        user_metadata['bpm'] = int(bpm_value)
                 except (ValueError, TypeError):
                     pass
-                    
+
             if key_scale and key_scale.strip():
                 key_scale_clean = key_scale.strip()
                 if key_scale_clean.lower() not in ["n/a", ""]:
                     user_metadata['keyscale'] = key_scale_clean
-                    
+
             if time_signature and time_signature.strip():
                 time_sig_clean = time_signature.strip()
                 if time_sig_clean.lower() not in ["n/a", ""]:
                     user_metadata['timesignature'] = time_sig_clean
-                    
+
             if audio_duration is not None:
                 try:
                     duration_value = float(audio_duration)
                     if duration_value > 0:
-                        user_metadata['duration'] = str(int(duration_value))
+                        user_metadata['duration'] = int(duration_value)
                 except (ValueError, TypeError):
                     pass
-            
+
             user_metadata_to_pass = user_metadata if user_metadata else None
-            
+
             # Determine infer_type based on whether we need audio codes
             # - "llm_dit": generates both metas and audio codes (two-phase internally)
             # - "dit": generates only metas (single phase)
             infer_type = "llm_dit" if need_audio_codes else "dit"
-            
+
             # Use chunk size from config, or default to batch_size if not set
             max_inference_batch_size = int(config.lm_batch_chunk_size) if config.lm_batch_chunk_size > 0 else actual_batch_size
             num_chunks = math.ceil(actual_batch_size / max_inference_batch_size)
-            
+
             all_metadata_list = []
             all_audio_codes_list = []
-            
+
             for chunk_idx in range(num_chunks):
                 chunk_start = chunk_idx * max_inference_batch_size
                 chunk_end = min(chunk_start + max_inference_batch_size, actual_batch_size)
                 chunk_size = chunk_end - chunk_start
                 chunk_seeds = actual_seed_list[chunk_start:chunk_end] if chunk_start < len(actual_seed_list) else None
-                
-                logger.info(
-                    f"LM chunk {chunk_idx+1}/{num_chunks} (infer_type={infer_type}) "
-                    f"(size: {chunk_size}, seeds: {chunk_seeds})"
-                )
-                
+
+                logger.info(f"LM chunk {chunk_idx+1}/{num_chunks} (infer_type={infer_type}) "
+                            f"(size: {chunk_size}, seeds: {chunk_seeds})")
+
                 # Use the determined infer_type
                 # - "llm_dit" will internally run two phases (metas + codes)
                 # - "dit" will only run phase 1 (metas only)
@@ -308,25 +368,54 @@ def generate_music(
                     user_metadata=user_metadata_to_pass,
                     use_cot_caption=params.use_cot_caption,
                     use_cot_language=params.use_cot_language,
-                    is_format_caption=config.is_format_caption,
-                    use_constrained_decoding=config.use_constrained_decoding,
+                    use_cot_metas=params.use_cot_metas,
+                    use_constrained_decoding=params.use_constrained_decoding,
                     constrained_decoding_debug=config.constrained_decoding_debug,
                     batch_size=chunk_size,
                     seeds=chunk_seeds,
+                    progress=progress,
                 )
-                
+
+                # Check if LM generation failed
+                if not result.get("success", False):
+                    error_msg = result.get("error", "Unknown LM error")
+                    lm_status.append(f"❌ LM Error: {error_msg}")
+                    # Return early with error
+                    return GenerationResult(
+                        audios=[],
+                        status_message=f"❌ LM generation failed: {error_msg}",
+                        extra_outputs={},
+                        success=False,
+                        error=error_msg,
+                    )
+
+                # Extract metadata and audio_codes from result dict
                 if chunk_size > 1:
-                    metadata_list, audio_codes_list, status = result
+                    metadata_list = result.get("metadata", [])
+                    audio_codes_list = result.get("audio_codes", [])
                     all_metadata_list.extend(metadata_list)
                     all_audio_codes_list.extend(audio_codes_list)
                 else:
-                    metadata, audio_codes, status = result
+                    metadata = result.get("metadata", {})
+                    audio_codes = result.get("audio_codes", "")
                     all_metadata_list.append(metadata)
                     all_audio_codes_list.append(audio_codes)
-            
+
+                # Collect time costs from LM extra_outputs
+                lm_extra = result.get("extra_outputs", {})
+                lm_chunk_time_costs = lm_extra.get("time_costs", {})
+                if lm_chunk_time_costs:
+                    # Accumulate time costs from all chunks
+                    for key in ["phase1_time", "phase2_time", "total_time"]:
+                        if key in lm_chunk_time_costs:
+                            lm_total_time_costs[key] += lm_chunk_time_costs[key]
+
+                    time_str = ", ".join([f"{k}: {v:.2f}s" for k, v in lm_chunk_time_costs.items()])
+                    lm_status.append(f"✅ LM chunk {chunk_idx+1}: {time_str}")
+
             lm_generated_metadata = all_metadata_list[0] if all_metadata_list else None
             lm_generated_audio_codes_list = all_audio_codes_list
-            
+
             # Set audio_code_string_to_use based on infer_type
             if infer_type == "llm_dit":
                 # If batch mode, use list; otherwise use single string
@@ -337,23 +426,48 @@ def generate_music(
             else:
                 # For "dit" mode, keep user-provided codes or empty
                 audio_code_string_to_use = params.audio_codes
-            
+
             # Update metadata from LM if not provided by user
             if lm_generated_metadata:
-                bpm, key_scale, time_signature, audio_duration = _update_metadata_from_lm(
-                    lm_generated_metadata, bpm, key_scale, time_signature, audio_duration
-                )
+                bpm, key_scale, time_signature, audio_duration, vocal_language, caption, lyrics = _update_metadata_from_lm(
+                    metadata=lm_generated_metadata,
+                    bpm=bpm,
+                    key_scale=key_scale,
+                    time_signature=time_signature,
+                    audio_duration=audio_duration,
+                    vocal_language=dit_input_vocal_language,
+                    caption=dit_input_caption,
+                    lyrics=dit_input_lyrics)
+                if not params.bpm:
+                    params.cot_bpm = bpm
+                if not params.keyscale:
+                    params.cot_keyscale = key_scale
+                if not params.timesignature:
+                    params.cot_timesignature = time_signature
+                if not params.duration:
+                    params.cot_duration = audio_duration
+                if not params.vocal_language:
+                    params.cot_vocal_language = vocal_language
+                if not params.caption:
+                    params.cot_caption = caption
+                if not params.lyrics:
+                    params.cot_lyrics = lyrics
 
-        
+            # set cot caption and language if needed
+            if params.use_cot_caption:
+                dit_input_caption = lm_generated_metadata.get("caption", dit_input_caption)
+            if params.use_cot_language:
+                dit_input_vocal_language = lm_generated_metadata.get("vocal_language", dit_input_vocal_language)
+
         # Phase 2: DiT music generation
         # Use seed_for_generation (from config.seed or params.seed) instead of params.seed for actual generation
         result = dit_handler.generate_music(
-            captions=params.caption,
-            lyrics=params.lyrics,
+            captions=dit_input_caption,
+            lyrics=dit_input_lyrics,
             bpm=bpm,
             key_scale=key_scale,
             time_signature=time_signature,
-            vocal_language=params.vocal_language,
+            vocal_language=dit_input_vocal_language,
             inference_steps=params.inference_steps,
             guidance_scale=params.guidance_scale,
             use_random_seed=config.use_random_seed,
@@ -371,110 +485,80 @@ def generate_music(
             use_adg=params.use_adg,
             cfg_interval_start=params.cfg_interval_start,
             cfg_interval_end=params.cfg_interval_end,
+            progress=progress,
         )
-        
+
         # Check if generation failed
         if not result.get("success", False):
             return GenerationResult(
                 audios=[],
-                generation_info=result.get("generation_info", ""),
                 status_message=result.get("status_message", ""),
                 extra_outputs={},
                 success=False,
                 error=result.get("error"),
             )
-        
+
         # Extract results from dit_handler.generate_music dict
         dit_audios = result.get("audios", [])
-        generation_info = result.get("generation_info", "")
         status_message = result.get("status_message", "")
         dit_extra_outputs = result.get("extra_outputs", {})
-        
-        # Append LM metadata to generation info
-        if lm_generated_metadata:
-            generation_info = _append_lm_metadata_to_info(generation_info, lm_generated_metadata)
-        
+
         # Use the seed list already prepared above (from config.seed or params.seed fallback)
         # actual_seed_list was computed earlier using dit_handler.prepare_seeds
         seed_list = actual_seed_list
-        
+
         # Get base params dictionary
         base_params_dict = params.to_dict()
-        
+
         # Save audio files using AudioSaver (format from config)
         audio_format = config.audio_format if config.audio_format else "flac"
         audio_saver = AudioSaver(default_format=audio_format)
-        
+
         # Use handler's temp_dir for saving files
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-        
+
         # Build audios list for GenerationResult with params and save files
         # Audio saving and UUID generation handled here, outside of handler
         audios = []
         for idx, dit_audio in enumerate(dit_audios):
             # Create a copy of params dict for this audio
             audio_params = base_params_dict.copy()
-            
+
             # Update audio-specific values
             audio_params["seed"] = seed_list[idx] if idx < len(seed_list) else None
-            
+
             # Add audio codes if batch mode
             if lm_generated_audio_codes_list and idx < len(lm_generated_audio_codes_list):
                 audio_params["audio_codes"] = lm_generated_audio_codes_list[idx]
-            
+
             # Get audio tensor and metadata
             audio_tensor = dit_audio.get("tensor")
             sample_rate = dit_audio.get("sample_rate", 48000)
-            
+
             # Generate UUID for this audio (moved from handler)
             batch_seed = seed_list[idx] if idx < len(seed_list) else seed_list[0] if seed_list else -1
-            audio_code_str = lm_generated_audio_codes_list[idx] if (lm_generated_audio_codes_list and idx < len(lm_generated_audio_codes_list)) else audio_code_string_to_use
+            audio_code_str = lm_generated_audio_codes_list[idx] if (
+                lm_generated_audio_codes_list and idx < len(lm_generated_audio_codes_list)) else audio_code_string_to_use
             if isinstance(audio_code_str, list):
                 audio_code_str = audio_code_str[idx] if idx < len(audio_code_str) else ""
-            
-            audio_key = generate_uuid_from_params(
-                captions=params.caption,
-                lyrics=params.lyrics,
-                bpm=bpm,
-                key_scale=key_scale,
-                time_signature=time_signature,
-                vocal_language=params.vocal_language,
-                inference_steps=params.inference_steps,
-                guidance_scale=params.guidance_scale,
-                seed=batch_seed,
-                audio_duration=audio_duration,
-                audio_code_string=audio_code_str,
-                repainting_start=params.repainting_start,
-                repainting_end=params.repainting_end,
-                instruction=params.instruction,
-                audio_cover_strength=params.audio_cover_strength,
-                task_type=params.task_type,
-                use_adg=params.use_adg,
-                cfg_interval_start=params.cfg_interval_start,
-                cfg_interval_end=params.cfg_interval_end,
-                audio_format=audio_format,
-                reference_audio=params.reference_audio,
-                src_audio=params.src_audio,
-                batch_index=idx,
-            )
-            
+
+            audio_key = generate_uuid_from_params(audio_params)
+
             # Save audio file (handled outside handler)
             audio_path = None
             if audio_tensor is not None and save_dir is not None:
                 try:
                     audio_file = os.path.join(save_dir, f"{audio_key}.{audio_format}")
-                    audio_path = audio_saver.save_audio(
-                        audio_tensor,
-                        audio_file,
-                        sample_rate=sample_rate,
-                        format=audio_format,
-                        channels_first=True
-                    )
+                    audio_path = audio_saver.save_audio(audio_tensor,
+                                                        audio_file,
+                                                        sample_rate=sample_rate,
+                                                        format=audio_format,
+                                                        channels_first=True)
                 except Exception as e:
                     logger.error(f"[generate_music] Failed to save audio file: {e}")
                     audio_path = ""  # Fallback to empty path
-            
+
             audio_dict = {
                 "path": audio_path or "",  # File path (saved here, not in handler)
                 "tensor": audio_tensor,  # Audio tensor [channels, samples], CPU, float32
@@ -482,259 +566,55 @@ def generate_music(
                 "sample_rate": sample_rate,
                 "params": audio_params,
             }
-            
+
             audios.append(audio_dict)
-        
+
         # Merge extra_outputs: include dit_extra_outputs (latents, masks) and add LM metadata
         extra_outputs = dit_extra_outputs.copy()
         extra_outputs["lm_metadata"] = lm_generated_metadata
-        
+
+        # Merge time_costs from both LM and DiT into a unified dictionary
+        unified_time_costs = {}
+
+        # Add LM time costs (if LM was used)
+        if use_lm and lm_total_time_costs:
+            for key, value in lm_total_time_costs.items():
+                unified_time_costs[f"lm_{key}"] = value
+
+        # Add DiT time costs (if available)
+        dit_time_costs = dit_extra_outputs.get("time_costs", {})
+        if dit_time_costs:
+            for key, value in dit_time_costs.items():
+                unified_time_costs[f"dit_{key}"] = value
+
+        # Calculate total pipeline time
+        if unified_time_costs:
+            lm_total = unified_time_costs.get("lm_total_time", 0.0)
+            dit_total = unified_time_costs.get("dit_total_time_cost", 0.0)
+            unified_time_costs["pipeline_total_time"] = lm_total + dit_total
+
+        # Update extra_outputs with unified time_costs
+        extra_outputs["time_costs"] = unified_time_costs
+
+        if lm_status:
+            status_message = "\n".join(lm_status) + "\n" + status_message
+        else:
+            status_message = status_message
         # Create and return GenerationResult
         return GenerationResult(
             audios=audios,
-            generation_info=generation_info,
             status_message=status_message,
             extra_outputs=extra_outputs,
             success=True,
             error=None,
         )
-        
+
     except Exception as e:
         logger.exception("Music generation failed")
         return GenerationResult(
             audios=[],
-            generation_info=f"❌ Generation failed: {str(e)}",
             status_message=f"Error: {str(e)}",
             extra_outputs={},
             success=False,
             error=str(e),
         )
-
-
-def _update_metadata_from_lm(
-    metadata: Dict[str, Any],
-    bpm: Optional[int],
-    key_scale: str,
-    time_signature: str,
-    audio_duration: Optional[float],
-) -> Tuple[Optional[int], str, str, Optional[float]]:
-    """Update metadata fields from LM output if not provided by user."""
-    
-    if bpm is None and metadata.get('bpm'):
-        bpm_value = metadata.get('bpm')
-        if bpm_value not in ["N/A", ""]:
-            try:
-                bpm = int(bpm_value)
-            except (ValueError, TypeError):
-                pass
-    
-    if not key_scale and metadata.get('keyscale'):
-        key_scale_value = metadata.get('keyscale', metadata.get('key_scale', ""))
-        if key_scale_value != "N/A":
-            key_scale = key_scale_value
-    
-    if not time_signature and metadata.get('timesignature'):
-        time_signature_value = metadata.get('timesignature', metadata.get('time_signature', ""))
-        if time_signature_value != "N/A":
-            time_signature = time_signature_value
-    
-    if audio_duration is None or audio_duration <= 0:
-        audio_duration_value = metadata.get('duration', -1)
-        if audio_duration_value not in ["N/A", ""]:
-            try:
-                audio_duration = float(audio_duration_value)
-            except (ValueError, TypeError):
-                pass
-    
-    return bpm, key_scale, time_signature, audio_duration
-
-
-def _append_lm_metadata_to_info(generation_info: str, metadata: Dict[str, Any]) -> str:
-    """Append LM-generated metadata to generation info string."""
-    
-    metadata_lines = []
-    if metadata.get('bpm'):
-        metadata_lines.append(f"- **BPM:** {metadata['bpm']}")
-    if metadata.get('caption'):
-        metadata_lines.append(f"- **Refined Caption:** {metadata['caption']}")
-    if metadata.get('duration'):
-        metadata_lines.append(f"- **Duration:** {metadata['duration']} seconds")
-    if metadata.get('keyscale'):
-        metadata_lines.append(f"- **Key Scale:** {metadata['keyscale']}")
-    if metadata.get('language'):
-        metadata_lines.append(f"- **Language:** {metadata['language']}")
-    if metadata.get('timesignature'):
-        metadata_lines.append(f"- **Time Signature:** {metadata['timesignature']}")
-    
-    if metadata_lines:
-        metadata_section = "\n\n**🤖 LM-Generated Metadata:**\n" + "\n\n".join(metadata_lines)
-        return metadata_section + "\n\n" + generation_info
-    
-    return generation_info
-
-
-# ============================================================================
-# LEGACY GRADIO UI COMPATIBILITY LAYER
-# ============================================================================
-
-def generate_for_gradio(
-    dit_handler,
-    llm_handler,
-    captions,
-    lyrics,
-    bpm,
-    key_scale,
-    time_signature,
-    vocal_language,
-    inference_steps,
-    guidance_scale,
-    random_seed_checkbox,
-    seed,
-    reference_audio,
-    audio_duration,
-    batch_size_input,
-    src_audio,
-    text2music_audio_code_string,
-    repainting_start,
-    repainting_end,
-    instruction_display_gen,
-    audio_cover_strength,
-    task_type,
-    use_adg,
-    cfg_interval_start,
-    cfg_interval_end,
-    audio_format,
-    lm_temperature,
-    think_checkbox,
-    lm_cfg_scale,
-    lm_top_k,
-    lm_top_p,
-    lm_negative_prompt,
-    use_cot_metas,
-    use_cot_caption,
-    use_cot_language,
-    is_format_caption,
-    constrained_decoding_debug,
-    allow_lm_batch,
-    lm_batch_chunk_size,
-):
-    """Legacy Gradio UI compatibility wrapper.
-    
-    This function maintains backward compatibility with the Gradio UI.
-    For new integrations, use generate_music() with GenerationConfig instead.
-    
-    Returns:
-        Tuple with 28 elements for Gradio UI component updates
-    """
-    
-    # Convert legacy parameters to GenerationParams and GenerationConfig
-    params = GenerationParams(
-        caption=captions,
-        lyrics=lyrics,
-        bpm=bpm,
-        keyscale=key_scale,
-        timesignature=time_signature,
-        vocal_language=vocal_language,
-        audio_codes=text2music_audio_code_string,
-        duration=audio_duration,
-        inference_steps=inference_steps,
-        guidance_scale=guidance_scale,
-        seed=seed,
-        use_adg=use_adg,
-        cfg_interval_start=cfg_interval_start,
-        cfg_interval_end=cfg_interval_end,
-        audio_format=audio_format,
-        task_type=task_type,
-        reference_audio=reference_audio,
-        src_audio=src_audio,
-        repainting_start=repainting_start,
-        repainting_end=repainting_end,
-        audio_cover_strength=audio_cover_strength,
-        instruction=instruction_display_gen,
-        thinking=think_checkbox,
-        lm_temperature=lm_temperature,
-        lm_cfg_scale=lm_cfg_scale,
-        lm_top_k=lm_top_k,
-        lm_top_p=lm_top_p,
-        lm_negative_prompt=lm_negative_prompt,
-        use_cot_metas=use_cot_metas,
-        use_cot_caption=use_cot_caption,
-        use_cot_language=use_cot_language,
-    )
-    
-    config = GenerationConfig(batch_size=1)
-    config.batch_size = batch_size_input
-    config.use_random_seed = random_seed_checkbox
-    config.allow_lm_batch = allow_lm_batch
-    config.lm_batch_chunk_size = lm_batch_chunk_size
-    config.is_format_caption = is_format_caption
-    config.constrained_decoding_debug = constrained_decoding_debug
-    
-    # Call new API
-    result = generate_music(dit_handler, llm_handler, params, config)
-    
-    # Extract audio paths from result.audios
-    audio_paths = [audio["path"] for audio in result.audios]
-    
-    # Extract extra outputs
-    extra_outputs = result.extra_outputs
-    seed_value = extra_outputs.get("seed_value", "")
-    lm_metadata = extra_outputs.get("lm_metadata", None)
-    
-    # Legacy alignment fields (no longer used, set to empty/None)
-    align_score_1 = ""
-    align_text_1 = ""
-    align_plot_1 = None
-    align_score_2 = ""
-    align_text_2 = ""
-    align_plot_2 = None
-    
-    # Determine which codes to update in UI
-    if config.allow_lm_batch and lm_metadata:
-        # Batch mode: extract codes from metadata if available
-        lm_codes_list = lm_metadata.get('audio_codes_list', [])
-        updated_audio_codes = lm_codes_list[0] if lm_codes_list else text2music_audio_code_string
-        codes_outputs = (lm_codes_list + [""] * 8)[:8]
-    else:
-        # Single mode
-        lm_codes = lm_metadata.get('audio_codes', '') if lm_metadata else ''
-        updated_audio_codes = lm_codes if lm_codes else text2music_audio_code_string
-        codes_outputs = [""] * 8
-    
-    # Prepare audio outputs (up to 8)
-    audio_outputs = (audio_paths + [None] * 8)[:8]
-    
-    # Return tuple for Gradio UI (28 elements)
-    return (
-        audio_outputs[0],  # generated_audio_1
-        audio_outputs[1],  # generated_audio_2
-        audio_outputs[2],  # generated_audio_3
-        audio_outputs[3],  # generated_audio_4
-        audio_outputs[4],  # generated_audio_5
-        audio_outputs[5],  # generated_audio_6
-        audio_outputs[6],  # generated_audio_7
-        audio_outputs[7],  # generated_audio_8
-        audio_paths,  # generated_audio_batch
-        result.generation_info,
-        result.status_message,
-        seed_value,
-        align_score_1,
-        align_text_1,
-        align_plot_1,
-        align_score_2,
-        align_text_2,
-        align_plot_2,
-        updated_audio_codes,  # Update main audio codes in UI
-        codes_outputs[0],  # text2music_audio_code_string_1
-        codes_outputs[1],  # text2music_audio_code_string_2
-        codes_outputs[2],  # text2music_audio_code_string_3
-        codes_outputs[3],  # text2music_audio_code_string_4
-        codes_outputs[4],  # text2music_audio_code_string_5
-        codes_outputs[5],  # text2music_audio_code_string_6
-        codes_outputs[6],  # text2music_audio_code_string_7
-        codes_outputs[7],  # text2music_audio_code_string_8
-        lm_metadata,  # Store metadata for "Send to src audio" buttons
-        is_format_caption,  # Keep is_format_caption unchanged
-    )
-
-
