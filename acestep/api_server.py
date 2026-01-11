@@ -44,6 +44,12 @@ from acestep.constants import (
     DEFAULT_DIT_INSTRUCTION,
     DEFAULT_LM_INSTRUCTION,
 )
+from acestep.inference import (
+    GenerationParams,
+    GenerationConfig,
+    generate_music,
+)
+from acestep.gradio_ui.events.results_handlers import _build_generation_info
 
 
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
@@ -387,6 +393,10 @@ def create_app() -> FastAPI:
         app.state.executor = executor
         app.state.job_store = store
         app.state._python_executable = sys.executable
+        
+        # Temporary directory for saving generated audio files
+        app.state.temp_audio_dir = os.path.join(tmp_root, "api_audio")
+        os.makedirs(app.state.temp_audio_dir, exist_ok=True)
 
         async def _ensure_initialized() -> None:
             h: AceStepHandler = app.state.handler
@@ -443,131 +453,10 @@ def create_app() -> FastAPI:
             job_store.mark_running(job_id)
 
             def _blocking_generate() -> Dict[str, Any]:
-                def _normalize_optional_int(v: Any) -> Optional[int]:
-                    if v is None:
-                        return None
-                    try:
-                        iv = int(v)
-                    except Exception:
-                        return None
-                    return None if iv == 0 else iv
-
-                def _normalize_optional_float(v: Any) -> Optional[float]:
-                    if v is None:
-                        return None
-                    try:
-                        fv = float(v)
-                    except Exception:
-                        return None
-                    # gradio treats 1.0 as disabled for top_p
-                    return None if fv >= 1.0 else fv
-
-                def _maybe_fill_from_metadata(current: GenerateMusicRequest, meta: Dict[str, Any]) -> tuple[Optional[int], str, str, Optional[float]]:
-                    def _parse_first_float(v: Any) -> Optional[float]:
-                        if v is None:
-                            return None
-                        if isinstance(v, (int, float)):
-                            return float(v)
-                        s = str(v).strip()
-                        if not s or s.upper() == "N/A":
-                            return None
-                        try:
-                            return float(s)
-                        except Exception:
-                            pass
-                        m = re.search(r"[-+]?\d*\.?\d+", s)
-                        if not m:
-                            return None
-                        try:
-                            return float(m.group(0))
-                        except Exception:
-                            return None
-
-                    def _parse_first_int(v: Any) -> Optional[int]:
-                        fv = _parse_first_float(v)
-                        if fv is None:
-                            return None
-                        try:
-                            return int(round(fv))
-                        except Exception:
-                            return None
-
-                    # Fill only when user did not provide values
-                    bpm_val = current.bpm
-                    if bpm_val is None:
-                        m = meta.get("bpm")
-                        parsed = _parse_first_int(m)
-                        if parsed is not None and parsed > 0:
-                            bpm_val = parsed
-
-                    key_scale_val = current.key_scale
-                    if not key_scale_val:
-                        m = meta.get("keyscale", meta.get("key_scale", ""))
-                        if m not in (None, "", "N/A"):
-                            key_scale_val = str(m)
-
-                    time_sig_val = current.time_signature
-                    if not time_sig_val:
-                        m = meta.get("timesignature", meta.get("time_signature", ""))
-                        if m not in (None, "", "N/A"):
-                            time_sig_val = str(m)
-
-                    dur_val = current.audio_duration
-                    if dur_val is None:
-                        m = meta.get("duration", meta.get("audio_duration"))
-                        parsed = _parse_first_float(m)
-                        if parsed is not None:
-                            dur_val = float(parsed)
-                            if dur_val <= 0:
-                                dur_val = None
-
-                        # Avoid truncating lyrical songs when LM predicts a very short duration.
-                        # (Users can still force a short duration by explicitly setting `audio_duration`.)
-                        if dur_val is not None and (current.lyrics or "").strip():
-                            min_dur = float(os.getenv("ACESTEP_LM_MIN_DURATION_SECONDS", "30"))
-                            if dur_val < min_dur:
-                                dur_val = None
-
-                    return bpm_val, key_scale_val, time_sig_val, dur_val
-
-                def _estimate_duration_from_lyrics(lyrics: str) -> Optional[float]:
-                    lyrics = (lyrics or "").strip()
-                    if not lyrics:
-                        return None
-
-                    # Best-effort heuristic: singing rate ~ 2.2 words/sec for English-like lyrics.
-                    # For languages without spaces, fall back to non-space char count.
-                    words = re.findall(r"[A-Za-z0-9']+", lyrics)
-                    if len(words) >= 8:
-                        words_per_sec = float(os.getenv("ACESTEP_LYRICS_WORDS_PER_SEC", "2.2"))
-                        est = len(words) / max(0.5, words_per_sec)
-                    else:
-                        non_space = len(re.sub(r"\s+", "", lyrics))
-                        chars_per_sec = float(os.getenv("ACESTEP_LYRICS_CHARS_PER_SEC", "12"))
-                        est = non_space / max(4.0, chars_per_sec)
-
-                    min_dur = float(os.getenv("ACESTEP_LYRICS_MIN_DURATION_SECONDS", "45"))
-                    max_dur = float(os.getenv("ACESTEP_LYRICS_MAX_DURATION_SECONDS", "180"))
-                    return float(min(max(est, min_dur), max_dur))
-
-                def _normalize_metas(meta: Dict[str, Any]) -> Dict[str, Any]:
-                    """Ensure a stable `metas` dict (keys always present)."""
-                    meta = meta or {}
-                    out: Dict[str, Any] = dict(meta)
-
-                    # Normalize key aliases
-                    if "keyscale" not in out and "key_scale" in out:
-                        out["keyscale"] = out.get("key_scale")
-                    if "timesignature" not in out and "time_signature" in out:
-                        out["timesignature"] = out.get("time_signature")
-
-                    # Ensure required keys exist
-                    for k in ["bpm", "duration", "genres", "keyscale", "timesignature"]:
-                        if out.get(k) in (None, ""):
-                            out[k] = "N/A"
-                    return out
-
+                """Generate music using unified inference logic from acestep.inference"""
+                
                 def _ensure_llm_ready() -> None:
+                    """Ensure LLM handler is initialized when needed"""
                     with app.state._llm_init_lock:
                         initialized = getattr(app.state, "_llm_initialized", False)
                         had_error = getattr(app.state, "_llm_init_error", None)
@@ -597,269 +486,207 @@ def create_app() -> FastAPI:
                         else:
                             app.state._llm_initialized = True
 
-                # Optional: generate 5Hz LM codes server-side
-                audio_code_string = req.audio_code_string
-                bpm_val = req.bpm
-                key_scale_val = req.key_scale
-                time_sig_val = req.time_signature
-                audio_duration_val = req.audio_duration
+                def _normalize_metas(meta: Dict[str, Any]) -> Dict[str, Any]:
+                    """Ensure a stable `metas` dict (keys always present)."""
+                    meta = meta or {}
+                    out: Dict[str, Any] = dict(meta)
 
-                thinking = bool(getattr(req, "thinking", False))
+                    # Normalize key aliases
+                    if "keyscale" not in out and "key_scale" in out:
+                        out["keyscale"] = out.get("key_scale")
+                    if "timesignature" not in out and "time_signature" in out:
+                        out["timesignature"] = out.get("time_signature")
 
-                print(
-                    "[api_server] parsed req: "
-                    f"thinking={thinking}, caption_len={len((req.caption or '').strip())}, lyrics_len={len((req.lyrics or '').strip())}, "
-                    f"bpm={req.bpm}, audio_duration={req.audio_duration}, key_scale={req.key_scale!r}, time_signature={req.time_signature!r}"
-                )
+                    # Ensure required keys exist
+                    for k in ["bpm", "duration", "genres", "keyscale", "timesignature"]:
+                        if out.get(k) in (None, ""):
+                            out[k] = "N/A"
+                    return out
 
-                # If LM-generated code hints are used, a too-strong cover strength can suppress lyric/vocal conditioning.
-                # We keep backward compatibility: only auto-adjust when user didn't override (still at default 1.0).
-                audio_cover_strength_val = float(req.audio_cover_strength)
+                # Normalize LM sampling parameters
+                lm_top_k = req.lm_top_k if req.lm_top_k and req.lm_top_k > 0 else 0
+                lm_top_p = req.lm_top_p if req.lm_top_p and req.lm_top_p < 1.0 else 0.9
 
-                lm_meta: Optional[Dict[str, Any]] = None
-
-                sample_mode = bool(getattr(req, "sample_mode", False))
-                if sample_mode:
+                # Determine if LLM is needed
+                thinking = bool(req.thinking)
+                sample_mode = bool(req.sample_mode)
+                need_llm = thinking or sample_mode
+                
+                print(f"[api_server] Request params: req.thinking={req.thinking}, req.sample_mode={req.sample_mode}")
+                print(f"[api_server] Determined: thinking={thinking}, sample_mode={sample_mode}, need_llm={need_llm}")
+                
+                # Ensure LLM is ready if needed
+                if need_llm:
                     _ensure_llm_ready()
                     if getattr(app.state, "_llm_init_error", None):
                         raise RuntimeError(f"5Hz LM init failed: {app.state._llm_init_error}")
 
+                # Handle sample mode: generate random caption/lyrics first
+                caption = req.caption
+                lyrics = req.lyrics
+                bpm = req.bpm
+                key_scale = req.key_scale
+                time_signature = req.time_signature
+                audio_duration = req.audio_duration
+                
+                if sample_mode:
+                    print("[api_server] Sample mode: generating random caption/lyrics via LM")
                     sample_metadata, sample_status = llm.understand_audio_from_codes(
                         audio_codes="NO USER INPUT",
-                        temperature=float(getattr(req, "lm_temperature", _LM_DEFAULT_TEMPERATURE)),
-                        cfg_scale=max(1.0, float(getattr(req, "lm_cfg_scale", _LM_DEFAULT_CFG_SCALE))),
-                        negative_prompt=str(getattr(req, "lm_negative_prompt", "NO USER INPUT") or "NO USER INPUT"),
-                        top_k=_normalize_optional_int(getattr(req, "lm_top_k", None)),
-                        top_p=_normalize_optional_float(getattr(req, "lm_top_p", None)),
-                        repetition_penalty=float(getattr(req, "lm_repetition_penalty", 1.0)),
-                        use_constrained_decoding=bool(getattr(req, "constrained_decoding", True)),
-                        constrained_decoding_debug=bool(getattr(req, "constrained_decoding_debug", False)),
+                        temperature=req.lm_temperature,
+                        cfg_scale=max(1.0, req.lm_cfg_scale),
+                        negative_prompt=req.lm_negative_prompt,
+                        top_k=lm_top_k if lm_top_k > 0 else None,
+                        top_p=lm_top_p if lm_top_p < 1.0 else None,
+                        repetition_penalty=req.lm_repetition_penalty,
+                        use_constrained_decoding=req.constrained_decoding,
+                        constrained_decoding_debug=req.constrained_decoding_debug,
                     )
 
                     if not sample_metadata or str(sample_status).startswith("❌"):
                         raise RuntimeError(f"Sample generation failed: {sample_status}")
 
-                    req.caption = str(sample_metadata.get("caption", "") or "")
-                    req.lyrics = str(sample_metadata.get("lyrics", "") or "")
-                    req.bpm = _to_int(sample_metadata.get("bpm"), req.bpm)
+                    # Use generated values with fallback defaults
+                    caption = sample_metadata.get("caption", "")
+                    lyrics = sample_metadata.get("lyrics", "")
+                    bpm = _to_int(sample_metadata.get("bpm"), None) or _to_int(os.getenv("ACESTEP_SAMPLE_DEFAULT_BPM", "120"), 120)
+                    key_scale = sample_metadata.get("keyscale", "") or os.getenv("ACESTEP_SAMPLE_DEFAULT_KEY", "C Major")
+                    time_signature = sample_metadata.get("timesignature", "") or os.getenv("ACESTEP_SAMPLE_DEFAULT_TIMESIGNATURE", "4/4")
+                    audio_duration = _to_float(sample_metadata.get("duration"), None) or _to_float(os.getenv("ACESTEP_SAMPLE_DEFAULT_DURATION_SECONDS", "120"), 120.0)
+                    
+                    print(f"[api_server] Sample generated: caption_len={len(caption)}, lyrics_len={len(lyrics)}, bpm={bpm}, duration={audio_duration}")
+                
+                print(f"[api_server] Before GenerationParams: thinking={thinking}, sample_mode={sample_mode}")
+                print(f"[api_server] Caption/Lyrics to use: caption_len={len(caption)}, lyrics_len={len(lyrics)}")
 
-                    sample_keyscale = sample_metadata.get("keyscale", sample_metadata.get("key_scale", ""))
-                    if sample_keyscale:
-                        req.key_scale = str(sample_keyscale)
-
-                    sample_timesig = sample_metadata.get("timesignature", sample_metadata.get("time_signature", ""))
-                    if sample_timesig:
-                        req.time_signature = str(sample_timesig)
-
-                    sample_duration = _to_float(sample_metadata.get("duration"), None)
-                    if sample_duration is not None and sample_duration > 0:
-                        req.audio_duration = sample_duration
-
-                    lm_meta = sample_metadata
-
-                    fallback_values: Dict[str, Any] = {}
-                    default_bpm = _to_int(os.getenv("ACESTEP_SAMPLE_DEFAULT_BPM", "120"), 120) or 120
-                    default_duration = _to_float(os.getenv("ACESTEP_SAMPLE_DEFAULT_DURATION_SECONDS", "120"), 120.0) or 120.0
-                    default_key = os.getenv("ACESTEP_SAMPLE_DEFAULT_KEY", "C Major") or "C Major"
-                    default_timesig = os.getenv("ACESTEP_SAMPLE_DEFAULT_TIMESIGNATURE", "4/4") or "4/4"
-
-                    if req.bpm is None or req.bpm <= 0:
-                        req.bpm = default_bpm
-                        fallback_values["bpm"] = default_bpm
-
-                    if req.audio_duration is None or req.audio_duration <= 0:
-                        req.audio_duration = default_duration
-                        fallback_values["audio_duration"] = default_duration
-
-                    if not (req.key_scale or "").strip():
-                        req.key_scale = default_key
-                        fallback_values["key_scale"] = default_key
-
-                    if not (req.time_signature or "").strip():
-                        req.time_signature = default_timesig
-                        fallback_values["time_signature"] = default_timesig
-
-                    if fallback_values:
-                        print("[api_server] sample mode fallback values:", fallback_values)
-
-                    print(
-                        "[api_server] sample mode metadata:",
-                        {
-                            "caption_len": len(req.caption),
-                            "lyrics_len": len(req.lyrics),
-                            "bpm": req.bpm,
-                            "audio_duration": req.audio_duration,
-                            "key_scale": req.key_scale,
-                            "time_signature": req.time_signature,
-                        },
-                    )
-
-                # Determine effective batch size (used for per-sample LM code diversity)
-                effective_batch_size = req.batch_size
-                if effective_batch_size is None:
-                    try:
-                        effective_batch_size = int(getattr(h, "batch_size", 1))
-                    except Exception:
-                        effective_batch_size = 1
-                effective_batch_size = max(1, int(effective_batch_size))
-
-                has_codes = bool(audio_code_string and str(audio_code_string).strip())
-                need_lm_codes = bool(thinking) and (not has_codes)
-
-                use_constrained_decoding = bool(getattr(req, "constrained_decoding", True))
-                constrained_decoding_debug = bool(getattr(req, "constrained_decoding_debug", False))
-                use_cot_caption = bool(getattr(req, "use_cot_caption", True))
-                use_cot_language = bool(getattr(req, "use_cot_language", True))
-                is_format_caption = bool(getattr(req, "is_format_caption", False))
-
-                # pass them into constrained decoding so LM injects them directly
-                # (i.e. does not re-infer / override those fields).
-                user_metadata: Dict[str, Optional[str]] = {}
-
-                def _set_user_meta(field: str, value: Optional[Any]) -> None:
-                    if value is None:
-                        return
-                    s = str(value).strip()
-                    if not s or s.upper() == "N/A":
-                        return
-                    user_metadata[field] = s
-
-                _set_user_meta("bpm", int(bpm_val) if bpm_val is not None else None)
-                _set_user_meta("duration", float(audio_duration_val) if audio_duration_val is not None else None)
-                _set_user_meta("keyscale", key_scale_val if (key_scale_val or "").strip() else None)
-                _set_user_meta("timesignature", time_sig_val if (time_sig_val or "").strip() else None)
-
-                def _has_meta(field: str) -> bool:
-                    v = user_metadata.get(field)
-                    return bool((v or "").strip())
-
-                need_lm_metas = not (
-                    _has_meta("bpm")
-                    and _has_meta("duration")
-                    and _has_meta("keyscale")
-                    and _has_meta("timesignature")
+                # Build GenerationParams using unified interface
+                # Note: thinking controls LM code generation, sample_mode only affects CoT metas
+                params = GenerationParams(
+                    task_type=req.task_type,
+                    instruction=req.instruction,
+                    reference_audio=req.reference_audio_path,
+                    src_audio=req.src_audio_path,
+                    audio_codes=req.audio_code_string,
+                    caption=caption,
+                    lyrics=lyrics,
+                    instrumental=False,
+                    vocal_language=req.vocal_language,
+                    bpm=bpm,
+                    keyscale=key_scale,
+                    timesignature=time_signature,
+                    duration=audio_duration if audio_duration else -1.0,
+                    inference_steps=req.inference_steps,
+                    seed=req.seed,
+                    guidance_scale=req.guidance_scale,
+                    use_adg=req.use_adg,
+                    cfg_interval_start=req.cfg_interval_start,
+                    cfg_interval_end=req.cfg_interval_end,
+                    repainting_start=req.repainting_start,
+                    repainting_end=req.repainting_end if req.repainting_end else -1,
+                    audio_cover_strength=req.audio_cover_strength,
+                    # LM parameters
+                    thinking=thinking,  # Use LM for code generation when thinking=True
+                    lm_temperature=req.lm_temperature,
+                    lm_cfg_scale=req.lm_cfg_scale,
+                    lm_top_k=lm_top_k,
+                    lm_top_p=lm_top_p,
+                    lm_negative_prompt=req.lm_negative_prompt,
+                    use_cot_metas=not sample_mode,  # Sample mode already generated metas, don't regenerate
+                    use_cot_caption=req.use_cot_caption,
+                    use_cot_language=req.use_cot_language,
+                    use_constrained_decoding=req.constrained_decoding,
                 )
 
-                lm_target_duration: Optional[float] = None
-                if need_lm_codes:
-                    # If user specified a duration, constrain codes generation length accordingly.
-                    if audio_duration_val is not None and float(audio_duration_val) > 0:
-                        lm_target_duration = float(audio_duration_val)
-
-                print(
-                    "[api_server] LM调用参数: "
-                    f"user_metadata_keys={sorted(user_metadata.keys())}, target_duration={lm_target_duration}, "
-                    f"need_lm_codes={need_lm_codes}, need_lm_metas={need_lm_metas}, "
-                    f"use_constrained_decoding={use_constrained_decoding}, use_cot_caption={use_cot_caption}, "
-                    f"use_cot_language={use_cot_language}, is_format_caption={is_format_caption}"
+                # Build GenerationConfig - default to 2 audios like gradio_ui
+                batch_size = req.batch_size if req.batch_size is not None else 2
+                config = GenerationConfig(
+                    batch_size=batch_size,
+                    use_random_seed=req.use_random_seed,
+                    seeds=None,  # Let unified logic handle seed generation
+                    audio_format=req.audio_format,
+                    constrained_decoding_debug=req.constrained_decoding_debug,
                 )
 
-                if need_lm_metas or need_lm_codes:
-                    _ensure_llm_ready()
+                # Check LLM initialization status
+                llm_is_initialized = getattr(app.state, "_llm_initialized", False)
+                llm_to_pass = llm if llm_is_initialized else None
+                
+                print(f"[api_server] Generating music with unified interface:")
+                print(f"  - thinking={params.thinking}")
+                print(f"  - batch_size={batch_size}")
+                print(f"  - llm_initialized={llm_is_initialized}")
+                print(f"  - llm_handler={'Available' if llm_to_pass else 'None'}")
 
-                    if getattr(app.state, "_llm_init_error", None):
-                        # If codes generation is required, fail hard.
-                        if need_lm_codes:
-                            raise RuntimeError(f"5Hz LM init failed: {app.state._llm_init_error}")
-                        # Otherwise, skip LM best-effort (fallback to default/meta-less behavior)
-                    else:
-                        lm_infer = "llm_dit" if need_lm_codes else "dit"
+                # Generate music using unified interface
+                result = generate_music(
+                    dit_handler=h,
+                    llm_handler=llm_to_pass,
+                    params=params,
+                    config=config,
+                    save_dir=app.state.temp_audio_dir,
+                    progress=None,
+                )
+                
+                print(f"[api_server] Generation completed. Success={result.success}, Audios={len(result.audios)}")
+                print(f"[api_server] Time costs keys: {list(result.extra_outputs.get('time_costs', {}).keys())}")
 
-                        def _lm_call() -> tuple[Dict[str, Any], str, str]:
-                            return llm.generate_with_stop_condition(
-                                caption=req.caption,
-                                lyrics=req.lyrics,
-                                infer_type=lm_infer,
-                                temperature=float(req.lm_temperature),
-                                cfg_scale=max(1.0, float(req.lm_cfg_scale)),
-                                negative_prompt=str(req.lm_negative_prompt or "NO USER INPUT"),
-                                top_k=_normalize_optional_int(req.lm_top_k),
-                                top_p=_normalize_optional_float(req.lm_top_p),
-                                repetition_penalty=float(req.lm_repetition_penalty),
-                                target_duration=lm_target_duration,
-                                user_metadata=(user_metadata or None),
-                                use_constrained_decoding=use_constrained_decoding,
-                                constrained_decoding_debug=constrained_decoding_debug,
-                                use_cot_caption=use_cot_caption,
-                                use_cot_language=use_cot_language,
-                                is_format_caption=is_format_caption,
-                            )
+                if not result.success:
+                    raise RuntimeError(f"Music generation failed: {result.error or result.status_message}")
 
-                        meta, codes, status = _lm_call()
-                        lm_meta = meta
+                # Extract results
+                audio_paths = [audio["path"] for audio in result.audios if audio.get("path")]
+                first_audio = audio_paths[0] if len(audio_paths) > 0 else None
+                second_audio = audio_paths[1] if len(audio_paths) > 1 else None
 
-                        if need_lm_codes:
-                            if not codes:
-                                raise RuntimeError(f"5Hz LM generation failed: {status}")
+                # Get metadata from LM or CoT results
+                lm_metadata = result.extra_outputs.get("lm_metadata", {})
+                metas_out = _normalize_metas(lm_metadata)
+                
+                # Update metas with actual values used
+                if params.cot_bpm:
+                    metas_out["bpm"] = params.cot_bpm
+                elif bpm:
+                    metas_out["bpm"] = bpm
+                    
+                if params.cot_duration:
+                    metas_out["duration"] = params.cot_duration
+                elif audio_duration:
+                    metas_out["duration"] = audio_duration
+                    
+                if params.cot_keyscale:
+                    metas_out["keyscale"] = params.cot_keyscale
+                elif key_scale:
+                    metas_out["keyscale"] = key_scale
+                    
+                if params.cot_timesignature:
+                    metas_out["timesignature"] = params.cot_timesignature
+                elif time_signature:
+                    metas_out["timesignature"] = time_signature
 
-                            # LM once per job; rely on DiT seeds for batch diversity.
-                            # For convenience, replicate the same codes across the batch.
-                            if effective_batch_size > 1:
-                                audio_code_string = [codes] * effective_batch_size
-                            else:
-                                audio_code_string = codes
+                # Ensure caption and lyrics are in metas
+                if caption:
+                    metas_out["caption"] = caption
+                if lyrics:
+                    metas_out["lyrics"] = lyrics
 
-                        # Fill only missing fields (user-provided values win)
-                        bpm_val, key_scale_val, time_sig_val, audio_duration_val = _maybe_fill_from_metadata(req, meta)
+                # Extract seed values for response (comma-separated for multiple audios)
+                seed_values = []
+                for audio in result.audios:
+                    audio_params = audio.get("params", {})
+                    seed = audio_params.get("seed")
+                    if seed is not None:
+                        seed_values.append(str(seed))
+                seed_value = ",".join(seed_values) if seed_values else ""
 
-                        # If user provided lyrics but LM didn't provide a usable duration, estimate a longer duration.
-                        if audio_duration_val is None and (req.audio_duration is None):
-                            est = _estimate_duration_from_lyrics(req.lyrics)
-                            if est is not None:
-                                audio_duration_val = est
-
-                        # Optional: auto-tune LM cover strength (opt-in) to avoid suppressing lyric/vocal conditioning.
-                        if thinking and audio_cover_strength_val >= 0.999 and (req.lyrics or "").strip():
-                            tuned = os.getenv("ACESTEP_LM_COVER_STRENGTH")
-                            if tuned is not None and tuned.strip() != "":
-                                audio_cover_strength_val = float(tuned)
-
-                # Align behavior:
-                # - thinking=False: metas only (ignore audio codes), keep text2music.
-                # - thinking=True: metas + audio codes, run in cover mode with LM instruction.
-                instruction_val = req.instruction
-                task_type_val = (req.task_type or "").strip() or "text2music"
-
-                if not thinking:
-                    audio_code_string = ""
-                    if task_type_val == "cover":
-                        task_type_val = "text2music"
-                    if (instruction_val or "").strip() in {"", _DEFAULT_LM_INSTRUCTION}:
-                        instruction_val = _DEFAULT_DIT_INSTRUCTION
-
-                if thinking:
-                    task_type_val = "cover"
-                    if (instruction_val or "").strip() in {"", _DEFAULT_DIT_INSTRUCTION}:
-                        instruction_val = _DEFAULT_LM_INSTRUCTION
-
-                    if not (audio_code_string and str(audio_code_string).strip()):
-                        # thinking=True requires codes generation.
-                        raise RuntimeError("thinking=true requires non-empty audio codes (LM generation failed).")
-
-                # Response metas MUST reflect the actual values used by DiT.
-                metas_out = _normalize_metas(lm_meta or {})
-                if bpm_val is not None and int(bpm_val) > 0:
-                    metas_out["bpm"] = int(bpm_val)
-                if audio_duration_val is not None and float(audio_duration_val) > 0:
-                    metas_out["duration"] = float(audio_duration_val)
-                if (key_scale_val or "").strip():
-                    metas_out["keyscale"] = str(key_scale_val)
-                if (time_sig_val or "").strip():
-                    metas_out["timesignature"] = str(time_sig_val)
-
-                def _ensure_text_meta(field: str, fallback: Optional[str]) -> None:
-                    existing = metas_out.get(field)
-                    if isinstance(existing, str):
-                        stripped = existing.strip()
-                        if stripped and stripped.upper() != "N/A":
-                            return
-                    if fallback is None:
-                        return
-                    if fallback.strip():
-                        metas_out[field] = fallback
-
-                _ensure_text_meta("caption", req.caption)
-                _ensure_text_meta("lyrics", req.lyrics)
+                # Build generation_info using the helper function (like gradio_ui)
+                time_costs = result.extra_outputs.get("time_costs", {})
+                generation_info = _build_generation_info(
+                    lm_metadata=lm_metadata,
+                    time_costs=time_costs,
+                    seed_value=seed_value,
+                    inference_steps=req.inference_steps,
+                    num_audios=len(result.audios),
+                )
 
                 def _none_if_na_str(v: Any) -> Optional[str]:
                     if v is None:
@@ -868,54 +695,17 @@ def create_app() -> FastAPI:
                     if s in {"", "N/A"}:
                         return None
                     return s
-                result = h.generate_music(
-                    captions=req.caption,
-                    lyrics=req.lyrics,
-                    bpm=bpm_val,
-                    key_scale=key_scale_val,
-                    time_signature=time_sig_val,
-                    vocal_language=req.vocal_language,
-                    inference_steps=req.inference_steps,
-                    guidance_scale=req.guidance_scale,
-                    use_random_seed=req.use_random_seed,
-                    seed=("-1" if (req.use_random_seed and int(req.seed) < 0) else str(req.seed)),
-                    reference_audio=req.reference_audio_path,
-                    audio_duration=audio_duration_val,
-                    batch_size=req.batch_size,
-                    src_audio=req.src_audio_path,
-                    audio_code_string=audio_code_string,
-                    repainting_start=req.repainting_start,
-                    repainting_end=req.repainting_end,
-                    instruction=instruction_val,
-                    audio_cover_strength=audio_cover_strength_val,
-                    task_type=task_type_val,
-                    use_adg=req.use_adg,
-                    cfg_interval_start=req.cfg_interval_start,
-                    cfg_interval_end=req.cfg_interval_end,
-                    audio_format=req.audio_format,
-                    use_tiled_decode=req.use_tiled_decode,
-                    progress=None,
-                )
-                
-                # Extract values from new dict structure
-                audios = result.get("audios", [])
-                audio_paths = [audio.get("path") for audio in audios]
-                first = audio_paths[0] if len(audio_paths) > 0 else None
-                second = audio_paths[1] if len(audio_paths) > 1 else None
-                gen_info = result.get("generation_info", "")
-                status_msg = result.get("status_message", "")
-                seed_value = result.get("extra_outputs", {}).get("seed_value", "")
-                
+
                 return {
-                    "first_audio_path": _path_to_audio_url(first) if first else None,
-                    "second_audio_path": _path_to_audio_url(second) if second else None,
-                    "audio_paths": [_path_to_audio_url(p) for p in (audio_paths or [])],
-                    "generation_info": gen_info,
-                    "status_message": status_msg,
+                    "first_audio_path": _path_to_audio_url(first_audio) if first_audio else None,
+                    "second_audio_path": _path_to_audio_url(second_audio) if second_audio else None,
+                    "audio_paths": [_path_to_audio_url(p) for p in audio_paths],
+                    "generation_info": generation_info,
+                    "status_message": result.status_message,
                     "seed_value": seed_value,
                     "metas": metas_out,
-                    "bpm": int(bpm_val) if bpm_val is not None else None,
-                    "duration": float(audio_duration_val) if audio_duration_val is not None else None,
+                    "bpm": metas_out.get("bpm") if isinstance(metas_out.get("bpm"), int) else None,
+                    "duration": metas_out.get("duration") if isinstance(metas_out.get("duration"), (int, float)) else None,
                     "genres": _none_if_na_str(metas_out.get("genres")),
                     "keyscale": _none_if_na_str(metas_out.get("keyscale")),
                     "timesignature": _none_if_na_str(metas_out.get("timesignature")),
@@ -1020,53 +810,6 @@ def create_app() -> FastAPI:
 
                 return default
 
-            # Debug: print what keys we actually received (helps explain empty parsed values)
-            try:
-                top_keys = list(getattr(mapping, "keys", lambda: [])())
-            except Exception:
-                top_keys = []
-            try:
-                nested_probe = (
-                    get("metas", None)
-                    or get("meta", None)
-                    or get("metadata", None)
-                    or get("user_metadata", None)
-                    or get("userMetadata", None)
-                )
-                if isinstance(nested_probe, str):
-                    sp = nested_probe.strip()
-                    if sp.startswith("{") and sp.endswith("}"):
-                        try:
-                            nested_probe = json.loads(sp)
-                        except Exception:
-                            nested_probe = None
-                nested_keys = list(nested_probe.keys()) if isinstance(nested_probe, dict) else []
-            except Exception:
-                nested_keys = []
-            print(f"[api_server] request keys: top={sorted(top_keys)}, nested={sorted(nested_keys)}")
-
-            # Debug: print raw values/types for common meta fields (top-level + common aliases)
-            try:
-                probe_keys = [
-                    "thinking",
-                    "bpm",
-                    "audio_duration",
-                    "duration",
-                    "audioDuration",
-                    "key_scale",
-                    "keyscale",
-                    "keyScale",
-                    "time_signature",
-                    "timesignature",
-                    "timeSignature",
-                ]
-                raw = {k: get(k, None) for k in probe_keys}
-                raw_types = {k: (type(v).__name__ if v is not None else None) for k, v in raw.items()}
-                print(f"[api_server] request raw: {raw}")
-                print(f"[api_server] request raw types: {raw_types}")
-            except Exception:
-                pass
-
             normalized_audio_duration = _to_float(_get_any("audio_duration", "duration", "audioDuration"), None)
             normalized_bpm = _to_int(_get_any("bpm"), None)
             normalized_keyscale = str(_get_any("key_scale", "keyscale", "keyScale", default="") or "")
@@ -1075,12 +818,6 @@ def create_app() -> FastAPI:
             # Accept it as an alias to avoid clients needing to special-case server.
             if normalized_audio_duration is None:
                 normalized_audio_duration = _to_float(_get_any("target_duration", "targetDuration"), None)
-
-            print(
-                "[api_server] normalized: "
-                f"thinking={_to_bool(get('thinking'), False)}, bpm={normalized_bpm}, "
-                f"audio_duration={normalized_audio_duration}, key_scale={normalized_keyscale!r}, time_signature={normalized_timesig!r}"
-            )
 
             return GenerateMusicRequest(
                 caption=str(get("caption", "") or ""),
@@ -1120,7 +857,6 @@ def create_app() -> FastAPI:
                 lm_negative_prompt=str(get("lm_negative_prompt", "NO USER INPUT") or "NO USER INPUT"),
                 constrained_decoding=_to_bool(_get_any("constrained_decoding", "constrainedDecoding", "constrained"), True),
                 constrained_decoding_debug=_to_bool(_get_any("constrained_decoding_debug", "constrainedDecodingDebug"), False),
-                # Accept common aliases, including hyphenated keys from some clients.
                 use_cot_caption=_to_bool(_get_any("use_cot_caption", "cot_caption", "cot-caption"), True),
                 use_cot_language=_to_bool(_get_any("use_cot_language", "cot_language", "cot-language"), True),
                 is_format_caption=_to_bool(_get_any("is_format_caption", "isFormatCaption"), False),
