@@ -571,6 +571,33 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         if self.debug:
             logger.debug(f"Built audio code masks for {len(self.audio_code_token_ids)} tokens")
 
+    def _apply_whitelist_inplace(self, scores: torch.Tensor, allowed_tokens: List[int]) -> None:
+        """
+        Apply whitelist constraint inplace: only allow specified tokens, block all others.
+        
+        This is more efficient than creating a mask tensor because:
+        1. No memory allocation for mask
+        2. No tensor addition operation
+        
+        Args:
+            scores: [1, vocab_size] scores tensor to modify inplace
+            allowed_tokens: List of token IDs to allow (all others will be set to -inf)
+        """
+        if not allowed_tokens:
+            # No tokens allowed, set all to -inf
+            scores.fill_(float('-inf'))
+            return
+        
+        # Save the original values of allowed tokens
+        allowed_indices = torch.tensor(allowed_tokens, device=scores.device, dtype=torch.long)
+        saved_values = scores[0, allowed_indices].clone()
+        
+        # Set all scores to -inf
+        scores.fill_(float('-inf'))
+        
+        # Restore allowed token values
+        scores[0, allowed_indices] = saved_values
+
     def _build_keyscale_prefix_tree(self) -> Dict[Tuple[int, ...], Set[int]]:
         """
         Build keyscale prefix to allowed tokens mapping based on ACTUAL tokenization.
@@ -1484,10 +1511,10 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     if self.debug:
                         logger.debug(f"Codes generation: {self.codes_count}/{self.target_codes}, blocking EOS")
                 else:
-                    # Force EOS token when target codes count is reached
-                    mask = torch.full_like(scores, float('-inf'))
-                    mask[:, self.eos_token_id] = 0
-                    scores = scores + mask
+                    # Force EOS token when target codes count is reached - inplace
+                    eos_scores = scores[:, self.eos_token_id].clone()
+                    scores.fill_(float('-inf'))
+                    scores[:, self.eos_token_id] = eos_scores
                     if self.debug:
                         logger.debug(f"Codes generation: {self.codes_count}/{self.target_codes}, forcing EOS")
             return self._apply_temperature_scaling(scores)
@@ -1609,19 +1636,14 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         input_ids: torch.LongTensor,
         scores: torch.FloatTensor,
     ) -> torch.FloatTensor:
-        """Process a single sequence and return modified scores."""
+        """Process a single sequence and return modified scores (inplace when possible)."""
         
         # Check if we have tokens in queue for user-provided field
         # If so, inject the next token directly
         if self.user_field_token_queue:
-            mask = torch.full_like(scores, float('-inf'))
             next_token = self.user_field_token_queue[0]
-            mask[0, next_token] = 0
-            scores = scores + mask
+            self._apply_whitelist_inplace(scores, [next_token])
             return scores
-        
-        # Create mask (all -inf initially)
-        mask = torch.full_like(scores, float('-inf'))
         
         if self.state in self.fixed_strings:
             # Fixed string state: force specific tokens
@@ -1633,28 +1655,18 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 # This happens when we're about to complete the </think> tag
                 if self.state == FSMState.THINK_END_TAG and self.stop_at_reasoning:
                     # Check if the next token would complete the fixed string
-                    # We check if position_in_state + length of next token would complete it
-                    # Since we don't know which token will be selected, we check if we're close to completion
-                    # Actually, a better approach: check if this is the last character(s) of the fixed string
                     remaining_chars = len(fixed_str) - self.position_in_state
                     # If remaining is small (<= 10 chars, which is typically 1-2 tokens), force EOS
                     if remaining_chars <= 10:
                         # Force EOS token to stop generation
                         if self.eos_token_id is not None:
-                            mask[0, self.eos_token_id] = 0
-                            scores = scores + mask
+                            self._apply_whitelist_inplace(scores, [self.eos_token_id])
                             if self.debug:
                                 logger.debug(f"stop_at_reasoning=True: forcing EOS near end of </think> tag (remaining: {remaining_chars} chars)")
                             return scores
                 
-                for t in allowed:
-                    mask[0, t] = 0
-                # Apply mask
-                scores = scores + mask
-                
-                # Update position tracking
-                # We need to check if the selected token completes the fixed string
-                # This will be done in update_state() after token selection
+                # Apply whitelist constraint inplace
+                self._apply_whitelist_inplace(scores, allowed)
             else:
                 # Position exceeds string, move to next state
                 # If stop_at_reasoning is True and we're transitioning from THINK_END_TAG,
@@ -1662,8 +1674,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 if self.state == FSMState.THINK_END_TAG and self.stop_at_reasoning:
                     # Force EOS token to stop generation
                     if self.eos_token_id is not None:
-                        mask[0, self.eos_token_id] = 0
-                        scores = scores + mask
+                        self._apply_whitelist_inplace(scores, [self.eos_token_id])
                         if self.debug:
                             logger.debug(f"stop_at_reasoning=True: forcing EOS after completing </think> tag")
                         return scores
@@ -1676,7 +1687,9 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     if self.debug:
                         logger.warning(f"State transition from {old_state.name} to {self.state.name} still in fixed_strings, avoiding recursion")
                     return scores
-                return self._process_single_sequence(input_ids, torch.zeros_like(scores))
+                # For recursion, reset scores to zero (no constraints from previous state)
+                scores.zero_()
+                return self._process_single_sequence(input_ids, scores)
         
         elif self.state == FSMState.BPM_VALUE:
             # Check if field is user-provided and we haven't started injecting yet
@@ -1690,22 +1703,18 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     self.user_field_token_queue = value_tokens
                     self.current_user_field = "bpm"
                     # Inject first token
-                    mask[0, value_tokens[0]] = 0
-                    scores = scores + mask
+                    self._apply_whitelist_inplace(scores, [value_tokens[0]])
                     return scores
             
             # Allow valid numeric tokens using prefix tree (supports multi-digit tokens like "120")
             allowed = self._get_allowed_numeric_tokens(self.bpm_prefix_tree)
-            for t in allowed:
-                mask[0, t] = 0
             
             # Also allow newline if current token sequence prefix allows it
-            # Check if current token sequence is in prefix tree and allows newline
             token_prefix = tuple(self.accumulated_token_ids)
             if token_prefix in self.bpm_prefix_tree and self.newline_token in self.bpm_prefix_tree[token_prefix]:
-                mask[0, self.newline_token] = 0
+                allowed = allowed + [self.newline_token]
             
-            scores = scores + mask
+            self._apply_whitelist_inplace(scores, allowed)
         
         elif self.state == FSMState.CAPTION_VALUE:
             # Caption field generation with YAML format support:
@@ -1724,8 +1733,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     self.user_field_token_queue = value_tokens
                     self.current_user_field = "caption"
                     # Inject first token
-                    mask[0, value_tokens[0]] = 0
-                    scores = scores + mask
+                    self._apply_whitelist_inplace(scores, [value_tokens[0]])
                     return scores
             
             # Check if we should transition after a newline (non-indented line = new field)
@@ -1757,7 +1765,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 # The field name detection will happen in update_state()
                 return scores
             
-            # Block backticks (code blocks)
+            # Block backticks (code blocks) - inplace
             if self.backtick_token is not None:
                 scores[0, self.backtick_token] = float('-inf')
             
@@ -1773,8 +1781,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             if self.caption_token_count >= 512:
                 # Force end by only allowing newline
                 if self.newline_token is not None:
-                    mask[0, self.newline_token] = 0
-                    scores = scores + mask
+                    self._apply_whitelist_inplace(scores, [self.newline_token])
                     return scores
             
             # Allow natural generation (with blocked audio codes and backticks)
@@ -1791,8 +1798,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     self.user_field_token_queue = value_tokens
                     self.current_user_field = "duration"
                     # Inject first token
-                    mask[0, value_tokens[0]] = 0
-                    scores = scores + mask
+                    self._apply_whitelist_inplace(scores, [value_tokens[0]])
                     return scores
             
             # If target_duration is set, force generate that exact value
@@ -1804,26 +1810,22 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     # Force the next digit
                     next_digit = int(target_str[current_pos])
                     if next_digit in self.digit_tokens:
-                        mask[0, self.digit_tokens[next_digit]] = 0
+                        self._apply_whitelist_inplace(scores, [self.digit_tokens[next_digit]])
                 else:
                     # All digits generated, force newline
                     if self.newline_token:
-                        mask[0, self.newline_token] = 0
-                
-                scores = scores + mask
+                        self._apply_whitelist_inplace(scores, [self.newline_token])
             else:
                 # Normal duration generation with range constraint
                 # Allow valid numeric tokens using prefix tree (supports multi-digit tokens like "60", "120")
                 allowed = self._get_allowed_numeric_tokens(self.duration_prefix_tree)
-                for t in allowed:
-                    mask[0, t] = 0
                 
                 # Also allow newline if current token sequence prefix allows it
                 token_prefix = tuple(self.accumulated_token_ids)
                 if token_prefix in self.duration_prefix_tree and self.newline_token in self.duration_prefix_tree[token_prefix]:
-                    mask[0, self.newline_token] = 0
+                    allowed = allowed + [self.newline_token]
                 
-                scores = scores + mask
+                self._apply_whitelist_inplace(scores, allowed)
         
         elif self.state == FSMState.GENRES_VALUE:
             # Check if field is user-provided and we haven't started injecting yet
@@ -1836,8 +1838,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     self.user_field_token_queue = value_tokens
                     self.current_user_field = "genres"
                     # Inject first token
-                    mask[0, value_tokens[0]] = 0
-                    scores = scores + mask
+                    self._apply_whitelist_inplace(scores, [value_tokens[0]])
                     return scores
             
             # Try to hot-reload genres vocab if file has changed
@@ -1848,24 +1849,20 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             
             if allowed:
                 # Use vocabulary-constrained decoding
-                for t in allowed:
-                    mask[0, t] = 0
-                scores = scores + mask
+                self._apply_whitelist_inplace(scores, allowed)
             elif self.genres_vocab:
                 # Vocab is loaded but no valid continuation found
                 # Force newline to end the field
                 if self.newline_token:
-                    mask[0, self.newline_token] = 0
                     if self.debug:
                         logger.debug(f"No valid genre continuation for '{self.accumulated_value}', forcing newline")
-                scores = scores + mask
+                    self._apply_whitelist_inplace(scores, [self.newline_token])
             else:
                 # Fallback: no vocab loaded, use probability-based ending
                 if self._should_end_text_field(scores):
                     if self.newline_token:
-                        mask[0, self.newline_token] = 0
+                        self._apply_whitelist_inplace(scores, [self.newline_token])
                         self._transition_to_next_state()
-                    scores = scores + mask
                 else:
                     # Allow any token except newline if we don't have content yet
                     if not self.accumulated_value.strip():
@@ -1884,8 +1881,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     self.user_field_token_queue = value_tokens
                     self.current_user_field = "keyscale"
                     # Inject first token
-                    mask[0, value_tokens[0]] = 0
-                    scores = scores + mask
+                    self._apply_whitelist_inplace(scores, [value_tokens[0]])
                     return scores
             
             # Check if current token sequence is complete (allows newline)
@@ -1893,21 +1889,17 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             if token_prefix in self.keyscale_prefix_tree and self.newline_token in self.keyscale_prefix_tree[token_prefix]:
                 # Complete keyscale, allow newline
                 if self.newline_token:
-                    mask[0, self.newline_token] = 0
-                scores = scores + mask
+                    self._apply_whitelist_inplace(scores, [self.newline_token])
             else:
                 # Not complete, allow valid continuation tokens
                 allowed = self._get_allowed_keyscale_tokens()
                 if allowed:
-                    for t in allowed:
-                        mask[0, t] = 0
-                    scores = scores + mask
+                    self._apply_whitelist_inplace(scores, allowed)
                 else:
                     # No valid tokens found - force newline to end field
                     # This handles edge cases where keyscale format is unexpected
                     if self.newline_token:
-                        mask[0, self.newline_token] = 0
-                    scores = scores + mask
+                        self._apply_whitelist_inplace(scores, [self.newline_token])
         
         elif self.state == FSMState.LANGUAGE_VALUE:
             # Language field: Use top-1 probability language (greedy selection)
@@ -1925,8 +1917,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     self.user_field_token_queue = value_tokens
                     self.current_user_field = "language"
                     # Inject first token
-                    mask[0, value_tokens[0]] = 0
-                    scores = scores + mask
+                    self._apply_whitelist_inplace(scores, [value_tokens[0]])
                     return scores
 
             # If we haven't started generating language yet (empty accumulated_token_ids),
@@ -1938,19 +1929,17 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     candidate_tokens = list(self.language_prefix_tree[empty_prefix])
                     
                     if candidate_tokens:
-                        # Find the token with highest probability (top-1)
-                        # Create a mask that blocks all tokens except candidates
-                        temp_mask = torch.full_like(scores, float('-inf'))
-                        for t in candidate_tokens:
-                            temp_mask[0, t] = 0
-                        temp_scores = scores + temp_mask
+                        # Find the token with highest probability (top-1) among candidates
+                        # Use tensor indexing to get scores of candidate tokens directly
+                        candidate_indices = torch.tensor(candidate_tokens, device=scores.device, dtype=torch.long)
+                        candidate_scores = scores[0, candidate_indices]
                         
                         # Get the highest probability token among candidates
-                        top_token_id = torch.argmax(temp_scores[0]).item()
+                        best_idx = torch.argmax(candidate_scores).item()
+                        top_token_id = candidate_tokens[best_idx]
                         
-                        # Only allow this top-1 token, block all others (including other language tokens)
-                        mask[0, top_token_id] = 0
-                        scores = scores + mask
+                        # Only allow this top-1 token, block all others
+                        self._apply_whitelist_inplace(scores, [top_token_id])
                         
                         if self.debug:
                             top_token_text = self.tokenizer.decode([top_token_id])
@@ -1958,13 +1947,11 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     else:
                         # No valid first tokens found - force newline
                         if self.newline_token:
-                            mask[0, self.newline_token] = 0
-                        scores = scores + mask
+                            self._apply_whitelist_inplace(scores, [self.newline_token])
                 else:
                     # Empty prefix not in tree - force newline
                     if self.newline_token:
-                        mask[0, self.newline_token] = 0
-                    scores = scores + mask
+                        self._apply_whitelist_inplace(scores, [self.newline_token])
             else:
                 # We've started generating a language, continue with prefix tree constraints
                 # Check if current token sequence is complete (allows newline)
@@ -1972,20 +1959,16 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 if token_prefix in self.language_prefix_tree and self.newline_token in self.language_prefix_tree[token_prefix]:
                     # Complete language, allow newline
                     if self.newline_token:
-                        mask[0, self.newline_token] = 0
-                    scores = scores + mask
+                        self._apply_whitelist_inplace(scores, [self.newline_token])
                 else:
                     # Not complete, allow valid continuation tokens
                     allowed = self._get_allowed_language_tokens()
                     if allowed:
-                        for t in allowed:
-                            mask[0, t] = 0
-                        scores = scores + mask
+                        self._apply_whitelist_inplace(scores, allowed)
                     else:
                         # No valid tokens found - force newline to end field
                         if self.newline_token:
-                            mask[0, self.newline_token] = 0
-                        scores = scores + mask
+                            self._apply_whitelist_inplace(scores, [self.newline_token])
         
         elif self.state == FSMState.TIMESIG_VALUE:
             # Check if field is user-provided and we haven't started injecting yet
@@ -1998,8 +1981,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     self.user_field_token_queue = value_tokens
                     self.current_user_field = "timesignature"
                     # Inject first token
-                    mask[0, value_tokens[0]] = 0
-                    scores = scores + mask
+                    self._apply_whitelist_inplace(scores, [value_tokens[0]])
                     return scores
             
             # Check if current token sequence is complete (allows newline)
@@ -2007,14 +1989,11 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             if token_prefix in self.timesig_prefix_tree and self.newline_token in self.timesig_prefix_tree[token_prefix]:
                 # Complete value, allow newline
                 if self.newline_token:
-                    mask[0, self.newline_token] = 0
-                scores = scores + mask
+                    self._apply_whitelist_inplace(scores, [self.newline_token])
             else:
                 # Not complete, allow valid continuation tokens
                 allowed = self._get_allowed_timesig_tokens()
-                for t in allowed:
-                    mask[0, t] = 0
-                scores = scores + mask
+                self._apply_whitelist_inplace(scores, allowed)
         
         return scores
     

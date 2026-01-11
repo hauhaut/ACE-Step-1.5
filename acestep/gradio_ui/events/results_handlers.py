@@ -10,9 +10,123 @@ import tempfile
 import shutil
 import zipfile
 import time as time_module
+from typing import Dict, Any, Optional
 import gradio as gr
 from loguru import logger
 from acestep.gradio_ui.i18n import t
+from acestep.inference import generate_music, GenerationParams, GenerationConfig
+from acestep.audio_utils import save_audio
+
+
+def _build_generation_info(
+    lm_metadata: Optional[Dict[str, Any]],
+    time_costs: Dict[str, float],
+    seed_value: str,
+    inference_steps: int,
+    num_audios: int,
+) -> str:
+    """Build generation info string from result data.
+    
+    Args:
+        lm_metadata: LM-generated metadata dictionary
+        time_costs: Unified time costs dictionary
+        seed_value: Seed value string
+        inference_steps: Number of inference steps
+        num_audios: Number of generated audios
+        
+    Returns:
+        Formatted generation info string
+    """
+    info_parts = []
+    
+    # Part 1: LM-generated metadata (if available)
+    if lm_metadata:
+        metadata_lines = []
+        if lm_metadata.get('bpm'):
+            metadata_lines.append(f"- **BPM:** {lm_metadata['bpm']}")
+        if lm_metadata.get('caption'):
+            metadata_lines.append(f"- **Refined Caption:** {lm_metadata['caption']}")
+        if lm_metadata.get('lyrics'):
+            metadata_lines.append(f"- **Refined Lyrics:** {lm_metadata['lyrics']}")
+        if lm_metadata.get('duration'):
+            metadata_lines.append(f"- **Duration:** {lm_metadata['duration']} seconds")
+        if lm_metadata.get('keyscale'):
+            metadata_lines.append(f"- **Key Scale:** {lm_metadata['keyscale']}")
+        if lm_metadata.get('language'):
+            metadata_lines.append(f"- **Language:** {lm_metadata['language']}")
+        if lm_metadata.get('timesignature'):
+            metadata_lines.append(f"- **Time Signature:** {lm_metadata['timesignature']}")
+        
+        if metadata_lines:
+            metadata_section = "**🤖 LM-Generated Metadata:**\n" + "\n".join(metadata_lines)
+            info_parts.append(metadata_section)
+    
+    # Part 2: Time costs (formatted and beautified)
+    if time_costs:
+        time_lines = []
+        
+        # LM time costs
+        lm_phase1 = time_costs.get('lm_phase1_time', 0.0)
+        lm_phase2 = time_costs.get('lm_phase2_time', 0.0)
+        lm_total = time_costs.get('lm_total_time', 0.0)
+        
+        if lm_total > 0:
+            time_lines.append("**🧠 LM Time:**")
+            if lm_phase1 > 0:
+                time_lines.append(f"  - Phase 1 (CoT): {lm_phase1:.2f}s")
+            if lm_phase2 > 0:
+                time_lines.append(f"  - Phase 2 (Codes): {lm_phase2:.2f}s")
+            time_lines.append(f"  - Total: {lm_total:.2f}s")
+        
+        # DiT time costs
+        dit_encoder = time_costs.get('dit_encoder_time_cost', 0.0)
+        dit_model = time_costs.get('dit_model_time_cost', 0.0)
+        dit_vae_decode = time_costs.get('dit_vae_decode_time_cost', 0.0)
+        dit_offload = time_costs.get('dit_offload_time_cost', 0.0)
+        dit_total = time_costs.get('dit_total_time_cost', 0.0)
+        if dit_total > 0:
+            time_lines.append("\n**🎵 DiT Time:**")
+            if dit_encoder > 0:
+                time_lines.append(f"  - Encoder: {dit_encoder:.2f}s")
+            if dit_model > 0:
+                time_lines.append(f"  - Model: {dit_model:.2f}s")
+            if dit_vae_decode > 0:
+                time_lines.append(f"  - VAE Decode: {dit_vae_decode:.2f}s")
+            if dit_offload > 0:
+                time_lines.append(f"  - Offload: {dit_offload:.2f}s")
+            time_lines.append(f"  - Total: {dit_total:.2f}s")
+        
+        # Post-processing time costs
+        audio_conversion_time = time_costs.get('audio_conversion_time', 0.0)
+        auto_score_time = time_costs.get('auto_score_time', 0.0)
+        
+        if audio_conversion_time > 0 or auto_score_time > 0:
+            time_lines.append("\n**🔧 Post-processing Time:**")
+            if audio_conversion_time > 0:
+                time_lines.append(f"  - Audio Conversion: {audio_conversion_time:.2f}s")
+            if auto_score_time > 0:
+                time_lines.append(f"  - Auto Score: {auto_score_time:.2f}s")
+        
+        # Pipeline total
+        pipeline_total = time_costs.get('pipeline_total_time', 0.0)
+        if pipeline_total > 0:
+            time_lines.append(f"\n**⏱️ Pipeline Total: {pipeline_total:.2f}s**")
+        
+        if time_lines:
+            time_section = "\n".join(time_lines)
+            info_parts.append(time_section)
+    
+    # Part 3: Generation summary
+    summary_lines = [
+        "**🎵 Generation Complete**",
+        f"  - **Seeds:** {seed_value}",
+        f"  - **Steps:** {inference_steps}",
+        f"  - **Audio Count:** {num_audios} audio(s)",
+    ]
+    info_parts.append("\n".join(summary_lines))
+    
+    # Combine all parts
+    return "\n\n".join(info_parts)
 
 
 def store_batch_in_queue(
@@ -65,99 +179,6 @@ def update_navigation_buttons(current_batch, total_batches):
     can_go_previous = current_batch > 0
     can_go_next = current_batch < total_batches - 1
     return can_go_previous, can_go_next
-
-
-def save_audio_and_metadata(
-    audio_path, task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature, audio_duration,
-    batch_size_input, inference_steps, guidance_scale, seed, random_seed_checkbox,
-    use_adg, cfg_interval_start, cfg_interval_end, audio_format,
-    lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
-    use_cot_caption, use_cot_language, audio_cover_strength,
-    think_checkbox, text2music_audio_code_string, repainting_start, repainting_end,
-    track_name, complete_track_classes, lm_metadata
-):
-    """Save audio file and its metadata as a zip package"""
-    if audio_path is None:
-        gr.Warning(t("messages.no_audio_to_save"))
-        return None
-    
-    try:
-        # Create metadata dictionary
-        metadata = {
-            "saved_at": datetime.datetime.now().isoformat(),
-            "task_type": task_type,
-            "caption": captions or "",
-            "lyrics": lyrics or "",
-            "vocal_language": vocal_language,
-            "bpm": bpm if bpm is not None else None,
-            "keyscale": key_scale or "",
-            "timesignature": time_signature or "",
-            "duration": audio_duration if audio_duration is not None else -1,
-            "batch_size": batch_size_input,
-            "inference_steps": inference_steps,
-            "guidance_scale": guidance_scale,
-            "seed": seed,
-            "random_seed": False,  # Disable random seed for reproducibility
-            "use_adg": use_adg,
-            "cfg_interval_start": cfg_interval_start,
-            "cfg_interval_end": cfg_interval_end,
-            "audio_format": audio_format,
-            "lm_temperature": lm_temperature,
-            "lm_cfg_scale": lm_cfg_scale,
-            "lm_top_k": lm_top_k,
-            "lm_top_p": lm_top_p,
-            "lm_negative_prompt": lm_negative_prompt,
-            "use_cot_caption": use_cot_caption,
-            "use_cot_language": use_cot_language,
-            "audio_cover_strength": audio_cover_strength,
-            "think": think_checkbox,
-            "audio_codes": text2music_audio_code_string or "",
-            "repainting_start": repainting_start,
-            "repainting_end": repainting_end,
-            "track_name": track_name,
-            "complete_track_classes": complete_track_classes or [],
-        }
-        
-        # Add LM-generated metadata if available
-        if lm_metadata:
-            metadata["lm_generated_metadata"] = lm_metadata
-        
-        # Generate timestamp and base name
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Extract audio filename extension
-        audio_ext = os.path.splitext(audio_path)[1]
-        
-        # Create temporary directory for packaging
-        temp_dir = tempfile.mkdtemp()
-        
-        # Save JSON metadata
-        json_path = os.path.join(temp_dir, f"metadata_{timestamp}.json")
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
-        
-        # Copy audio file
-        audio_copy_path = os.path.join(temp_dir, f"audio_{timestamp}{audio_ext}")
-        shutil.copy2(audio_path, audio_copy_path)
-        
-        # Create zip file
-        zip_path = os.path.join(tempfile.gettempdir(), f"music_package_{timestamp}.zip")
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            zipf.write(audio_copy_path, os.path.basename(audio_copy_path))
-            zipf.write(json_path, os.path.basename(json_path))
-        
-        # Clean up temp directory
-        shutil.rmtree(temp_dir)
-        
-        gr.Info(t("messages.save_success", filename=os.path.basename(zip_path)))
-        return zip_path
-        
-    except Exception as e:
-        gr.Warning(t("messages.save_failed", error=str(e)))
-        import traceback
-        traceback.print_exc()
-        return None
-
 
 def send_audio_to_src_with_metadata(audio_file, lm_metadata):
     """Send generated audio file to src_audio input and populate metadata fields
@@ -254,364 +275,207 @@ def generate_with_progress(
     auto_score,
     score_scale,
     lm_batch_chunk_size,
-    progress=gr.Progress(track_tqdm=True)
+    progress=gr.Progress(track_tqdm=True),
 ):
     """Generate audio with progress tracking"""
-    # If think is enabled (llm_dit mode) and use_cot_metas is True, generate audio codes using LM first
-    audio_code_string_to_use = text2music_audio_code_string
-    lm_generated_metadata = None  # Store LM-generated metadata for display
-    lm_generated_audio_codes = None  # Store LM-generated audio codes for display
-    lm_generated_audio_codes_list = []  # Store list of audio codes for batch processing
     
-    # Determine if we should use batch LM generation
-    should_use_lm_batch = (
-        think_checkbox and
-        llm_handler.llm_initialized and
-        use_cot_metas and
-        allow_lm_batch and
-        batch_size_input >= 2
+    # step 1: prepare inputs
+    # generate_music, GenerationParams, GenerationConfig
+    gen_params = GenerationParams(
+        task_type=task_type,
+        instruction=instruction_display_gen,
+        reference_audio=reference_audio,
+        src_audio=src_audio,
+        audio_codes=text2music_audio_code_string if not think_checkbox else "",
+        caption=captions or "",
+        lyrics=lyrics or "",
+        instrumental=False,
+        vocal_language=vocal_language,
+        bpm=bpm,
+        keyscale=key_scale,
+        timesignature=time_signature,
+        duration=audio_duration,
+        inference_steps=inference_steps,
+        guidance_scale=guidance_scale,
+        use_adg=use_adg,
+        cfg_interval_start=cfg_interval_start,
+        cfg_interval_end=cfg_interval_end,
+        repainting_start=repainting_start,
+        repainting_end=repainting_end,
+        audio_cover_strength=audio_cover_strength,
+        thinking=think_checkbox,
+        lm_temperature=lm_temperature,
+        lm_cfg_scale=lm_cfg_scale,
+        lm_top_k=lm_top_k,
+        lm_top_p=lm_top_p,
+        lm_negative_prompt=lm_negative_prompt,
+        use_cot_metas=use_cot_metas,
+        use_cot_caption=use_cot_caption,
+        use_cot_language=use_cot_language,
+        use_constrained_decoding=True,
     )
-    
-    if think_checkbox and llm_handler.llm_initialized and use_cot_metas:
-        # Convert top_k: 0 means None (disabled)
-        top_k_value = None if lm_top_k == 0 else int(lm_top_k)
-        # Convert top_p: 1.0 means None (disabled)
-        top_p_value = None if lm_top_p >= 1.0 else lm_top_p
-        
-        # Build user_metadata from user-provided values (only include non-empty values)
-        user_metadata = {}
-        # Handle bpm: gr.Number can be None, int, float, or string
-        if bpm is not None:
-            try:
-                bpm_value = float(bpm)
-                if bpm_value > 0:
-                    user_metadata['bpm'] = str(int(bpm_value))
-            except (ValueError, TypeError):
-                # If bpm is not a valid number, skip it
-                pass
-        if key_scale and key_scale.strip():
-            key_scale_clean = key_scale.strip()
-            if key_scale_clean.lower() not in ["n/a", ""]:
-                user_metadata['keyscale'] = key_scale_clean
-        if time_signature and time_signature.strip():
-            time_sig_clean = time_signature.strip()
-            if time_sig_clean.lower() not in ["n/a", ""]:
-                user_metadata['timesignature'] = time_sig_clean
-        if audio_duration is not None:
-            try:
-                duration_value = float(audio_duration)
-                if duration_value > 0:
-                    user_metadata['duration'] = str(int(duration_value))
-            except (ValueError, TypeError):
-                # If audio_duration is not a valid number, skip it
-                pass
-        
-        # Only pass user_metadata if user provided any values, otherwise let LM generate
-        user_metadata_to_pass = user_metadata if user_metadata else None
-        
-        if should_use_lm_batch:
-            # BATCH LM GENERATION
-            logger.info(f"Using LM batch generation for {batch_size_input} items...")
-            
-            # Prepare seeds for batch items
-            actual_seed_list, _ = dit_handler.prepare_seeds(batch_size_input, seed, random_seed_checkbox)
-            
-            # Split batch into chunks (GPU memory constraint)
-            max_inference_batch_size = int(lm_batch_chunk_size)
-            num_chunks = math.ceil(batch_size_input / max_inference_batch_size)
-            
-            all_metadata_list = []
-            all_audio_codes_list = []
-            
-            for chunk_idx in range(num_chunks):
-                chunk_start = chunk_idx * max_inference_batch_size
-                chunk_end = min(chunk_start + max_inference_batch_size, batch_size_input)
-                chunk_size = chunk_end - chunk_start
-                chunk_seeds = actual_seed_list[chunk_start:chunk_end]
-                
-                logger.info(f"Generating LM batch chunk {chunk_idx+1}/{num_chunks} (size: {chunk_size}, seeds: {chunk_seeds})...")
-                
-                # Generate batch
-                metadata_list, audio_codes_list, status = llm_handler.generate_with_stop_condition_batch(
-                    caption=captions or "",
-                    lyrics=lyrics or "",
-                    batch_size=chunk_size,
-                    infer_type="llm_dit",
-                    temperature=lm_temperature,
-                    cfg_scale=lm_cfg_scale,
-                    negative_prompt=lm_negative_prompt,
-                    top_k=top_k_value,
-                    top_p=top_p_value,
-                    user_metadata=user_metadata_to_pass,
-                    use_cot_caption=use_cot_caption,
-                    use_cot_language=use_cot_language,
-                    is_format_caption=is_format_caption,
-                    constrained_decoding_debug=constrained_decoding_debug,
-                    seeds=chunk_seeds,
-                )
-                
-                all_metadata_list.extend(metadata_list)
-                all_audio_codes_list.extend(audio_codes_list)
-            
-            # Use first metadata as representative (all are same)
-            lm_generated_metadata = all_metadata_list[0] if all_metadata_list else None
-            
-            # Store audio codes list for later use
-            lm_generated_audio_codes_list = all_audio_codes_list
-            
-            # Prepare audio codes for DiT (list of codes, one per batch item)
-            audio_code_string_to_use = all_audio_codes_list
-            
-            # Update metadata fields from LM if not provided by user
-            if lm_generated_metadata:
-                if bpm is None and lm_generated_metadata.get('bpm'):
-                    bpm_value = lm_generated_metadata.get('bpm')
-                    if bpm_value != "N/A" and bpm_value != "":
-                        try:
-                            bpm = int(bpm_value)
-                        except:
-                            pass
-                if not key_scale and lm_generated_metadata.get('keyscale'):
-                    key_scale_value = lm_generated_metadata.get('keyscale', lm_generated_metadata.get('key_scale', ""))
-                    if key_scale_value != "N/A":
-                        key_scale = key_scale_value
-                if not time_signature and lm_generated_metadata.get('timesignature'):
-                    time_signature_value = lm_generated_metadata.get('timesignature', lm_generated_metadata.get('time_signature', ""))
-                    if time_signature_value != "N/A":
-                        time_signature = time_signature_value
-                if audio_duration is None or audio_duration <= 0:
-                    audio_duration_value = lm_generated_metadata.get('duration', -1)
-                    if audio_duration_value != "N/A" and audio_duration_value != "":
-                        try:
-                            audio_duration = float(audio_duration_value)
-                        except:
-                            pass
+    # seed string to list
+    if isinstance(seed, str) and seed.strip():
+        if "," in seed:
+            seed_list = [int(s.strip()) for s in seed.split(",")]
         else:
-            # SEQUENTIAL LM GENERATION (current behavior, when allow_lm_batch is False)
-            # Phase 1: Generate CoT metadata
-            phase1_start = time_module.time()
-            metadata, _, status = llm_handler.generate_with_stop_condition(
-                caption=captions or "",
-                lyrics=lyrics or "",
-                infer_type="dit",  # Only generate metadata in Phase 1
-                temperature=lm_temperature,
-                cfg_scale=lm_cfg_scale,
-                negative_prompt=lm_negative_prompt,
-                top_k=top_k_value,
-                top_p=top_p_value,
-                user_metadata=user_metadata_to_pass,
-                use_cot_caption=use_cot_caption,
-                use_cot_language=use_cot_language,
-                is_format_caption=is_format_caption,
-                constrained_decoding_debug=constrained_decoding_debug,
-            )
-            lm_phase1_time = time_module.time() - phase1_start
-            logger.info(f"LM Phase 1 (CoT) completed in {lm_phase1_time:.2f}s")
-            
-            # Phase 2: Generate audio codes
-            phase2_start = time_module.time()
-            metadata, audio_codes, status = llm_handler.generate_with_stop_condition(
-                caption=captions or "",
-                lyrics=lyrics or "",
-                infer_type="llm_dit",  # Generate both metadata and codes
-                temperature=lm_temperature,
-                cfg_scale=lm_cfg_scale,
-                negative_prompt=lm_negative_prompt,
-                top_k=top_k_value,
-                top_p=top_p_value,
-                user_metadata=user_metadata_to_pass,
-                use_cot_caption=use_cot_caption,
-                use_cot_language=use_cot_language,
-                is_format_caption=is_format_caption,
-                constrained_decoding_debug=constrained_decoding_debug,
-            )
-            lm_phase2_time = time_module.time() - phase2_start
-            logger.info(f"LM Phase 2 (Codes) completed in {lm_phase2_time:.2f}s")
-            
-            # Store LM-generated metadata and audio codes for display
-            lm_generated_metadata = metadata
-            if audio_codes:
-                audio_code_string_to_use = audio_codes
-                lm_generated_audio_codes = audio_codes
-                # Update metadata fields only if they are empty/None (user didn't provide them)
-                if bpm is None and metadata.get('bpm'):
-                    bpm_value = metadata.get('bpm')
-                    if bpm_value != "N/A" and bpm_value != "":
-                        try:
-                            bpm = int(bpm_value)
-                        except:
-                            pass
-                if not key_scale and metadata.get('keyscale'):
-                    key_scale_value = metadata.get('keyscale', metadata.get('key_scale', ""))
-                    if key_scale_value != "N/A":
-                        key_scale = key_scale_value
-                if not time_signature and metadata.get('timesignature'):
-                    time_signature_value = metadata.get('timesignature', metadata.get('time_signature', ""))
-                    if time_signature_value != "N/A":
-                        time_signature = time_signature_value
-                if audio_duration is None or audio_duration <= 0:
-                    audio_duration_value = metadata.get('duration', -1)
-                    if audio_duration_value != "N/A" and audio_duration_value != "":
-                        try:
-                            audio_duration = float(audio_duration_value)
-                        except:
-                            pass
-    
-    # Call generate_music and get results
-    result = dit_handler.generate_music(
-        captions=captions, lyrics=lyrics, bpm=bpm, key_scale=key_scale,
-        time_signature=time_signature, vocal_language=vocal_language,
-        inference_steps=inference_steps, guidance_scale=guidance_scale,
-        use_random_seed=random_seed_checkbox, seed=seed,
-        reference_audio=reference_audio, audio_duration=audio_duration,
-        batch_size=batch_size_input, src_audio=src_audio,
-        audio_code_string=audio_code_string_to_use,
-        repainting_start=repainting_start, repainting_end=repainting_end,
-        instruction=instruction_display_gen, audio_cover_strength=audio_cover_strength,
-        task_type=task_type, use_adg=use_adg,
-        cfg_interval_start=cfg_interval_start, cfg_interval_end=cfg_interval_end,
-        audio_format=audio_format, lm_temperature=lm_temperature,
-        progress=progress
-    )
-    
-    # Extract results
-    first_audio, second_audio, all_audio_paths, generation_info, status_message, seed_value_for_ui, \
-        align_score_1, align_text_1, align_plot_1, align_score_2, align_text_2, align_plot_2 = result
-    
-    # Extract LM timing from status if available and prepend to generation_info
-    if status:
-        import re
-        # Try to extract timing info from status using regex
-        # Expected format: "Phase1: X.XXs" and "Phase2: X.XXs"
-        phase1_match = re.search(r'Phase1:\s*([\d.]+)s', status)
-        phase2_match = re.search(r'Phase2:\s*([\d.]+)s', status)
-        
-        if phase1_match or phase2_match:
-            lm_timing_section = "\n\n**🤖 LM Timing:**\n"
-            lm_total = 0.0
-            if phase1_match:
-                phase1_time = float(phase1_match.group(1))
-                lm_timing_section += f"  - Phase 1 (CoT Metadata): {phase1_time:.2f}s\n"
-                lm_total += phase1_time
-            if phase2_match:
-                phase2_time = float(phase2_match.group(1))
-                lm_timing_section += f"  - Phase 2 (Audio Codes): {phase2_time:.2f}s\n"
-                lm_total += phase2_time
-            if lm_total > 0:
-                lm_timing_section += f"  - Total LM Time: {lm_total:.2f}s\n"
-            generation_info = lm_timing_section + "\n" + generation_info
-    
-    # Append LM-generated metadata to generation_info if available
-    if lm_generated_metadata:
-        metadata_lines = []
-        if lm_generated_metadata.get('bpm'):
-            metadata_lines.append(f"- **BPM:** {lm_generated_metadata['bpm']}")
-        if lm_generated_metadata.get('caption'):
-            metadata_lines.append(f"- **User Query Rewritten Caption:** {lm_generated_metadata['caption']}")
-        if lm_generated_metadata.get('duration'):
-            metadata_lines.append(f"- **Duration:** {lm_generated_metadata['duration']} seconds")
-        if lm_generated_metadata.get('keyscale'):
-            metadata_lines.append(f"- **KeyScale:** {lm_generated_metadata['keyscale']}")
-        if lm_generated_metadata.get('language'):
-            metadata_lines.append(f"- **Language:** {lm_generated_metadata['language']}")
-        if lm_generated_metadata.get('timesignature'):
-            metadata_lines.append(f"- **Time Signature:** {lm_generated_metadata['timesignature']}")
-        
-        if metadata_lines:
-            metadata_section = "\n\n**🤖 LM-Generated Metadata:**\n" + "\n\n".join(metadata_lines)
-            generation_info = metadata_section + "\n\n" + generation_info
-    
-    # Update audio codes in UI if LM generated them
-    codes_outputs = [""] * 8  # Codes for 8 components
-    if should_use_lm_batch and lm_generated_audio_codes_list:
-        # Batch mode: update individual codes inputs
-        for idx in range(min(len(lm_generated_audio_codes_list), 8)):
-            codes_outputs[idx] = lm_generated_audio_codes_list[idx]
-        # For single codes input, show first one
-        updated_audio_codes = lm_generated_audio_codes_list[0] if lm_generated_audio_codes_list else text2music_audio_code_string
+            seed_list = [int(seed.strip())]
     else:
-        # Single mode: update main codes input
-        updated_audio_codes = lm_generated_audio_codes if lm_generated_audio_codes else text2music_audio_code_string
-    
-    # AUTO-SCORING
-    score_displays = [""] * 8  # Scores for 8 components
-    if auto_score and all_audio_paths:
-        logger.info(f"Auto-scoring enabled, calculating quality scores for {batch_size_input} generated audios...")
-        
-        # Determine which audio codes to use for scoring
-        if should_use_lm_batch and lm_generated_audio_codes_list:
-            codes_list = lm_generated_audio_codes_list
-        elif audio_code_string_to_use and isinstance(audio_code_string_to_use, list):
-            codes_list = audio_code_string_to_use
-        else:
-            # Single code string, replicate for all audios
-            codes_list = [audio_code_string_to_use] * len(all_audio_paths)
-        
-        # Calculate scores only for actually generated audios (up to batch_size_input)
-        # Don't score beyond the actual batch size to avoid duplicates
-        actual_audios_to_score = min(len(all_audio_paths), int(batch_size_input))
-        for idx in range(actual_audios_to_score):
-            if idx < len(codes_list) and codes_list[idx]:
-                try:
-                    score_display = calculate_score_handler(
-                        llm_handler,
-                        codes_list[idx],
-                        captions,
-                        lyrics,
-                        lm_generated_metadata,
-                        bpm, key_scale, time_signature, audio_duration, vocal_language,
-                        score_scale
-                    )
-                    score_displays[idx] = score_display
-                    logger.info(f"Auto-scored audio {idx+1}")
-                except Exception as e:
-                    logger.error(f"Auto-scoring failed for audio {idx+1}: {e}")
-                    score_displays[idx] = f"❌ Auto-scoring failed: {str(e)}"
-    
-    # Prepare audio outputs (up to 8)
-    audio_outputs = [None] * 8
-    for idx in range(min(len(all_audio_paths), 8)):
-        audio_outputs[idx] = all_audio_paths[idx]
-    
-    return (
-        audio_outputs[0],  # generated_audio_1
-        audio_outputs[1],  # generated_audio_2
-        audio_outputs[2],  # generated_audio_3
-        audio_outputs[3],  # generated_audio_4
-        audio_outputs[4],  # generated_audio_5
-        audio_outputs[5],  # generated_audio_6
-        audio_outputs[6],  # generated_audio_7
-        audio_outputs[7],  # generated_audio_8
-        all_audio_paths,   # generated_audio_batch
-        generation_info,
-        status_message,
-        seed_value_for_ui,
-        align_score_1,
-        align_text_1,
-        align_plot_1,
-        align_score_2,
-        align_text_2,
-        align_plot_2,
-        score_displays[0],  # score_display_1
-        score_displays[1],  # score_display_2
-        score_displays[2],  # score_display_3
-        score_displays[3],  # score_display_4
-        score_displays[4],  # score_display_5
-        score_displays[5],  # score_display_6
-        score_displays[6],  # score_display_7
-        score_displays[7],  # score_display_8
-        updated_audio_codes,  # Update main audio codes in UI
-        codes_outputs[0],  # text2music_audio_code_string_1
-        codes_outputs[1],  # text2music_audio_code_string_2
-        codes_outputs[2],  # text2music_audio_code_string_3
-        codes_outputs[3],  # text2music_audio_code_string_4
-        codes_outputs[4],  # text2music_audio_code_string_5
-        codes_outputs[5],  # text2music_audio_code_string_6
-        codes_outputs[6],  # text2music_audio_code_string_7
-        codes_outputs[7],  # text2music_audio_code_string_8
-        lm_generated_metadata,  # Store metadata for "Send to src audio" buttons
-        is_format_caption,  # Keep is_format_caption unchanged
+        seed_list = None
+    gen_config = GenerationConfig(
+        batch_size=batch_size_input,
+        allow_lm_batch=allow_lm_batch,
+        use_random_seed=random_seed_checkbox,
+        seeds=seed_list,
+        lm_batch_chunk_size=lm_batch_chunk_size,
+        constrained_decoding_debug=constrained_decoding_debug,
+        audio_format=audio_format,
     )
+    result = generate_music(
+        dit_handler,
+        llm_handler,
+        params=gen_params,
+        config=gen_config,
+        progress=progress,
+    )
+    
+    audio_outputs = [None] * 8
+    all_audio_paths = []
+    final_codes_list = [""] * 8
+    final_scores_list = [""] * 8
+    
+    # Build generation_info from result data
+    status_message = result.status_message
+    seed_value_for_ui = result.extra_outputs.get("seed_value", "")
+    lm_generated_metadata = result.extra_outputs.get("lm_metadata", {})
+    time_costs = result.extra_outputs.get("time_costs", {}).copy()
+    
+    # Initialize post-processing timing
+    audio_conversion_start_time = time_module.time()
+    total_auto_score_time = 0.0
+    
+    align_score_1 = ""
+    align_text_1 = ""
+    align_plot_1 = None
+    align_score_2 = ""
+    align_text_2 = ""
+    align_plot_2 = None
+    updated_audio_codes = text2music_audio_code_string if not think_checkbox else ""
+    
+    # Build initial generation_info (will be updated with post-processing times at the end)
+    generation_info = _build_generation_info(
+        lm_metadata=lm_generated_metadata,
+        time_costs=time_costs,
+        seed_value=seed_value_for_ui,
+        inference_steps=inference_steps,
+        num_audios=len(result.audios) if result.success else 0,
+    )
+    
+    if not result.success:
+        yield (None,) * 8 + (None, generation_info, result.status_message) + (gr.skip(),) * 26
+        return
+    
+    audios = result.audios
+    progress(0.99, "Converting audio to mp3...")
+    for i in range(8):
+        if i < len(audios):
+            key = audios[i]["key"]
+            audio_tensor = audios[i]["tensor"]
+            sample_rate = audios[i]["sample_rate"]
+            audio_params = audios[i]["params"]
+            temp_dir = tempfile.mkdtemp(f"acestep_gradio_results/")
+            os.makedirs(temp_dir, exist_ok=True)
+            json_path = os.path.join(temp_dir, f"{key}.json")
+            audio_path = os.path.join(temp_dir, f"{key}.{audio_format}")
+            save_audio(audio_data=audio_tensor, output_path=audio_path, sample_rate=sample_rate, format=audio_format, channels_first=True)
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(audio_params, f, indent=2, ensure_ascii=False)
+            audio_outputs[i] = audio_path
+            all_audio_paths.append(audio_path)
+            all_audio_paths.append(json_path)
+            
+            code_str = audio_params.get("audio_codes", "")
+            final_codes_list[i] = code_str
+            
+            scores_ui_updates = [gr.skip()] * 8
+            score_str = "Done!"
+            if auto_score:
+                auto_score_start = time_module.time()
+                score_str = calculate_score_handler(llm_handler, code_str, captions, lyrics, lm_generated_metadata, bpm, key_scale, time_signature, audio_duration, vocal_language, score_scale)
+                auto_score_end = time_module.time()
+                total_auto_score_time += (auto_score_end - auto_score_start)
+            scores_ui_updates[i] = score_str
+            final_scores_list[i] = score_str
+            
+            status_message = f"Encoding & Ready: {i+1}/{len(audios)}"
+            current_audio_updates = [gr.skip()] * 8
+            current_audio_updates[i] = audio_path
+
+            audio_codes_ui_updates = [gr.skip()] * 8
+            audio_codes_ui_updates[i] = code_str
+            yield (
+                current_audio_updates[0], current_audio_updates[1], current_audio_updates[2], current_audio_updates[3],
+                current_audio_updates[4], current_audio_updates[5], current_audio_updates[6], current_audio_updates[7],
+                all_audio_paths,   # Real-time update of Batch File list
+                generation_info,
+                status_message,
+                seed_value_for_ui,
+                # Align plot placeholders (assume no need to update in real time)
+                gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+                # Scores
+                scores_ui_updates[0], scores_ui_updates[1], scores_ui_updates[2], scores_ui_updates[3], scores_ui_updates[4], scores_ui_updates[5], scores_ui_updates[6], scores_ui_updates[7],
+                updated_audio_codes,
+                # Codes
+                audio_codes_ui_updates[0], audio_codes_ui_updates[1], audio_codes_ui_updates[2], audio_codes_ui_updates[3],
+                audio_codes_ui_updates[4], audio_codes_ui_updates[5], audio_codes_ui_updates[6], audio_codes_ui_updates[7],
+                lm_generated_metadata,
+                is_format_caption,
+            )
+        else:
+            # If i exceeds the generated count (e.g., batch=2, i=2..7), do not yield
+            pass
+        time_module.sleep(0.1)
+    
+    # Record audio conversion time
+    audio_conversion_end_time = time_module.time()
+    audio_conversion_time = audio_conversion_end_time - audio_conversion_start_time
+    
+    # Add post-processing times to time_costs
+    if audio_conversion_time > 0:
+        time_costs['audio_conversion_time'] = audio_conversion_time
+    if total_auto_score_time > 0:
+        time_costs['auto_score_time'] = total_auto_score_time
+    
+    # Update pipeline total time to include post-processing
+    if 'pipeline_total_time' in time_costs:
+        time_costs['pipeline_total_time'] += audio_conversion_time + total_auto_score_time
+    
+    # Rebuild generation_info with complete timing information
+    generation_info = _build_generation_info(
+        lm_metadata=lm_generated_metadata,
+        time_costs=time_costs,
+        seed_value=seed_value_for_ui,
+        inference_steps=inference_steps,
+        num_audios=len(result.audios),
+    )
+    
+    yield (
+        gr.skip(), gr.skip(), gr.skip(), gr.skip(), # Audio 1-4: SKIP
+        gr.skip(), gr.skip(), gr.skip(), gr.skip(), # Audio 5-8: SKIP
+        all_audio_paths,
+        generation_info,
+        "Generation Complete",
+        seed_value_for_ui,
+        align_score_1, align_text_1, align_plot_1, align_score_2, align_text_2, align_plot_2,
+        final_scores_list[0], final_scores_list[1], final_scores_list[2], final_scores_list[3],
+        final_scores_list[4], final_scores_list[5], final_scores_list[6], final_scores_list[7],
+        updated_audio_codes,
+        final_codes_list[0], final_codes_list[1], final_codes_list[2], final_codes_list[3],
+        final_codes_list[4], final_codes_list[5], final_codes_list[6], final_codes_list[7],
+        lm_generated_metadata,
+        is_format_caption,
+    )
+
 
 
 def calculate_score_handler(llm_handler, audio_codes_str, caption, lyrics, lm_metadata, bpm, key_scale, time_signature, audio_duration, vocal_language, score_scale):
@@ -756,7 +620,9 @@ def calculate_score_handler_with_selection(llm_handler, sample_idx, score_scale,
     if stored_allow_lm_batch and isinstance(stored_codes, list):
         # Batch mode: use specific sample's codes
         if 0 <= sample_idx - 1 < len(stored_codes):
-            audio_codes_str = stored_codes[sample_idx - 1]
+            code_item = stored_codes[sample_idx - 1]
+            # Ensure it's a string (handle cases where dict was mistakenly stored)
+            audio_codes_str = code_item if isinstance(code_item, str) else ""
     else:
         # Single mode: all samples use same codes
         audio_codes_str = stored_codes if isinstance(stored_codes, str) else ""
@@ -868,7 +734,7 @@ def generate_with_batch_management(
     Wrapper for generate_with_progress that adds batch queue management
     """
     # Call the original generation function
-    result = generate_with_progress(
+    generator = generate_with_progress(
         dit_handler, llm_handler,
         captions, lyrics, bpm, key_scale, time_signature, vocal_language,
         inference_steps, guidance_scale, random_seed_checkbox, seed,
@@ -885,23 +751,41 @@ def generate_with_batch_management(
         lm_batch_chunk_size,
         progress
     )
-    
-    # Extract results from generation
-    all_audio_paths = result[8]  # generated_audio_batch
+    final_result_from_inner = None
+    for partial_result in generator:
+        final_result_from_inner = partial_result
+        # current_batch_index, total_batches, batch_queue, next_params, 
+        # batch_indicator_text, prev_btn, next_btn, next_status, restore_btn
+        yield partial_result + (
+            gr.skip(), gr.skip(), gr.skip(), gr.skip(), 
+            gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+        )
+    result = final_result_from_inner
+    all_audio_paths = result[8]
+
+    if all_audio_paths is None:
+        
+        yield result + (
+            gr.skip(), gr.skip(), gr.skip(), gr.skip(), 
+            gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+        )
+        return
+
+    # Extract results from generation (使用 result 下标访问)
     generation_info = result[9]
     seed_value_for_ui = result[11]
-    lm_generated_metadata = result[34]  # Index 34 is lm_metadata_state
+    lm_generated_metadata = result[35]  # Fixed: lm_metadata is at index 35, not 34
     
     # Extract codes
     generated_codes_single = result[26]
     generated_codes_batch = [result[27], result[28], result[29], result[30], result[31], result[32], result[33], result[34]]
-    
+
     # Determine which codes to store based on mode
     if allow_lm_batch and batch_size_input >= 2:
         codes_to_store = generated_codes_batch[:int(batch_size_input)]
     else:
         codes_to_store = generated_codes_single
-    
+
     # Save parameters for history
     saved_params = {
         "captions": captions,
@@ -947,6 +831,7 @@ def generate_with_batch_management(
     }
     
     # Next batch parameters (with cleared codes & random seed)
+    # Next batch parameters
     next_params = saved_params.copy()
     next_params["text2music_audio_code_string"] = ""
     next_params["random_seed_checkbox"] = True
@@ -979,9 +864,10 @@ def generate_with_batch_management(
     next_batch_status_text = ""
     if autogen_checkbox:
         next_batch_status_text = t("messages.autogen_enabled")
-    
-    # Return original results plus batch management state updates
-    return result + (
+
+    # 4. Yield final result (includes Batch UI updates)
+    # The result here is already a tuple structure
+    yield result + (
         current_batch_index,
         total_batches,
         batch_queue,
@@ -1097,7 +983,8 @@ def generate_next_batch_background(
         params.setdefault("complete_track_classes", [])
         
         # Call generate_with_progress with the saved parameters
-        result = generate_with_progress(
+        # Note: generate_with_progress is a generator, need to iterate through it
+        generator = generate_with_progress(
             dit_handler,
             llm_handler,
             captions=params.get("captions"),
@@ -1142,15 +1029,20 @@ def generate_next_batch_background(
             progress=progress
         )
         
-        # Extract results
-        all_audio_paths = result[8]  # generated_audio_batch
-        generation_info = result[9]
-        seed_value_for_ui = result[11]
-        lm_generated_metadata = result[34]  # Index 34 is lm_metadata_state
+        # Consume generator to get final result (similar to generate_with_batch_management)
+        final_result = None
+        for partial_result in generator:
+            final_result = partial_result
+        
+        # Extract results from final_result
+        all_audio_paths = final_result[8]  # generated_audio_batch
+        generation_info = final_result[9]
+        seed_value_for_ui = final_result[11]
+        lm_generated_metadata = final_result[35]  # Fixed: lm_metadata is at index 35, not 34
         
         # Extract codes
-        generated_codes_single = result[26]
-        generated_codes_batch = [result[27], result[28], result[29], result[30], result[31], result[32], result[33], result[34]]
+        generated_codes_single = final_result[26]
+        generated_codes_batch = [final_result[27], final_result[28], final_result[29], final_result[30], final_result[31], final_result[32], final_result[33], final_result[34]]
         
         # Determine which codes to store
         batch_size = params.get("batch_size_input", 2)
@@ -1240,8 +1132,9 @@ def navigate_to_previous_batch(current_batch_index, batch_queue):
     
     # Prepare audio outputs (up to 8)
     audio_outputs = [None] * 8
-    for idx in range(min(len(audio_paths), 8)):
-        audio_outputs[idx] = audio_paths[idx]
+    real_audio_paths = [p for p in audio_paths if not p.lower().endswith('.json')]
+    for idx in range(min(len(real_audio_paths), 8)):
+        audio_outputs[idx] = real_audio_paths[idx]
     
     # Update batch indicator
     total_batches = len(batch_queue)
@@ -1286,8 +1179,9 @@ def navigate_to_next_batch(autogen_enabled, current_batch_index, total_batches, 
     
     # Prepare audio outputs (up to 8)
     audio_outputs = [None] * 8
-    for idx in range(min(len(audio_paths), 8)):
-        audio_outputs[idx] = audio_paths[idx]
+    real_audio_paths = [p for p in audio_paths if not p.lower().endswith('.json')]
+    for idx in range(min(len(real_audio_paths), 8)):
+        audio_outputs[idx] = real_audio_paths[idx]
     
     # Update batch indicator
     batch_indicator_text = update_batch_indicator(new_batch_index, total_batches)

@@ -254,48 +254,84 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         ]
     )
     
-    # Save buttons for audio 1 and 2
-    for btn_idx, btn_key in [(1, "save_btn_1"), (2, "save_btn_2")]:
-        results_section[btn_key].click(
-            fn=res_h.save_audio_and_metadata,
+    # Save buttons for all 8 audio outputs
+    download_existing_js = """(current_audio, batch_files) => {
+    // Debug: print what the input actually is
+    console.log("👉 [Debug] Current Audio Input:", current_audio);
+    
+    // 1. Safety check
+    if (!current_audio) {
+        console.warn("⚠️ No audio selected or audio is empty.");
+        return;
+    }
+    if (!batch_files || !Array.isArray(batch_files)) {
+        console.warn("⚠️ Batch file list is empty/not ready.");
+        return;
+    }
+
+    // 2. Smartly extract path string
+    let pathString = "";
+    
+    if (typeof current_audio === "string") {
+        // Case A: direct path string received
+        pathString = current_audio;
+    } else if (typeof current_audio === "object") {
+        // Case B: an object is received, try common properties
+        // Gradio file objects usually have path, url, or name
+        pathString = current_audio.path || current_audio.name || current_audio.url || "";
+    }
+
+    if (!pathString) {
+        console.error("❌ Error: Could not extract a valid path string from input.", current_audio);
+        return;
+    }
+
+    // 3. Extract Key (UUID)
+    // Path could be /tmp/.../uuid.mp3 or url like /file=.../uuid.mp3
+    let filename = pathString.split(/[\\\\/]/).pop(); // get the filename
+    let key = filename.split('.')[0]; // get UUID without extension
+
+    console.log(`🔑 Key extracted: ${key}`);
+
+    // 4. Find matching file(s) in the list
+    let targets = batch_files.filter(f => {
+        // Also extract names from batch_files objects
+        // f usually contains name (backend path) and orig_name (download name)
+        const fPath = f.name || f.path || ""; 
+        return fPath.includes(key);
+    });
+
+    if (targets.length === 0) {
+        console.warn("❌ No matching files found in batch list for key:", key);
+        alert("Batch list does not contain this file yet. Please wait for generation to finish.");
+        return;
+    }
+
+    // 5. Trigger download(s)
+    console.log(`🎯 Found ${targets.length} files to download.`);
+    targets.forEach((f, index) => {
+        setTimeout(() => {
+            const a = document.createElement('a');
+            // Prefer url (frontend-accessible link), otherwise try data
+            a.href = f.url || f.data; 
+            a.download = f.orig_name || "download";
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }, index * 1000); // 300ms interval to avoid browser blocking
+    });
+}
+"""
+    for btn_idx in range(1, 9):
+        results_section[f"save_btn_{btn_idx}"].click(
+            fn=None,
             inputs=[
                 results_section[f"generated_audio_{btn_idx}"],
-                generation_section["task_type"],
-                generation_section["captions"],
-                generation_section["lyrics"],
-                generation_section["vocal_language"],
-                generation_section["bpm"],
-                generation_section["key_scale"],
-                generation_section["time_signature"],
-                generation_section["audio_duration"],
-                generation_section["batch_size_input"],
-                generation_section["inference_steps"],
-                generation_section["guidance_scale"],
-                generation_section["seed"],
-                generation_section["random_seed_checkbox"],
-                generation_section["use_adg"],
-                generation_section["cfg_interval_start"],
-                generation_section["cfg_interval_end"],
-                generation_section["audio_format"],
-                generation_section["lm_temperature"],
-                generation_section["lm_cfg_scale"],
-                generation_section["lm_top_k"],
-                generation_section["lm_top_p"],
-                generation_section["lm_negative_prompt"],
-                generation_section["use_cot_caption"],
-                generation_section["use_cot_language"],
-                generation_section["audio_cover_strength"],
-                generation_section["think_checkbox"],
-                generation_section["text2music_audio_code_string"],
-                generation_section["repainting_start"],
-                generation_section["repainting_end"],
-                generation_section["track_name"],
-                generation_section["complete_track_classes"],
-                results_section["lm_metadata_state"],
+                results_section["generated_audio_batch"],
             ],
-            outputs=[gr.File(label="Download Package", visible=False)]
-        )
-    
+        js=download_existing_js  # Run the above JS
+    )
     # ========== Send to SRC Handlers ==========
     for btn_idx in range(1, 9):
         results_section[f"send_to_src_btn_{btn_idx}"].click(
@@ -331,10 +367,11 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             ],
             outputs=[results_section[f"score_display_{btn_idx}"], results_section["batch_queue"]]
         )
-    
+    def generation_wrapper(*args):
+        yield from res_h.generate_with_batch_management(dit_handler, llm_handler, *args)
     # ========== Generation Handler ==========
     generation_section["generate_btn"].click(
-        fn=lambda *args: res_h.generate_with_batch_management(dit_handler, llm_handler, *args),
+        fn=generation_wrapper,
         inputs=[
             generation_section["captions"],
             generation_section["lyrics"],

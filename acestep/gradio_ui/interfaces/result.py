@@ -28,7 +28,8 @@ def create_results_section(dit_handler) -> dict:
                 generated_audio_1 = gr.Audio(
                     label=t("results.generated_music", n=1),
                     type="filepath",
-                    interactive=False
+                    interactive=False,
+                    show_download_button=False
                 )
                 with gr.Row(equal_height=True):
                     send_to_src_btn_1 = gr.Button(
@@ -58,7 +59,8 @@ def create_results_section(dit_handler) -> dict:
                 generated_audio_2 = gr.Audio(
                     label=t("results.generated_music", n=2),
                     type="filepath",
-                    interactive=False
+                    interactive=False,
+                    show_download_button=False
                 )
                 with gr.Row(equal_height=True):
                     send_to_src_btn_2 = gr.Button(
@@ -88,7 +90,8 @@ def create_results_section(dit_handler) -> dict:
                 generated_audio_3 = gr.Audio(
                     label=t("results.generated_music", n=3),
                     type="filepath",
-                    interactive=False
+                    interactive=False,
+                    show_download_button=False
                 )
                 with gr.Row(equal_height=True):
                     send_to_src_btn_3 = gr.Button(
@@ -118,7 +121,8 @@ def create_results_section(dit_handler) -> dict:
                 generated_audio_4 = gr.Audio(
                     label=t("results.generated_music", n=4),
                     type="filepath",
-                    interactive=False
+                    interactive=False,
+                    show_download_button=False
                 )
                 with gr.Row(equal_height=True):
                     send_to_src_btn_4 = gr.Button(
@@ -151,7 +155,8 @@ def create_results_section(dit_handler) -> dict:
                 generated_audio_5 = gr.Audio(
                     label=t("results.generated_music", n=5),
                     type="filepath",
-                    interactive=False
+                    interactive=False,
+                    show_download_button=False
                 )
                 with gr.Row(equal_height=True):
                     send_to_src_btn_5 = gr.Button(t("results.send_to_src_btn"), variant="secondary", size="sm", scale=1)
@@ -166,7 +171,8 @@ def create_results_section(dit_handler) -> dict:
                 generated_audio_6 = gr.Audio(
                     label=t("results.generated_music", n=6),
                     type="filepath",
-                    interactive=False
+                    interactive=False,
+                    show_download_button=False
                 )
                 with gr.Row(equal_height=True):
                     send_to_src_btn_6 = gr.Button(t("results.send_to_src_btn"), variant="secondary", size="sm", scale=1)
@@ -181,7 +187,8 @@ def create_results_section(dit_handler) -> dict:
                 generated_audio_7 = gr.Audio(
                     label=t("results.generated_music", n=7),
                     type="filepath",
-                    interactive=False
+                    interactive=False,
+                    show_download_button=False
                 )
                 with gr.Row(equal_height=True):
                     send_to_src_btn_7 = gr.Button(t("results.send_to_src_btn"), variant="secondary", size="sm", scale=1)
@@ -196,7 +203,8 @@ def create_results_section(dit_handler) -> dict:
                 generated_audio_8 = gr.Audio(
                     label=t("results.generated_music", n=8),
                     type="filepath",
-                    interactive=False
+                    interactive=False,
+                    show_download_button=False
                 )
                 with gr.Row(equal_height=True):
                     send_to_src_btn_8 = gr.Button(t("results.send_to_src_btn"), variant="secondary", size="sm", scale=1)
