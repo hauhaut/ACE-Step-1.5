@@ -6,7 +6,8 @@ This document provides comprehensive documentation for the ACE-Step inference AP
 
 - [Quick Start](#quick-start)
 - [API Overview](#api-overview)
-- [Configuration Parameters](#configuration-parameters)
+- [GenerationParams Parameters](#generationparams-parameters)
+- [GenerationConfig Parameters](#generationconfig-parameters)
 - [Task Types](#task-types)
 - [Complete Examples](#complete-examples)
 - [Best Practices](#best-practices)
@@ -20,7 +21,7 @@ This document provides comprehensive documentation for the ACE-Step inference AP
 ```python
 from acestep.handler import AceStepHandler
 from acestep.llm_inference import LLMHandler
-from acestep.inference import GenerationConfig, generate_music
+from acestep.inference import GenerationParams, GenerationConfig, generate_music
 
 # Initialize handlers
 dit_handler = AceStepHandler()
@@ -40,21 +41,28 @@ llm_handler.initialize(
     device="cuda"
 )
 
-# Configure generation
-config = GenerationConfig(
+# Configure generation parameters
+params = GenerationParams(
     caption="upbeat electronic dance music with heavy bass",
     bpm=128,
-    audio_duration=30,
-    batch_size=1,
+    duration=30,
+)
+
+# Configure generation settings
+config = GenerationConfig(
+    batch_size=2,
+    audio_format="flac",
 )
 
 # Generate music
-result = generate_music(dit_handler, llm_handler, config)
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/path/to/output")
 
 # Access results
 if result.success:
-    for audio_path in result.audio_paths:
-        print(f"Generated: {audio_path}")
+    for audio in result.audios:
+        print(f"Generated: {audio['path']}")
+        print(f"Key: {audio['key']}")
+        print(f"Seed: {audio['params']['seed']}")
 else:
     print(f"Error: {result.error}")
 ```
@@ -67,23 +75,94 @@ else:
 
 ```python
 def generate_music(
-    dit_handler: AceStepHandler,
-    llm_handler: LLMHandler,
+    dit_handler,
+    llm_handler,
+    params: GenerationParams,
     config: GenerationConfig,
+    save_dir: Optional[str] = None,
+    progress=None,
 ) -> GenerationResult
 ```
 
-### Configuration Object
+### Configuration Objects
 
-The `GenerationConfig` dataclass consolidates all generation parameters:
+The API uses two configuration dataclasses:
+
+**GenerationParams** - Contains all music generation parameters:
+
+```python
+@dataclass
+class GenerationParams:
+    # Task & Instruction
+    task_type: str = "text2music"
+    instruction: str = "Fill the audio semantic mask based on the given conditions:"
+    
+    # Audio Uploads
+    reference_audio: Optional[str] = None
+    src_audio: Optional[str] = None
+    
+    # LM Codes Hints
+    audio_codes: str = ""
+    
+    # Text Inputs
+    caption: str = ""
+    lyrics: str = ""
+    instrumental: bool = False
+    
+    # Metadata
+    vocal_language: str = "unknown"
+    bpm: Optional[int] = None
+    keyscale: str = ""
+    timesignature: str = ""
+    duration: float = -1.0
+    
+    # Advanced Settings
+    inference_steps: int = 8
+    seed: int = -1
+    guidance_scale: float = 7.0
+    use_adg: bool = False
+    cfg_interval_start: float = 0.0
+    cfg_interval_end: float = 1.0
+    
+    repainting_start: float = 0.0
+    repainting_end: float = -1
+    audio_cover_strength: float = 1.0
+    
+    # 5Hz Language Model Parameters
+    thinking: bool = True
+    lm_temperature: float = 0.85
+    lm_cfg_scale: float = 2.0
+    lm_top_k: int = 0
+    lm_top_p: float = 0.9
+    lm_negative_prompt: str = "NO USER INPUT"
+    use_cot_metas: bool = True
+    use_cot_caption: bool = True
+    use_cot_lyrics: bool = False
+    use_cot_language: bool = True
+    use_constrained_decoding: bool = True
+    
+    # CoT Generated Values (auto-filled by LM)
+    cot_bpm: Optional[int] = None
+    cot_keyscale: str = ""
+    cot_timesignature: str = ""
+    cot_duration: Optional[float] = None
+    cot_vocal_language: str = "unknown"
+    cot_caption: str = ""
+    cot_lyrics: str = ""
+```
+
+**GenerationConfig** - Contains batch and output configuration:
 
 ```python
 @dataclass
 class GenerationConfig:
-    # Required parameters with sensible defaults
-    caption: str = ""
-    lyrics: str = ""
-    # ... (see full parameter list below)
+    batch_size: int = 2
+    allow_lm_batch: bool = False
+    use_random_seed: bool = True
+    seeds: Optional[List[int]] = None
+    lm_batch_chunk_size: int = 8
+    constrained_decoding_debug: bool = False
+    audio_format: str = "flac"
 ```
 
 ### Result Object
@@ -91,46 +170,61 @@ class GenerationConfig:
 ```python
 @dataclass
 class GenerationResult:
-    audio_paths: List[str]          # Paths to generated audio files
-    generation_info: str            # Markdown-formatted info
-    status_message: str             # Status message
-    seed_value: str                 # Seed used
-    lm_metadata: Optional[Dict]     # LM-generated metadata
-    success: bool                   # Success flag
-    error: Optional[str]            # Error message if failed
-    # ... (see full fields below)
+    # Audio Outputs
+    audios: List[Dict[str, Any]]  # List of audio dictionaries
+    
+    # Generation Information
+    status_message: str           # Status message from generation
+    extra_outputs: Dict[str, Any] # Extra outputs (latents, masks, lm_metadata, time_costs)
+    
+    # Success Status
+    success: bool                 # Whether generation succeeded
+    error: Optional[str]          # Error message if failed
+```
+
+**Audio Dictionary Structure:**
+
+Each item in `audios` list contains:
+
+```python
+{
+    "path": str,           # File path to saved audio
+    "tensor": Tensor,      # Audio tensor [channels, samples], CPU, float32
+    "key": str,            # Unique audio key (UUID based on params)
+    "sample_rate": int,    # Sample rate (default: 48000)
+    "params": Dict,        # Generation params for this audio (includes seed, audio_codes, etc.)
+}
 ```
 
 ---
 
-## Configuration Parameters
+## GenerationParams Parameters
 
 ### Text Inputs
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `caption` | `str` | `""` | Text description of the desired music. Can be a simple prompt like "relaxing piano music" or detailed description with genre, mood, instruments, etc. |
-| `lyrics` | `str` | `""` | Lyrics text for vocal music. Use `"[Instrumental]"` for instrumental tracks. Supports multiple languages. |
+| `caption` | `str` | `""` | Text description of the desired music. Can be a simple prompt like "relaxing piano music" or detailed description with genre, mood, instruments, etc. Max 512 characters. |
+| `lyrics` | `str` | `""` | Lyrics text for vocal music. Use `"[Instrumental]"` for instrumental tracks. Supports multiple languages. Max 4096 characters. |
+| `instrumental` | `bool` | `False` | If True, generate instrumental music regardless of lyrics. |
 
 ### Music Metadata
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `bpm` | `Optional[int]` | `None` | Beats per minute (30-300). `None` enables auto-detection via LM. |
-| `key_scale` | `str` | `""` | Musical key (e.g., "C Major", "Am", "F# minor"). Empty string enables auto-detection. |
-| `time_signature` | `str` | `""` | Time signature (e.g., "4/4", "3/4", "6/8"). Empty string enables auto-detection. |
+| `keyscale` | `str` | `""` | Musical key (e.g., "C Major", "Am", "F# minor"). Empty string enables auto-detection. |
+| `timesignature` | `str` | `""` | Time signature (2 for '2/4', 3 for '3/4', 4 for '4/4', 6 for '6/8'). Empty string enables auto-detection. |
 | `vocal_language` | `str` | `"unknown"` | Language code for vocals (ISO 639-1). Supported: `"en"`, `"zh"`, `"ja"`, `"es"`, `"fr"`, etc. Use `"unknown"` for auto-detection. |
-| `audio_duration` | `Optional[float]` | `None` | Duration in seconds (10-600). `None` enables auto-detection based on lyrics length. |
+| `duration` | `float` | `-1.0` | Target audio length in seconds (10-600). If <= 0 or None, model chooses automatically based on lyrics length. |
 
 ### Generation Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `inference_steps` | `int` | `8` | Number of denoising steps. Turbo model: 1-8 (recommended 8). Base model: 1-100 (recommended 32-64). Higher = better quality but slower. |
-| `guidance_scale` | `float` | `7.0` | Classifier-free guidance scale (1.0-15.0). Higher values increase adherence to text prompt. Typical range: 5.0-9.0. |
-| `use_random_seed` | `bool` | `True` | Whether to use random seed. `True` for different results each time, `False` for reproducible results. |
+| `guidance_scale` | `float` | `7.0` | Classifier-free guidance scale (1.0-15.0). Higher values increase adherence to text prompt. Only supported for non-turbo model. Typical range: 5.0-9.0. |
 | `seed` | `int` | `-1` | Random seed for reproducibility. Use `-1` for random seed, or any positive integer for fixed seed. |
-| `batch_size` | `int` | `1` | Number of samples to generate in parallel (1-8). Higher values require more GPU memory. |
 
 ### Advanced DiT Parameters
 
@@ -139,43 +233,63 @@ class GenerationResult:
 | `use_adg` | `bool` | `False` | Use Adaptive Dual Guidance (base model only). Improves quality at the cost of speed. |
 | `cfg_interval_start` | `float` | `0.0` | CFG application start ratio (0.0-1.0). Controls when to start applying classifier-free guidance. |
 | `cfg_interval_end` | `float` | `1.0` | CFG application end ratio (0.0-1.0). Controls when to stop applying classifier-free guidance. |
-| `audio_format` | `str` | `"mp3"` | Output audio format. Options: `"mp3"`, `"wav"`, `"flac"`. |
 
 ### Task-Specific Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `task_type` | `str` | `"text2music"` | Generation task type. See [Task Types](#task-types) section for details. |
+| `instruction` | `str` | `"Fill the audio semantic mask based on the given conditions:"` | Task-specific instruction prompt. |
 | `reference_audio` | `Optional[str]` | `None` | Path to reference audio file for style transfer or continuation tasks. |
 | `src_audio` | `Optional[str]` | `None` | Path to source audio file for audio-to-audio tasks (cover, repaint, etc.). |
-| `audio_code_string` | `Union[str, List[str]]` | `""` | Pre-extracted 5Hz audio codes. Can be single string or list for batch mode. Advanced use only. |
+| `audio_codes` | `str` | `""` | Pre-extracted 5Hz audio semantic codes as a string. Advanced use only. |
 | `repainting_start` | `float` | `0.0` | Repainting start time in seconds (for repaint/lego tasks). |
 | `repainting_end` | `float` | `-1` | Repainting end time in seconds. Use `-1` for end of audio. |
-| `audio_cover_strength` | `float` | `1.0` | Strength of audio cover/codes influence (0.0-1.0). Higher = stronger influence from source audio. |
-| `instruction` | `str` | `""` | Task-specific instruction prompt. Auto-generated if empty. |
+| `audio_cover_strength` | `float` | `1.0` | Strength of audio cover/codes influence (0.0-1.0). Set smaller (0.2) for style transfer tasks. |
 
 ### 5Hz Language Model Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `use_llm_thinking` | `bool` | `False` | Enable LM-based Chain-of-Thought reasoning. When enabled, LM generates metadata and/or audio codes. |
+| `thinking` | `bool` | `True` | Enable 5Hz Language Model "Chain-of-Thought" reasoning for semantic/music metadata and codes. |
 | `lm_temperature` | `float` | `0.85` | LM sampling temperature (0.0-2.0). Higher = more creative/diverse, lower = more conservative. |
-| `lm_cfg_scale` | `float` | `2.0` | LM classifier-free guidance scale (1.0-5.0). Higher = stronger adherence to prompt. |
+| `lm_cfg_scale` | `float` | `2.0` | LM classifier-free guidance scale. Higher = stronger adherence to prompt. |
 | `lm_top_k` | `int` | `0` | LM top-k sampling. `0` disables top-k filtering. Typical values: 40-100. |
 | `lm_top_p` | `float` | `0.9` | LM nucleus sampling (0.0-1.0). `1.0` disables nucleus sampling. Typical values: 0.9-0.95. |
 | `lm_negative_prompt` | `str` | `"NO USER INPUT"` | Negative prompt for LM guidance. Helps avoid unwanted characteristics. |
 | `use_cot_metas` | `bool` | `True` | Generate metadata using LM CoT reasoning (BPM, key, duration, etc.). |
 | `use_cot_caption` | `bool` | `True` | Refine user caption using LM CoT reasoning. |
 | `use_cot_language` | `bool` | `True` | Detect vocal language using LM CoT reasoning. |
-| `is_format_caption` | `bool` | `False` | Whether caption is already formatted/refined (skip LM refinement). |
-| `constrained_decoding_debug` | `bool` | `False` | Enable debug logging for constrained decoding. |
+| `use_cot_lyrics` | `bool` | `False` | (Reserved for future use) Generate/refine lyrics using LM CoT. |
+| `use_constrained_decoding` | `bool` | `True` | Enable constrained decoding for structured LM output. |
 
-### Batch LM Generation
+### CoT Generated Values
+
+These fields are automatically populated by the LM when CoT reasoning is enabled:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `allow_lm_batch` | `bool` | `False` | Allow batch LM code generation. Faster when `batch_size >= 2` and `use_llm_thinking=True`. |
-| `lm_batch_chunk_size` | `int` | `4` | Maximum batch size per LM inference chunk (GPU memory constraint). |
+| `cot_bpm` | `Optional[int]` | `None` | LM-generated BPM value. |
+| `cot_keyscale` | `str` | `""` | LM-generated key/scale. |
+| `cot_timesignature` | `str` | `""` | LM-generated time signature. |
+| `cot_duration` | `Optional[float]` | `None` | LM-generated duration. |
+| `cot_vocal_language` | `str` | `"unknown"` | LM-detected vocal language. |
+| `cot_caption` | `str` | `""` | LM-refined caption. |
+| `cot_lyrics` | `str` | `""` | LM-generated/refined lyrics. |
+
+---
+
+## GenerationConfig Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `batch_size` | `int` | `2` | Number of samples to generate in parallel (1-8). Higher values require more GPU memory. |
+| `allow_lm_batch` | `bool` | `False` | Allow batch processing in LM. Faster when `batch_size >= 2` and `thinking=True`. |
+| `use_random_seed` | `bool` | `True` | Whether to use random seed. `True` for different results each time, `False` for reproducible results. |
+| `seeds` | `Optional[List[int]]` | `None` | List of seeds for batch generation. If provided, will be padded with random seeds if fewer than batch_size. Can also be single int. |
+| `lm_batch_chunk_size` | `int` | `8` | Maximum batch size per LM inference chunk (GPU memory constraint). |
+| `constrained_decoding_debug` | `bool` | `False` | Enable debug logging for constrained decoding. |
+| `audio_format` | `str` | `"flac"` | Output audio format. Options: `"mp3"`, `"wav"`, `"flac"`. Default is FLAC for fast saving. |
 
 ---
 
@@ -189,12 +303,12 @@ ACE-Step supports 6 different generation task types, each optimized for specific
 
 **Key Parameters**:
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="text2music",
     caption="energetic rock music with electric guitar",
     lyrics="[Instrumental]",  # or actual lyrics
     bpm=140,
-    audio_duration=30,
+    duration=30,
 )
 ```
 
@@ -203,9 +317,9 @@ config = GenerationConfig(
 
 **Optional but Recommended**:
 - `bpm`: Controls tempo
-- `key_scale`: Controls musical key
-- `time_signature`: Controls rhythm structure
-- `audio_duration`: Controls length
+- `keyscale`: Controls musical key
+- `timesignature`: Controls rhythm structure
+- `duration`: Controls length
 - `vocal_language`: Controls vocal characteristics
 
 **Use Cases**:
@@ -221,7 +335,7 @@ config = GenerationConfig(
 
 **Key Parameters**:
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="cover",
     src_audio="original_song.mp3",
     caption="jazz piano version",
@@ -253,7 +367,7 @@ config = GenerationConfig(
 
 **Key Parameters**:
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="repaint",
     src_audio="original.mp3",
     repainting_start=10.0,  # seconds
@@ -282,7 +396,7 @@ config = GenerationConfig(
 
 **Key Parameters**:
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="lego",
     src_audio="backing_track.mp3",
     instruction="Generate the guitar track based on the audio context:",
@@ -314,7 +428,7 @@ config = GenerationConfig(
 
 **Key Parameters**:
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="extract",
     src_audio="full_mix.mp3",
     instruction="Extract the vocals track from the audio:",
@@ -341,7 +455,7 @@ config = GenerationConfig(
 
 **Key Parameters**:
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="complete",
     src_audio="incomplete_track.mp3",
     instruction="Complete the input track with drums, bass, guitar:",
@@ -366,28 +480,32 @@ config = GenerationConfig(
 ### Example 1: Simple Text-to-Music Generation
 
 ```python
-from acestep.inference import GenerationConfig, generate_music
+from acestep.inference import GenerationParams, GenerationConfig, generate_music
 
-config = GenerationConfig(
+params = GenerationParams(
     task_type="text2music",
     caption="calm ambient music with soft piano and strings",
-    audio_duration=60,
+    duration=60,
     bpm=80,
-    key_scale="C Major",
-    batch_size=2,  # Generate 2 variations
+    keyscale="C Major",
 )
 
-result = generate_music(dit_handler, llm_handler, config)
+config = GenerationConfig(
+    batch_size=2,  # Generate 2 variations
+    audio_format="flac",
+)
+
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 
 if result.success:
-    for i, path in enumerate(result.audio_paths, 1):
-        print(f"Variation {i}: {path}")
+    for i, audio in enumerate(result.audios, 1):
+        print(f"Variation {i}: {audio['path']}")
 ```
 
 ### Example 2: Song Generation with Lyrics
 
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="text2music",
     caption="pop ballad with emotional vocals",
     lyrics="""Verse 1:
@@ -402,36 +520,41 @@ This is where I belong
 """,
     vocal_language="en",
     bpm=72,
-    audio_duration=45,
+    duration=45,
 )
 
-result = generate_music(dit_handler, llm_handler, config)
+config = GenerationConfig(batch_size=1)
+
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 ```
 
 ### Example 3: Style Cover with LM Reasoning
 
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="cover",
     src_audio="original_pop_song.mp3",
     caption="orchestral symphonic arrangement",
     audio_cover_strength=0.7,
-    use_llm_thinking=True,  # Enable LM for metadata
+    thinking=True,  # Enable LM for metadata
     use_cot_metas=True,
 )
 
-result = generate_music(dit_handler, llm_handler, config)
+config = GenerationConfig(batch_size=1)
+
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 
 # Access LM-generated metadata
-if result.lm_metadata:
-    print(f"LM detected BPM: {result.lm_metadata.get('bpm')}")
-    print(f"LM detected Key: {result.lm_metadata.get('keyscale')}")
+if result.extra_outputs.get("lm_metadata"):
+    lm_meta = result.extra_outputs["lm_metadata"]
+    print(f"LM detected BPM: {lm_meta.get('bpm')}")
+    print(f"LM detected Key: {lm_meta.get('keyscale')}")
 ```
 
 ### Example 4: Repaint Section of Audio
 
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="repaint",
     src_audio="generated_track.mp3",
     repainting_start=15.0,  # Start at 15 seconds
@@ -440,66 +563,78 @@ config = GenerationConfig(
     inference_steps=32,  # Higher quality for base model
 )
 
-result = generate_music(dit_handler, llm_handler, config)
+config = GenerationConfig(batch_size=1)
+
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 ```
 
-### Example 5: Batch Generation with LM
+### Example 5: Batch Generation with Specific Seeds
 
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="text2music",
     caption="epic cinematic trailer music",
-    batch_size=4,  # Generate 4 variations
-    use_llm_thinking=True,
-    use_cot_metas=True,
-    allow_lm_batch=True,  # Faster batch processing
+)
+
+config = GenerationConfig(
+    batch_size=4,           # Generate 4 variations
+    seeds=[42, 123, 456],   # Specify 3 seeds, 4th will be random
+    use_random_seed=False,  # Use provided seeds
     lm_batch_chunk_size=2,  # Process 2 at a time (GPU memory)
 )
 
-result = generate_music(dit_handler, llm_handler, config)
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 
 if result.success:
-    print(f"Generated {len(result.audio_paths)} variations")
+    print(f"Generated {len(result.audios)} variations")
+    for audio in result.audios:
+        print(f"  Seed {audio['params']['seed']}: {audio['path']}")
 ```
 
 ### Example 6: High-Quality Generation (Base Model)
 
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="text2music",
     caption="intricate jazz fusion with complex harmonies",
-    inference_steps=64,  # High quality
+    inference_steps=64,     # High quality
     guidance_scale=8.0,
-    use_adg=True,  # Adaptive Dual Guidance
+    use_adg=True,           # Adaptive Dual Guidance
     cfg_interval_start=0.0,
     cfg_interval_end=1.0,
-    audio_format="wav",  # Lossless format
-    use_random_seed=False,
-    seed=42,  # Reproducible results
+    seed=42,                # Reproducible results
 )
 
-result = generate_music(dit_handler, llm_handler, config)
+config = GenerationConfig(
+    batch_size=1,
+    use_random_seed=False,
+    audio_format="wav",     # Lossless format
+)
+
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 ```
 
 ### Example 7: Extract Vocals from Mix
 
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="extract",
     src_audio="full_song_mix.mp3",
     instruction="Extract the vocals track from the audio:",
 )
 
-result = generate_music(dit_handler, llm_handler, config)
+config = GenerationConfig(batch_size=1)
+
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 
 if result.success:
-    print(f"Extracted vocals: {result.audio_paths[0]}")
+    print(f"Extracted vocals: {result.audios[0]['path']}")
 ```
 
 ### Example 8: Add Guitar Track (Lego)
 
 ```python
-config = GenerationConfig(
+params = GenerationParams(
     task_type="lego",
     src_audio="drums_and_bass.mp3",
     instruction="Generate the guitar track based on the audio context:",
@@ -508,7 +643,25 @@ config = GenerationConfig(
     repainting_end=-1,  # Full duration
 )
 
-result = generate_music(dit_handler, llm_handler, config)
+config = GenerationConfig(batch_size=1)
+
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
+```
+
+### Example 9: Instrumental Generation
+
+```python
+params = GenerationParams(
+    task_type="text2music",
+    caption="upbeat electronic dance music",
+    instrumental=True,  # Force instrumental output
+    duration=120,
+    bpm=128,
+)
+
+config = GenerationConfig(batch_size=2)
+
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 ```
 
 ---
@@ -550,34 +703,34 @@ caption="fast slow music"  # Conflicting tempos
 - Use turbo model with `inference_steps=8`
 - Disable ADG (`use_adg=False`)
 - Lower `guidance_scale=5.0-7.0`
-- Use compressed format (`audio_format="mp3"`)
+- Use compressed format (`audio_format="mp3"`) or default FLAC
 
 **For Consistency**:
-- Set `use_random_seed=False`
-- Use fixed `seed` value
+- Set `use_random_seed=False` in config
+- Use fixed `seeds` list or single `seed` in params
 - Keep `lm_temperature` lower (0.7-0.85)
 
 **For Diversity**:
-- Set `use_random_seed=True`
+- Set `use_random_seed=True` in config
 - Increase `lm_temperature` (0.9-1.1)
 - Use `batch_size > 1` for variations
 
 ### 3. Duration Guidelines
 
 - **Instrumental**: 30-180 seconds works well
-- **With Lyrics**: Auto-detection recommended (set `audio_duration=None`)
+- **With Lyrics**: Auto-detection recommended (set `duration=-1` or leave default)
 - **Short clips**: 10-20 seconds minimum
 - **Long form**: Up to 600 seconds (10 minutes) maximum
 
 ### 4. LM Usage
 
-**When to Enable LM (`use_llm_thinking=True`)**:
+**When to Enable LM (`thinking=True`)**:
 - Need automatic metadata detection
 - Want caption refinement
 - Generating from minimal input
 - Need diverse outputs
 
-**When to Disable LM**:
+**When to Disable LM (`thinking=False`)**:
 - Have precise metadata already
 - Need faster generation
 - Want full control over parameters
@@ -587,9 +740,8 @@ caption="fast slow music"  # Conflicting tempos
 ```python
 # Efficient batch generation
 config = GenerationConfig(
-    batch_size=8,  # Max supported
-    use_llm_thinking=True,
-    allow_lm_batch=True,  # Enable for speed
+    batch_size=8,           # Max supported
+    allow_lm_batch=True,    # Enable for speed (when thinking=True)
     lm_batch_chunk_size=4,  # Adjust based on GPU memory
 )
 ```
@@ -597,16 +749,18 @@ config = GenerationConfig(
 ### 6. Error Handling
 
 ```python
-result = generate_music(dit_handler, llm_handler, config)
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 
 if not result.success:
     print(f"Generation failed: {result.error}")
-    # Check logs for details
+    print(f"Status: {result.status_message}")
 else:
     # Process successful result
-    for path in result.audio_paths:
+    for audio in result.audios:
+        path = audio['path']
+        key = audio['key']
+        seed = audio['params']['seed']
         # ... process audio files
-        pass
 ```
 
 ### 7. Memory Management
@@ -616,6 +770,19 @@ For large batch sizes or long durations:
 - Reduce `batch_size` if OOM errors occur
 - Reduce `lm_batch_chunk_size` for LM operations
 - Consider using `offload_to_cpu=True` during initialization
+
+### 8. Accessing Time Costs
+
+```python
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
+
+if result.success:
+    time_costs = result.extra_outputs.get("time_costs", {})
+    print(f"LM Phase 1 Time: {time_costs.get('lm_phase1_time', 0):.2f}s")
+    print(f"LM Phase 2 Time: {time_costs.get('lm_phase2_time', 0):.2f}s")
+    print(f"DiT Total Time: {time_costs.get('dit_total_time_cost', 0):.2f}s")
+    print(f"Pipeline Total: {time_costs.get('pipeline_total_time', 0):.2f}s")
+```
 
 ---
 
@@ -630,62 +797,77 @@ For large batch sizes or long durations:
 - **Solution**: Increase `inference_steps`, adjust `guidance_scale`, use base model
 
 **Issue**: Results don't match prompt
-- **Solution**: Make caption more specific, increase `guidance_scale`, enable LM refinement
+- **Solution**: Make caption more specific, increase `guidance_scale`, enable LM refinement (`thinking=True`)
 
 **Issue**: Slow generation
 - **Solution**: Use turbo model, reduce `inference_steps`, disable ADG
 
 **Issue**: LM not generating codes
-- **Solution**: Verify `llm_handler` is initialized, check `use_llm_thinking=True` and `use_cot_metas=True`
+- **Solution**: Verify `llm_handler` is initialized, check `thinking=True` and `use_cot_metas=True`
+
+**Issue**: Seeds not being respected
+- **Solution**: Set `use_random_seed=False` in config and provide `seeds` list or `seed` in params
 
 ---
 
 ## API Reference Summary
 
+### GenerationParams Fields
+
+See [GenerationParams Parameters](#generationparams-parameters) for complete documentation.
+
 ### GenerationConfig Fields
 
-See [Configuration Parameters](#configuration-parameters) for complete documentation.
+See [GenerationConfig Parameters](#generationconfig-parameters) for complete documentation.
 
 ### GenerationResult Fields
 
 ```python
 @dataclass
 class GenerationResult:
-    # Audio outputs
-    audio_paths: List[str]              # List of generated audio file paths
-    first_audio: Optional[str]          # First audio (backward compatibility)
-    second_audio: Optional[str]         # Second audio (backward compatibility)
+    # Audio Outputs
+    audios: List[Dict[str, Any]]
+    # Each audio dict contains:
+    #   - "path": str (file path)
+    #   - "tensor": Tensor (audio data)
+    #   - "key": str (unique identifier)
+    #   - "sample_rate": int (48000)
+    #   - "params": Dict (generation params with seed, audio_codes, etc.)
     
-    # Generation metadata
-    generation_info: str                # Markdown-formatted generation info
-    status_message: str                 # Status message
-    seed_value: str                     # Seed value used
+    # Generation Information
+    status_message: str
+    extra_outputs: Dict[str, Any]
+    # extra_outputs contains:
+    #   - "lm_metadata": Dict (LM-generated metadata)
+    #   - "time_costs": Dict (timing information)
+    #   - "latents": Tensor (intermediate latents, if available)
+    #   - "masks": Tensor (attention masks, if available)
     
-    # LM outputs
-    lm_metadata: Optional[Dict[str, Any]]  # LM-generated metadata
-    
-    # Alignment scores (if available)
-    align_score_1: Optional[float]
-    align_text_1: Optional[str]
-    align_plot_1: Optional[Any]
-    align_score_2: Optional[float]
-    align_text_2: Optional[str]
-    align_plot_2: Optional[Any]
-    
-    # Status
-    success: bool                       # Whether generation succeeded
-    error: Optional[str]                # Error message if failed
+    # Success Status
+    success: bool
+    error: Optional[str]
 ```
 
 ---
 
 ## Version History
 
-- **v1.5**: Current version with refactored inference API
+- **v1.5.1**: Current version with refactored inference API
+  - Split `GenerationConfig` into `GenerationParams` and `GenerationConfig`
+  - Renamed parameters for consistency (`key_scale` → `keyscale`, `time_signature` → `timesignature`, `audio_duration` → `duration`, `use_llm_thinking` → `thinking`, `audio_code_string` → `audio_codes`)
+  - Added `instrumental` parameter
+  - Added `use_constrained_decoding` parameter
+  - Added CoT auto-filled fields (`cot_*`)
+  - Changed default `audio_format` to "flac"
+  - Changed default `batch_size` to 2
+  - Changed default `thinking` to True
+  - Simplified `GenerationResult` structure with unified `audios` list
+  - Added unified `time_costs` in `extra_outputs`
+
+- **v1.5**: Previous version
   - Introduced `GenerationConfig` and `GenerationResult` dataclasses
   - Simplified parameter passing
   - Added comprehensive documentation
-  - Maintained backward compatibility with Gradio UI
 
 ---
 
