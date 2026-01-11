@@ -267,7 +267,7 @@ def generate_with_progress(
     reference_audio, audio_duration, batch_size_input, src_audio,
     text2music_audio_code_string, repainting_start, repainting_end,
     instruction_display_gen, audio_cover_strength, task_type,
-    use_adg, cfg_interval_start, cfg_interval_end, audio_format, lm_temperature,
+    use_adg, cfg_interval_start, cfg_interval_end, shift, audio_format, lm_temperature,
     think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
     use_cot_metas, use_cot_caption, use_cot_language, is_format_caption,
     constrained_decoding_debug,
@@ -300,6 +300,7 @@ def generate_with_progress(
         use_adg=use_adg,
         cfg_interval_start=cfg_interval_start,
         cfg_interval_end=cfg_interval_end,
+        shift=shift,
         repainting_start=repainting_start,
         repainting_end=repainting_end,
         audio_cover_strength=audio_cover_strength,
@@ -650,7 +651,7 @@ def capture_current_params(
     reference_audio, audio_duration, batch_size_input, src_audio,
     text2music_audio_code_string, repainting_start, repainting_end,
     instruction_display_gen, audio_cover_strength, task_type,
-    use_adg, cfg_interval_start, cfg_interval_end, audio_format, lm_temperature,
+    use_adg, cfg_interval_start, cfg_interval_end, shift, audio_format, lm_temperature,
     think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
     use_cot_metas, use_cot_caption, use_cot_language,
     constrained_decoding_debug, allow_lm_batch, auto_score, score_scale, lm_batch_chunk_size,
@@ -686,6 +687,7 @@ def capture_current_params(
         "use_adg": use_adg,
         "cfg_interval_start": cfg_interval_start,
         "cfg_interval_end": cfg_interval_end,
+        "shift": shift,
         "audio_format": audio_format,
         "lm_temperature": lm_temperature,
         "think_checkbox": think_checkbox,
@@ -713,7 +715,7 @@ def generate_with_batch_management(
     reference_audio, audio_duration, batch_size_input, src_audio,
     text2music_audio_code_string, repainting_start, repainting_end,
     instruction_display_gen, audio_cover_strength, task_type,
-    use_adg, cfg_interval_start, cfg_interval_end, audio_format, lm_temperature,
+    use_adg, cfg_interval_start, cfg_interval_end, shift, audio_format, lm_temperature,
     think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
     use_cot_metas, use_cot_caption, use_cot_language, is_format_caption,
     constrained_decoding_debug,
@@ -741,7 +743,7 @@ def generate_with_batch_management(
         reference_audio, audio_duration, batch_size_input, src_audio,
         text2music_audio_code_string, repainting_start, repainting_end,
         instruction_display_gen, audio_cover_strength, task_type,
-        use_adg, cfg_interval_start, cfg_interval_end, audio_format, lm_temperature,
+        use_adg, cfg_interval_start, cfg_interval_end, shift, audio_format, lm_temperature,
         think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
         use_cot_metas, use_cot_caption, use_cot_language, is_format_caption,
         constrained_decoding_debug,
@@ -811,6 +813,7 @@ def generate_with_batch_management(
         "use_adg": use_adg,
         "cfg_interval_start": cfg_interval_start,
         "cfg_interval_end": cfg_interval_end,
+        "shift": shift,
         "audio_format": audio_format,
         "lm_temperature": lm_temperature,
         "think_checkbox": think_checkbox,
@@ -964,6 +967,7 @@ def generate_next_batch_background(
         params.setdefault("use_adg", False)
         params.setdefault("cfg_interval_start", 0.0)
         params.setdefault("cfg_interval_end", 1.0)
+        params.setdefault("shift", 1.0)
         params.setdefault("audio_format", "mp3")
         params.setdefault("lm_temperature", 0.85)
         params.setdefault("think_checkbox", True)
@@ -1010,6 +1014,7 @@ def generate_next_batch_background(
             use_adg=params.get("use_adg"),
             cfg_interval_start=params.get("cfg_interval_start"),
             cfg_interval_end=params.get("cfg_interval_end"),
+            shift=params.get("shift"),
             audio_format=params.get("audio_format"),
             lm_temperature=params.get("lm_temperature"),
             think_checkbox=params.get("think_checkbox"),

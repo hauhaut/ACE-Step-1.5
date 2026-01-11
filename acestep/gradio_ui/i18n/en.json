@@ -116,6 +116,8 @@
     "audio_format_info": "Audio format for saved files",
     "use_adg_label": "Use ADG",
     "use_adg_info": "Enable Angle Domain Guidance",
+    "shift_label": "Shift",
+    "shift_info": "Timestep shift factor for base models (range 1.0~5.0, default 3.0). Not effective for turbo models.",
     "cfg_interval_start": "CFG Interval Start",
     "cfg_interval_end": "CFG Interval End",
     "lm_params_title": "🤖 LM Generation Parameters",

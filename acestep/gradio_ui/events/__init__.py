@@ -34,6 +34,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["inference_steps"],
             generation_section["guidance_scale"],
             generation_section["use_adg"],
+            generation_section["shift"],
             generation_section["cfg_interval_start"],
             generation_section["cfg_interval_end"],
             generation_section["task_type"],
@@ -235,12 +236,14 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["use_adg"],
             generation_section["cfg_interval_start"],
             generation_section["cfg_interval_end"],
+            generation_section["shift"],
             generation_section["audio_format"],
             generation_section["lm_temperature"],
             generation_section["lm_cfg_scale"],
             generation_section["lm_top_k"],
             generation_section["lm_top_p"],
             generation_section["lm_negative_prompt"],
+            generation_section["use_cot_metas"],  # Added: use_cot_metas
             generation_section["use_cot_caption"],
             generation_section["use_cot_language"],
             generation_section["audio_cover_strength"],
@@ -250,6 +253,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["repainting_end"],
             generation_section["track_name"],
             generation_section["complete_track_classes"],
+            generation_section["instrumental_checkbox"],  # Added: instrumental_checkbox
             results_section["is_format_caption_state"]
         ]
     )
@@ -396,6 +400,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["use_adg"],
             generation_section["cfg_interval_start"],
             generation_section["cfg_interval_end"],
+            generation_section["shift"],
             generation_section["audio_format"],
             generation_section["lm_temperature"],
             generation_section["think_checkbox"],
@@ -547,6 +552,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["use_adg"],
             generation_section["cfg_interval_start"],
             generation_section["cfg_interval_end"],
+            generation_section["shift"],
             generation_section["audio_format"],
             generation_section["lm_temperature"],
             generation_section["think_checkbox"],

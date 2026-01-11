@@ -436,6 +436,15 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     info=t("generation.use_adg_info"),
                     visible=False
                 )
+                shift = gr.Slider(
+                    minimum=1.0,
+                    maximum=5.0,
+                    value=3.0,
+                    step=0.1,
+                    label=t("generation.shift_label"),
+                    info=t("generation.shift_info"),
+                    visible=False
+                )
             
             with gr.Row():
                 cfg_interval_start = gr.Slider(
@@ -649,6 +658,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         "use_adg": use_adg,
         "cfg_interval_start": cfg_interval_start,
         "cfg_interval_end": cfg_interval_end,
+        "shift": shift,
         "audio_format": audio_format,
         "output_alignment_preference": output_alignment_preference,
         "think_checkbox": think_checkbox,

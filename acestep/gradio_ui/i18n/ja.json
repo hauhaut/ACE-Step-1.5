@@ -116,6 +116,8 @@
     "audio_format_info": "保存ファイルのオーディオフォーマット",
     "use_adg_label": "ADG を使用",
     "use_adg_info": "角度ドメインガイダンスを有効化",
+    "shift_label": "シフト",
+    "shift_info": "baseモデル用タイムステップシフト係数 (範囲 1.0~5.0、デフォルト 3.0)。turboモデルには無効。",
     "cfg_interval_start": "CFG 間隔開始",
     "cfg_interval_end": "CFG 間隔終了",
     "lm_params_title": "🤖 LM 生成パラメータ",

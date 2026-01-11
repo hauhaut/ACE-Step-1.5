@@ -42,6 +42,7 @@ class GenerationParams:
         use_adg: Whether to use Adaptive Dual Guidance (only works for base model).
         cfg_interval_start: Start ratio (0.0–1.0) to apply CFG.
         cfg_interval_end: End ratio (0.0–1.0) to apply CFG.
+        shift: Timestep shift factor (default 1.0). When != 1.0, applies t = shift * t / (1 + (shift - 1) * t) to timesteps.
         
         # Task-Specific Parameters
         task_type: Type of generation task. One of: "text2music", "cover", "repaint", "lego", "extract", "complete".
@@ -94,6 +95,7 @@ class GenerationParams:
     use_adg: bool = False
     cfg_interval_start: float = 0.0
     cfg_interval_end: float = 1.0
+    shift: float = 1.0
 
     repainting_start: float = 0.0
     repainting_end: float = -1
@@ -485,6 +487,7 @@ def generate_music(
             use_adg=params.use_adg,
             cfg_interval_start=params.cfg_interval_start,
             cfg_interval_end=params.cfg_interval_end,
+            shift=params.shift,
             progress=progress,
         )
 

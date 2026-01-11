@@ -19,7 +19,7 @@ def load_metadata(file_obj):
     """Load generation parameters from a JSON file"""
     if file_obj is None:
         gr.Warning(t("messages.no_file_selected"))
-        return [None] * 31 + [False]  # Return None for all fields, False for is_format_caption
+        return [None] * 34 + [False]  # Return None for all fields, False for is_format_caption
     
     try:
         # Read the uploaded file
@@ -74,35 +74,38 @@ def load_metadata(file_obj):
         lm_top_k = metadata.get('lm_top_k', 0)
         lm_top_p = metadata.get('lm_top_p', 0.9)
         lm_negative_prompt = metadata.get('lm_negative_prompt', 'NO USER INPUT')
+        use_cot_metas = metadata.get('use_cot_metas', True)  # Added: read use_cot_metas
         use_cot_caption = metadata.get('use_cot_caption', True)
         use_cot_language = metadata.get('use_cot_language', True)
         audio_cover_strength = metadata.get('audio_cover_strength', 1.0)
-        think = metadata.get('think', True)
+        think = metadata.get('thinking', True)  # Fixed: read 'thinking' not 'think'
         audio_codes = metadata.get('audio_codes', '')
         repainting_start = metadata.get('repainting_start', 0.0)
         repainting_end = metadata.get('repainting_end', -1)
         track_name = metadata.get('track_name')
         complete_track_classes = metadata.get('complete_track_classes', [])
+        shift = metadata.get('shift', 3.0)  # Default 3.0 for base models
+        instrumental = metadata.get('instrumental', False)  # Added: read instrumental
         
         gr.Info(t("messages.params_loaded", filename=os.path.basename(filepath)))
         
         return (
             task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature,
             audio_duration, batch_size, inference_steps, guidance_scale, seed, random_seed,
-            use_adg, cfg_interval_start, cfg_interval_end, audio_format,
+            use_adg, cfg_interval_start, cfg_interval_end, shift, audio_format,
             lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
-            use_cot_caption, use_cot_language, audio_cover_strength,
+            use_cot_metas, use_cot_caption, use_cot_language, audio_cover_strength,
             think, audio_codes, repainting_start, repainting_end,
-            track_name, complete_track_classes,
+            track_name, complete_track_classes, instrumental,
             True  # Set is_format_caption to True when loading from file
         )
         
     except json.JSONDecodeError as e:
         gr.Warning(t("messages.invalid_json", error=str(e)))
-        return [None] * 31 + [False]
+        return [None] * 34 + [False]
     except Exception as e:
         gr.Warning(t("messages.load_error", error=str(e)))
-        return [None] * 31 + [False]
+        return [None] * 34 + [False]
 
 
 def load_random_example(task_type: str):
@@ -282,21 +285,25 @@ def update_model_type_settings(config_path):
     config_path_lower = config_path.lower()
     
     if "turbo" in config_path_lower:
-        # Turbo model: max 8 steps, hide CFG/ADG, only show text2music/repaint/cover
+        # Turbo model: max 8 steps, hide CFG/ADG/shift, only show text2music/repaint/cover
+        # Shift is not effective for turbo models, default to 1.0
         return (
             gr.update(value=8, maximum=8, minimum=1),  # inference_steps
             gr.update(visible=False),  # guidance_scale
             gr.update(visible=False),  # use_adg
+            gr.update(value=1.0, visible=False),  # shift (not effective for turbo)
             gr.update(visible=False),  # cfg_interval_start
             gr.update(visible=False),  # cfg_interval_end
             gr.update(choices=TASK_TYPES_TURBO),  # task_type
         )
     elif "base" in config_path_lower:
-        # Base model: max 100 steps, show CFG/ADG, show all task types
+        # Base model: max 100 steps, show CFG/ADG/shift, show all task types
+        # Shift range 1.0~5.0, default 3.0 for base models
         return (
             gr.update(value=32, maximum=100, minimum=1),  # inference_steps
             gr.update(visible=True),  # guidance_scale
             gr.update(visible=True),  # use_adg
+            gr.update(value=3.0, visible=True),  # shift (effective for base, default 3.0)
             gr.update(visible=True),  # cfg_interval_start
             gr.update(visible=True),  # cfg_interval_end
             gr.update(choices=TASK_TYPES_BASE),  # task_type
@@ -307,6 +314,7 @@ def update_model_type_settings(config_path):
             gr.update(value=8, maximum=8, minimum=1),
             gr.update(visible=False),
             gr.update(visible=False),
+            gr.update(value=1.0, visible=False),  # shift default 1.0
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(choices=TASK_TYPES_TURBO),  # task_type

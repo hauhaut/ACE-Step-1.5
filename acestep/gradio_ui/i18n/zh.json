@@ -116,6 +116,8 @@
     "audio_format_info": "保存文件的音频格式",
     "use_adg_label": "使用 ADG",
     "use_adg_info": "启用角域引导",
+    "shift_label": "Shift",
+    "shift_info": "时间步偏移因子，仅对 base 模型生效 (范围 1.0~5.0，默认 3.0)。对 turbo 模型无效。",
     "cfg_interval_start": "CFG 间隔开始",
     "cfg_interval_end": "CFG 间隔结束",
     "lm_params_title": "🤖 LM 生成参数",

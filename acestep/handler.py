@@ -1785,6 +1785,7 @@ class AceStepHandler:
         use_adg: bool = False,
         cfg_interval_start: float = 0.0,
         cfg_interval_end: float = 1.0,
+        shift: float = 1.0,
         audio_code_hints: Optional[Union[str, List[str]]] = None,
         infer_method: str = "ode",
     ) -> Dict[str, Any]:
@@ -1948,6 +1949,7 @@ class AceStepHandler:
             "use_adg": use_adg,
             "cfg_interval_start": cfg_interval_start,
             "cfg_interval_end": cfg_interval_end,
+            "shift": shift,
         }
         logger.info("[service_generate] Generating audio...")
         with self._load_model_context("model"):
@@ -2055,6 +2057,7 @@ class AceStepHandler:
         use_adg: bool = False,
         cfg_interval_start: float = 0.0,
         cfg_interval_end: float = 1.0,
+        shift: float = 1.0,
         use_tiled_decode: bool = True,
         progress=None
     ) -> Dict[str, Any]:
@@ -2202,6 +2205,7 @@ class AceStepHandler:
                 use_adg=use_adg,  # Pass use_adg parameter
                 cfg_interval_start=cfg_interval_start,  # Pass CFG interval start
                 cfg_interval_end=cfg_interval_end,  # Pass CFG interval end
+                shift=shift,  # Pass shift parameter
                 audio_code_hints=audio_code_hints_batch,  # Pass audio code hints as list
                 return_intermediate=should_return_intermediate
             )
