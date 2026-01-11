@@ -180,99 +180,6 @@ def update_navigation_buttons(current_batch, total_batches):
     can_go_next = current_batch < total_batches - 1
     return can_go_previous, can_go_next
 
-
-def save_audio_and_metadata(
-    audio_path, task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature, audio_duration,
-    batch_size_input, inference_steps, guidance_scale, seed, random_seed_checkbox,
-    use_adg, cfg_interval_start, cfg_interval_end, audio_format,
-    lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
-    use_cot_caption, use_cot_language, audio_cover_strength,
-    think_checkbox, text2music_audio_code_string, repainting_start, repainting_end,
-    track_name, complete_track_classes, lm_metadata
-):
-    """Save audio file and its metadata as a zip package"""
-    if audio_path is None:
-        gr.Warning(t("messages.no_audio_to_save"))
-        return None
-    
-    try:
-        # Create metadata dictionary
-        metadata = {
-            "saved_at": datetime.datetime.now().isoformat(),
-            "task_type": task_type,
-            "caption": captions or "",
-            "lyrics": lyrics or "",
-            "vocal_language": vocal_language,
-            "bpm": bpm if bpm is not None else None,
-            "keyscale": key_scale or "",
-            "timesignature": time_signature or "",
-            "duration": audio_duration if audio_duration is not None else -1,
-            "batch_size": batch_size_input,
-            "inference_steps": inference_steps,
-            "guidance_scale": guidance_scale,
-            "seed": seed,
-            "random_seed": False,  # Disable random seed for reproducibility
-            "use_adg": use_adg,
-            "cfg_interval_start": cfg_interval_start,
-            "cfg_interval_end": cfg_interval_end,
-            "audio_format": audio_format,
-            "lm_temperature": lm_temperature,
-            "lm_cfg_scale": lm_cfg_scale,
-            "lm_top_k": lm_top_k,
-            "lm_top_p": lm_top_p,
-            "lm_negative_prompt": lm_negative_prompt,
-            "use_cot_caption": use_cot_caption,
-            "use_cot_language": use_cot_language,
-            "audio_cover_strength": audio_cover_strength,
-            "think": think_checkbox,
-            "audio_codes": text2music_audio_code_string or "",
-            "repainting_start": repainting_start,
-            "repainting_end": repainting_end,
-            "track_name": track_name,
-            "complete_track_classes": complete_track_classes or [],
-        }
-        
-        # Add LM-generated metadata if available
-        if lm_metadata:
-            metadata["lm_generated_metadata"] = lm_metadata
-        
-        # Generate timestamp and base name
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Extract audio filename extension
-        audio_ext = os.path.splitext(audio_path)[1]
-        
-        # Create temporary directory for packaging
-        temp_dir = tempfile.mkdtemp()
-        
-        # Save JSON metadata
-        json_path = os.path.join(temp_dir, f"metadata_{timestamp}.json")
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
-        
-        # Copy audio file
-        audio_copy_path = os.path.join(temp_dir, f"audio_{timestamp}{audio_ext}")
-        shutil.copy2(audio_path, audio_copy_path)
-        
-        # Create zip file
-        zip_path = os.path.join(tempfile.gettempdir(), f"music_package_{timestamp}.zip")
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            zipf.write(audio_copy_path, os.path.basename(audio_copy_path))
-            zipf.write(json_path, os.path.basename(json_path))
-        
-        # Clean up temp directory
-        shutil.rmtree(temp_dir)
-        
-        gr.Info(t("messages.save_success", filename=os.path.basename(zip_path)))
-        return zip_path
-        
-    except Exception as e:
-        gr.Warning(t("messages.save_failed", error=str(e)))
-        import traceback
-        traceback.print_exc()
-        return None
-
-
 def send_audio_to_src_with_metadata(audio_file, lm_metadata):
     """Send generated audio file to src_audio input and populate metadata fields
     
@@ -455,16 +362,17 @@ def generate_with_progress(
     align_plot_2 = None
     updated_audio_codes = text2music_audio_code_string if not think_checkbox else ""
     
+    # Build initial generation_info (will be updated with post-processing times at the end)
+    generation_info = _build_generation_info(
+        lm_metadata=lm_generated_metadata,
+        time_costs=time_costs,
+        seed_value=seed_value_for_ui,
+        inference_steps=inference_steps,
+        num_audios=len(result.audios) if result.success else 0,
+    )
+    
     if not result.success:
-        # Build generation_info string for error case
-        generation_info = _build_generation_info(
-            lm_metadata=lm_generated_metadata,
-            time_costs=time_costs,
-            seed_value=seed_value_for_ui,
-            inference_steps=inference_steps,
-            num_audios=0,
-        )
-        yield (None,) * 8 + (None, generation_info, result.status_message) + (gr.skip(),) * 25
+        yield (None,) * 8 + (None, generation_info, result.status_message) + (gr.skip(),) * 26
         return
     
     audios = result.audios
@@ -480,8 +388,11 @@ def generate_with_progress(
             json_path = os.path.join(temp_dir, f"{key}.json")
             audio_path = os.path.join(temp_dir, f"{key}.{audio_format}")
             save_audio(audio_data=audio_tensor, output_path=audio_path, sample_rate=sample_rate, format=audio_format, channels_first=True)
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(audio_params, f, indent=2, ensure_ascii=False)
             audio_outputs[i] = audio_path
             all_audio_paths.append(audio_path)
+            all_audio_paths.append(json_path)
             
             code_str = audio_params.get("audio_codes", "")
             final_codes_list[i] = code_str

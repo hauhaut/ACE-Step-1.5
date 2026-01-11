@@ -89,15 +89,12 @@ class AudioSaver:
         try:
             if format == "mp3":
                 # MP3 uses ffmpeg backend
-                from torchaudio.io import CodecConfig
-                config = CodecConfig(bit_rate=192000, compression_level=1)
                 torchaudio.save(
                     str(output_path),
                     audio_tensor,
                     sample_rate,
                     channels_first=True,
                     backend='ffmpeg',
-                    compression=config,
                 )
             elif format in ["flac", "wav"]:
                 # FLAC and WAV use soundfile backend (fastest)
@@ -106,7 +103,7 @@ class AudioSaver:
                     audio_tensor,
                     sample_rate,
                     channels_first=True,
-                    backend='ffmpeg',
+                    backend='soundfile',
                 )
             else:
                 # Other formats use default backend
