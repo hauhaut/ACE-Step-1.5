@@ -1132,8 +1132,9 @@ def navigate_to_previous_batch(current_batch_index, batch_queue):
     
     # Prepare audio outputs (up to 8)
     audio_outputs = [None] * 8
-    for idx in range(min(len(audio_paths), 8)):
-        audio_outputs[idx] = audio_paths[idx]
+    real_audio_paths = [p for p in audio_paths if not p.lower().endswith('.json')]
+    for idx in range(min(len(real_audio_paths), 8)):
+        audio_outputs[idx] = real_audio_paths[idx]
     
     # Update batch indicator
     total_batches = len(batch_queue)
@@ -1178,8 +1179,9 @@ def navigate_to_next_batch(autogen_enabled, current_batch_index, total_batches, 
     
     # Prepare audio outputs (up to 8)
     audio_outputs = [None] * 8
-    for idx in range(min(len(audio_paths), 8)):
-        audio_outputs[idx] = audio_paths[idx]
+    real_audio_paths = [p for p in audio_paths if not p.lower().endswith('.json')]
+    for idx in range(min(len(real_audio_paths), 8)):
+        audio_outputs[idx] = real_audio_paths[idx]
     
     # Update batch indicator
     batch_indicator_text = update_batch_indicator(new_batch_index, total_batches)
