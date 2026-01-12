@@ -118,8 +118,15 @@ class AudioSaver:
             return str(output_path)
             
         except Exception as e:
-            logger.error(f"[AudioSaver] Failed to save audio: {e}")
-            raise
+            try:
+                import soundfile as sf
+                audio_np = audio_tensor.transpose(0, 1).numpy()  # -> [samples, channels]
+                sf.write(str(output_path), audio_np, sample_rate, format=format.upper())
+                logger.debug(f"[AudioSaver] Fallback soundfile Saved audio to {output_path} ({format}, {sample_rate}Hz)")
+                return str(output_path)
+            except Exception as e:
+                logger.error(f"[AudioSaver] Failed to save audio: {e}")
+                raise
     
     def convert_audio(
         self,
