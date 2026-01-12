@@ -773,7 +773,12 @@ class LLMHandler:
         cot_items = {}
         for key in ['bpm', 'caption', 'duration', 'keyscale', 'language', 'timesignature']:
             if key in metadata and metadata[key] is not None:
-                cot_items[key] = metadata[key]
+                value = metadata[key]
+                if key == "timesignature" and value.endswith("/4"):
+                    value = value.split("/")[0]
+                if isinstance(value, str) and value.isdigit():
+                    value = int(value)
+                cot_items[key] = value
         
         # Format as YAML (sorted keys, unicode support)
         if len(cot_items) > 0:

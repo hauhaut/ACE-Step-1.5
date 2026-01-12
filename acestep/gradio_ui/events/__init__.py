@@ -92,31 +92,6 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         ]
     )
     
-    # Update codes hints visibility
-    for trigger in [generation_section["src_audio"], generation_section["allow_lm_batch"], generation_section["batch_size_input"]]:
-        trigger.change(
-            fn=gen_h.update_codes_hints_visibility,
-            inputs=[
-                generation_section["src_audio"],
-                generation_section["allow_lm_batch"],
-                generation_section["batch_size_input"]
-            ],
-            outputs=[
-                generation_section["codes_single_row"],
-                generation_section["codes_batch_row"],
-                generation_section["codes_batch_row_2"],
-                generation_section["codes_col_1"],
-                generation_section["codes_col_2"],
-                generation_section["codes_col_3"],
-                generation_section["codes_col_4"],
-                generation_section["codes_col_5"],
-                generation_section["codes_col_6"],
-                generation_section["codes_col_7"],
-                generation_section["codes_col_8"],
-                generation_section["transcribe_btn"],
-            ]
-        )
-    
     # ========== Audio Conversion ==========
     generation_section["convert_src_to_codes_btn"].click(
         fn=lambda src: gen_h.convert_src_audio_to_codes_wrapper(dit_handler, src),
@@ -397,7 +372,9 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             ],
             outputs=[
                 results_section[f"lrc_display_{btn_idx}"],
-                results_section[f"details_accordion_{btn_idx}"]
+                results_section[f"details_accordion_{btn_idx}"],
+                # Audio subtitles now auto-updated via lrc_display.change()
+                results_section["batch_queue"]
             ]
         )
     
@@ -445,6 +422,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["constrained_decoding_debug"],
             generation_section["allow_lm_batch"],
             generation_section["auto_score"],
+            generation_section["auto_lrc"],
             generation_section["score_scale"],
             generation_section["lm_batch_chunk_size"],
             generation_section["track_name"],
@@ -476,15 +454,30 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             results_section["score_display_6"],
             results_section["score_display_7"],
             results_section["score_display_8"],
-            generation_section["text2music_audio_code_string"],
-            generation_section["text2music_audio_code_string_1"],
-            generation_section["text2music_audio_code_string_2"],
-            generation_section["text2music_audio_code_string_3"],
-            generation_section["text2music_audio_code_string_4"],
-            generation_section["text2music_audio_code_string_5"],
-            generation_section["text2music_audio_code_string_6"],
-            generation_section["text2music_audio_code_string_7"],
-            generation_section["text2music_audio_code_string_8"],
+            results_section["codes_display_1"],
+            results_section["codes_display_2"],
+            results_section["codes_display_3"],
+            results_section["codes_display_4"],
+            results_section["codes_display_5"],
+            results_section["codes_display_6"],
+            results_section["codes_display_7"],
+            results_section["codes_display_8"],
+            results_section["details_accordion_1"],
+            results_section["details_accordion_2"],
+            results_section["details_accordion_3"],
+            results_section["details_accordion_4"],
+            results_section["details_accordion_5"],
+            results_section["details_accordion_6"],
+            results_section["details_accordion_7"],
+            results_section["details_accordion_8"],
+            results_section["lrc_display_1"],
+            results_section["lrc_display_2"],
+            results_section["lrc_display_3"],
+            results_section["lrc_display_4"],
+            results_section["lrc_display_5"],
+            results_section["lrc_display_6"],
+            results_section["lrc_display_7"],
+            results_section["lrc_display_8"],
             results_section["lm_metadata_state"],
             results_section["is_format_caption_state"],
             results_section["current_batch_index"],
@@ -546,6 +539,30 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             results_section["score_display_6"],
             results_section["score_display_7"],
             results_section["score_display_8"],
+            results_section["codes_display_1"],
+            results_section["codes_display_2"],
+            results_section["codes_display_3"],
+            results_section["codes_display_4"],
+            results_section["codes_display_5"],
+            results_section["codes_display_6"],
+            results_section["codes_display_7"],
+            results_section["codes_display_8"],
+            results_section["lrc_display_1"],
+            results_section["lrc_display_2"],
+            results_section["lrc_display_3"],
+            results_section["lrc_display_4"],
+            results_section["lrc_display_5"],
+            results_section["lrc_display_6"],
+            results_section["lrc_display_7"],
+            results_section["lrc_display_8"],
+            results_section["details_accordion_1"],
+            results_section["details_accordion_2"],
+            results_section["details_accordion_3"],
+            results_section["details_accordion_4"],
+            results_section["details_accordion_5"],
+            results_section["details_accordion_6"],
+            results_section["details_accordion_7"],
+            results_section["details_accordion_8"],
             results_section["restore_params_btn"],
         ]
     )
@@ -590,6 +607,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["constrained_decoding_debug"],
             generation_section["allow_lm_batch"],
             generation_section["auto_score"],
+            generation_section["auto_lrc"],
             generation_section["score_scale"],
             generation_section["lm_batch_chunk_size"],
             generation_section["track_name"],
@@ -629,6 +647,30 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             results_section["score_display_6"],
             results_section["score_display_7"],
             results_section["score_display_8"],
+            results_section["codes_display_1"],
+            results_section["codes_display_2"],
+            results_section["codes_display_3"],
+            results_section["codes_display_4"],
+            results_section["codes_display_5"],
+            results_section["codes_display_6"],
+            results_section["codes_display_7"],
+            results_section["codes_display_8"],
+            results_section["lrc_display_1"],
+            results_section["lrc_display_2"],
+            results_section["lrc_display_3"],
+            results_section["lrc_display_4"],
+            results_section["lrc_display_5"],
+            results_section["lrc_display_6"],
+            results_section["lrc_display_7"],
+            results_section["lrc_display_8"],
+            results_section["details_accordion_1"],
+            results_section["details_accordion_2"],
+            results_section["details_accordion_3"],
+            results_section["details_accordion_4"],
+            results_section["details_accordion_5"],
+            results_section["details_accordion_6"],
+            results_section["details_accordion_7"],
+            results_section["details_accordion_8"],
             results_section["restore_params_btn"],
         ]
     ).then(
@@ -658,14 +700,6 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         ],
         outputs=[
             generation_section["text2music_audio_code_string"],
-            generation_section["text2music_audio_code_string_1"],
-            generation_section["text2music_audio_code_string_2"],
-            generation_section["text2music_audio_code_string_3"],
-            generation_section["text2music_audio_code_string_4"],
-            generation_section["text2music_audio_code_string_5"],
-            generation_section["text2music_audio_code_string_6"],
-            generation_section["text2music_audio_code_string_7"],
-            generation_section["text2music_audio_code_string_8"],
             generation_section["captions"],
             generation_section["lyrics"],
             generation_section["bpm"],
@@ -687,3 +721,16 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["complete_track_classes"],
         ]
     )
+    
+    # ========== LRC Display Change Handlers ==========
+    # When lrc_display textbox changes, update the corresponding audio component's subtitles
+    for i in range(1, 9):
+        results_section[f"lrc_display_{i}"].change(
+            fn=res_h.update_audio_subtitles_from_lrc,
+            inputs=[
+                results_section[f"lrc_display_{i}"],
+                results_section[f"generated_audio_{i}"],
+                generation_section["audio_duration"],
+            ],
+            outputs=[results_section[f"generated_audio_{i}"]]
+        )

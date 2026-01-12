@@ -6,16 +6,99 @@ import os
 import json
 import datetime
 import math
+import re
 import tempfile
 import shutil
 import zipfile
 import time as time_module
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import gradio as gr
 from loguru import logger
 from acestep.gradio_ui.i18n import t
 from acestep.inference import generate_music, GenerationParams, GenerationConfig
 from acestep.audio_utils import save_audio
+
+
+def parse_lrc_to_subtitles(lrc_text: str, total_duration: Optional[float] = None) -> List[Dict[str, Any]]:
+    """
+    Parse LRC lyrics text to Gradio subtitles format.
+    
+    LRC format: [MM:SS.ss]Lyric text or [MM:SS.ss][MM:SS.ss]Lyric text (with end time)
+    Gradio subtitles format: [{"text": str, "timestamp": [start, end]}]
+    
+    Args:
+        lrc_text: LRC format lyrics string
+        total_duration: Total audio duration in seconds (used for last line's end time)
+        
+    Returns:
+        List of subtitle dictionaries for Gradio Audio component
+    """
+    if not lrc_text or not lrc_text.strip():
+        return []
+    
+    subtitles = []
+    lines = lrc_text.strip().split('\n')
+    
+    # Regex patterns for LRC timestamps
+    # Pattern 1: [MM:SS.ss] - standard LRC with start time only
+    # Pattern 2: [MM:SS.ss][MM:SS.ss] - LRC with both start and end time
+    timestamp_pattern = r'\[(\d{2}):(\d{2})\.(\d{2})\]'
+    
+    parsed_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Find all timestamps in the line
+        timestamps = re.findall(timestamp_pattern, line)
+        if not timestamps:
+            continue
+        
+        # Remove timestamps from text to get the lyric content
+        text = re.sub(timestamp_pattern, '', line).strip()
+        if not text:
+            continue
+        
+        # Parse first timestamp as start time
+        start_minutes, start_seconds, start_centiseconds = timestamps[0]
+        start_time = int(start_minutes) * 60 + int(start_seconds) + int(start_centiseconds) / 100.0
+        
+        # If there's a second timestamp, use it as end time
+        end_time = None
+        if len(timestamps) >= 2:
+            end_minutes, end_seconds, end_centiseconds = timestamps[1]
+            end_time = int(end_minutes) * 60 + int(end_seconds) + int(end_centiseconds) / 100.0
+        
+        parsed_lines.append({
+            'start': start_time,
+            'end': end_time,
+            'text': text
+        })
+    
+    # Sort by start time
+    parsed_lines.sort(key=lambda x: x['start'])
+    
+    # Fill in missing end times using next line's start time
+    for i, line_data in enumerate(parsed_lines):
+        if line_data['end'] is None:
+            if i + 1 < len(parsed_lines):
+                # Use next line's start time as end time
+                line_data['end'] = parsed_lines[i + 1]['start']
+            elif total_duration is not None:
+                # Use total duration for last line
+                line_data['end'] = total_duration
+            else:
+                # Default: add 5 seconds if no duration info
+                line_data['end'] = line_data['start'] + 5.0
+        
+        subtitles.append({
+            'text': line_data['text'],
+            'timestamp': [line_data['start'], line_data['end']]
+        })
+    
+    return subtitles
 
 
 def _build_generation_info(
@@ -99,13 +182,16 @@ def _build_generation_info(
         # Post-processing time costs
         audio_conversion_time = time_costs.get('audio_conversion_time', 0.0)
         auto_score_time = time_costs.get('auto_score_time', 0.0)
+        auto_lrc_time = time_costs.get('auto_lrc_time', 0.0)
         
-        if audio_conversion_time > 0 or auto_score_time > 0:
+        if audio_conversion_time > 0 or auto_score_time > 0 or auto_lrc_time > 0:
             time_lines.append("\n**🔧 Post-processing Time:**")
             if audio_conversion_time > 0:
                 time_lines.append(f"  - Audio Conversion: {audio_conversion_time:.2f}s")
             if auto_score_time > 0:
                 time_lines.append(f"  - Auto Score: {auto_score_time:.2f}s")
+            if auto_lrc_time > 0:
+                time_lines.append(f"  - Auto LRC: {auto_lrc_time:.2f}s")
         
         # Pipeline total
         pipeline_total = time_costs.get('pipeline_total_time', 0.0)
@@ -276,6 +362,7 @@ def generate_with_progress(
     constrained_decoding_debug,
     allow_lm_batch,
     auto_score,
+    auto_lrc,
     score_scale,
     lm_batch_chunk_size,
     progress=gr.Progress(track_tqdm=True),
@@ -357,6 +444,11 @@ def generate_with_progress(
     # Initialize post-processing timing
     audio_conversion_start_time = time_module.time()
     total_auto_score_time = 0.0
+    total_auto_lrc_time = 0.0
+    
+    # Initialize LRC storage for auto_lrc
+    final_lrcs_list = [""] * 8
+    final_subtitles_list = [None] * 8
     
     updated_audio_codes = text2music_audio_code_string if not think_checkbox else ""
     
@@ -370,11 +462,52 @@ def generate_with_progress(
     )
     
     if not result.success:
-        yield (None,) * 8 + (None, generation_info, result.status_message) + (gr.skip(),) * 20 + (None,)  # +1 for extra_outputs
+        # Structure: 8 audio + batch_files + gen_info + status + seed + 8 scores + 8 codes_display + 8 accordions + 8 lrc_display + lm_meta + is_format + extra_outputs + raw_codes
+        yield (
+            (None,) * 8 +  # audio outputs
+            (None, generation_info, result.status_message, gr.skip()) +  # batch_files, gen_info, status, seed
+            (gr.skip(),) * 8 +  # scores
+            (gr.skip(),) * 8 +  # codes_display
+            (gr.skip(),) * 8 +  # details_accordion
+            (gr.skip(),) * 8 +  # lrc_display
+            (None, is_format_caption, None, None)  # lm_meta, is_format, extra_outputs, raw_codes
+        )
         return
     
     audios = result.audios
     progress(0.99, "Converting audio to mp3...")
+    
+    # Clear all scores, codes, and lrc displays at the start of generation
+    # Note: Create independent gr.update objects (not references to the same object)
+    clear_scores = [gr.update(value="", visible=False) for _ in range(8)]
+    clear_codes = [gr.update(value="", visible=False) for _ in range(8)]
+    clear_lrcs = [gr.update(value="", visible=False) for _ in range(8)]
+    clear_accordions = [gr.update(visible=False) for _ in range(8)]
+    yield (
+        # Audio outputs (keep as skip, will be updated in loop)
+        gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+        None,  # all_audio_paths (clear batch files)
+        generation_info,
+        "Clearing previous results...",
+        gr.skip(),  # seed
+        # Clear scores
+        clear_scores[0], clear_scores[1], clear_scores[2], clear_scores[3],
+        clear_scores[4], clear_scores[5], clear_scores[6], clear_scores[7],
+        # Clear codes display
+        clear_codes[0], clear_codes[1], clear_codes[2], clear_codes[3],
+        clear_codes[4], clear_codes[5], clear_codes[6], clear_codes[7],
+        # Clear accordions
+        clear_accordions[0], clear_accordions[1], clear_accordions[2], clear_accordions[3],
+        clear_accordions[4], clear_accordions[5], clear_accordions[6], clear_accordions[7],
+        # Clear lrc displays
+        clear_lrcs[0], clear_lrcs[1], clear_lrcs[2], clear_lrcs[3],
+        clear_lrcs[4], clear_lrcs[5], clear_lrcs[6], clear_lrcs[7],
+        lm_generated_metadata,
+        is_format_caption,
+        None,  # extra_outputs placeholder
+        None,  # raw_codes placeholder
+    )
+    
     for i in range(8):
         if i < len(audios):
             key = audios[i]["key"]
@@ -395,7 +528,7 @@ def generate_with_progress(
             code_str = audio_params.get("audio_codes", "")
             final_codes_list[i] = code_str
             
-            scores_ui_updates = [gr.skip()] * 8
+            scores_ui_updates = [gr.skip() for _ in range(8)]
             score_str = "Done!"
             if auto_score:
                 auto_score_start = time_module.time()
@@ -405,12 +538,82 @@ def generate_with_progress(
             scores_ui_updates[i] = score_str
             final_scores_list[i] = score_str
             
+            # Auto LRC generation
+            if auto_lrc:
+                auto_lrc_start = time_module.time()
+                logger.info(f"[auto_lrc] Starting LRC generation for sample {i + 1}")
+                try:
+                    # Get extra_outputs for this sample
+                    pred_latents = result.extra_outputs.get("pred_latents")
+                    encoder_hidden_states = result.extra_outputs.get("encoder_hidden_states")
+                    encoder_attention_mask = result.extra_outputs.get("encoder_attention_mask")
+                    context_latents = result.extra_outputs.get("context_latents")
+                    lyric_token_idss = result.extra_outputs.get("lyric_token_idss")
+                    
+                    logger.info(f"[auto_lrc] pred_latents: {pred_latents is not None}, encoder_hidden_states: {encoder_hidden_states is not None}, encoder_attention_mask: {encoder_attention_mask is not None}, context_latents: {context_latents is not None}, lyric_token_idss: {lyric_token_idss is not None}")
+                    
+                    if all(x is not None for x in [pred_latents, encoder_hidden_states, encoder_attention_mask, context_latents, lyric_token_idss]):
+                        # Extract single sample tensors
+                        sample_pred_latent = pred_latents[i:i+1]
+                        sample_encoder_hidden_states = encoder_hidden_states[i:i+1]
+                        sample_encoder_attention_mask = encoder_attention_mask[i:i+1]
+                        sample_context_latents = context_latents[i:i+1]
+                        sample_lyric_token_ids = lyric_token_idss[i:i+1]
+                        
+                        # Calculate actual duration
+                        actual_duration = audio_duration
+                        if actual_duration is None or actual_duration <= 0:
+                            latent_length = pred_latents.shape[1]
+                            actual_duration = latent_length / 25.0  # 25 Hz latent rate
+                        
+                        lrc_result = dit_handler.get_lyric_timestamp(
+                            pred_latent=sample_pred_latent,
+                            encoder_hidden_states=sample_encoder_hidden_states,
+                            encoder_attention_mask=sample_encoder_attention_mask,
+                            context_latents=sample_context_latents,
+                            lyric_token_ids=sample_lyric_token_ids,
+                            total_duration_seconds=float(actual_duration),
+                            vocal_language=vocal_language or "en",
+                            inference_steps=int(inference_steps),
+                            seed=42,
+                        )
+                        
+                        logger.info(f"[auto_lrc] LRC result for sample {i + 1}: success={lrc_result.get('success')}")
+                        if lrc_result.get("success"):
+                            lrc_text = lrc_result.get("lrc_text", "")
+                            final_lrcs_list[i] = lrc_text
+                            logger.info(f"[auto_lrc] LRC text length for sample {i + 1}: {len(lrc_text)}")
+                            # Parse LRC to subtitles format
+                            subtitles_data = parse_lrc_to_subtitles(lrc_text, total_duration=float(actual_duration))
+                            final_subtitles_list[i] = subtitles_data
+                    else:
+                        logger.warning(f"[auto_lrc] Missing required extra_outputs for sample {i + 1}")
+                except Exception as e:
+                    logger.warning(f"[auto_lrc] Failed to generate LRC for sample {i + 1}: {e}")
+                auto_lrc_end = time_module.time()
+                total_auto_lrc_time += (auto_lrc_end - auto_lrc_start)
+            
             status_message = f"Encoding & Ready: {i+1}/{len(audios)}"
-            current_audio_updates = [gr.skip()] * 8
+            current_audio_updates = [gr.skip() for _ in range(8)]
+            # Always set audio path first, subtitles will be applied via Audio component's subtitles parameter
             current_audio_updates[i] = audio_path
 
-            audio_codes_ui_updates = [gr.skip()] * 8
-            audio_codes_ui_updates[i] = code_str
+            # Codes display updates (for results section)
+            codes_display_updates = [gr.skip() for _ in range(8)]
+            codes_display_updates[i] = gr.update(value=code_str, visible=bool(code_str))
+            
+            # LRC display updates
+            lrc_display_updates = [gr.skip() for _ in range(8)]
+            has_lrc = bool(final_lrcs_list[i])
+            if auto_lrc and has_lrc:
+                lrc_display_updates[i] = gr.update(value=final_lrcs_list[i], visible=True)
+            
+            # Details accordion updates (show if code OR lrc OR score exists)
+            details_accordion_updates = [gr.skip() for _ in range(8)]
+            has_score = bool(score_str) and score_str != "Done!"
+            has_content = bool(code_str) or has_lrc or has_score
+            details_accordion_updates[i] = gr.update(visible=has_content)
+            
             yield (
                 current_audio_updates[0], current_audio_updates[1], current_audio_updates[2], current_audio_updates[3],
                 current_audio_updates[4], current_audio_updates[5], current_audio_updates[6], current_audio_updates[7],
@@ -420,13 +623,19 @@ def generate_with_progress(
                 seed_value_for_ui,
                 # Scores
                 scores_ui_updates[0], scores_ui_updates[1], scores_ui_updates[2], scores_ui_updates[3], scores_ui_updates[4], scores_ui_updates[5], scores_ui_updates[6], scores_ui_updates[7],
-                updated_audio_codes,
-                # Codes
-                audio_codes_ui_updates[0], audio_codes_ui_updates[1], audio_codes_ui_updates[2], audio_codes_ui_updates[3],
-                audio_codes_ui_updates[4], audio_codes_ui_updates[5], audio_codes_ui_updates[6], audio_codes_ui_updates[7],
+                # Codes display in results section
+                codes_display_updates[0], codes_display_updates[1], codes_display_updates[2], codes_display_updates[3],
+                codes_display_updates[4], codes_display_updates[5], codes_display_updates[6], codes_display_updates[7],
+                # Details accordion visibility
+                details_accordion_updates[0], details_accordion_updates[1], details_accordion_updates[2], details_accordion_updates[3],
+                details_accordion_updates[4], details_accordion_updates[5], details_accordion_updates[6], details_accordion_updates[7],
+                # LRC display
+                lrc_display_updates[0], lrc_display_updates[1], lrc_display_updates[2], lrc_display_updates[3],
+                lrc_display_updates[4], lrc_display_updates[5], lrc_display_updates[6], lrc_display_updates[7],
                 lm_generated_metadata,
                 is_format_caption,
                 None,  # Placeholder for extra_outputs (only filled in final yield)
+                None,  # Placeholder for raw_codes_list (only filled in final yield)
             )
         else:
             # If i exceeds the generated count (e.g., batch=2, i=2..7), do not yield
@@ -442,10 +651,12 @@ def generate_with_progress(
         time_costs['audio_conversion_time'] = audio_conversion_time
     if total_auto_score_time > 0:
         time_costs['auto_score_time'] = total_auto_score_time
+    if total_auto_lrc_time > 0:
+        time_costs['auto_lrc_time'] = total_auto_lrc_time
     
     # Update pipeline total time to include post-processing
     if 'pipeline_total_time' in time_costs:
-        time_costs['pipeline_total_time'] += audio_conversion_time + total_auto_score_time
+        time_costs['pipeline_total_time'] += audio_conversion_time + total_auto_score_time + total_auto_lrc_time
     
     # Rebuild generation_info with complete timing information
     generation_info = _build_generation_info(
@@ -456,6 +667,23 @@ def generate_with_progress(
         num_audios=len(result.audios),
     )
     
+    # Build final codes display, LRC display, and accordion visibility updates
+    final_codes_display_updates = []
+    final_lrc_display_updates = []
+    final_accordion_updates = []
+    for i in range(8):
+        code_str = final_codes_list[i]
+        lrc_text = final_lrcs_list[i]
+        score_str = final_scores_list[i]
+        has_code = bool(code_str)
+        has_lrc = bool(lrc_text)
+        has_score = bool(score_str) and score_str != "Done!"
+        # Show accordion if code OR LRC OR score exists
+        has_content = has_code or has_lrc or has_score
+        final_codes_display_updates.append(gr.update(value=code_str, visible=has_code))
+        final_lrc_display_updates.append(gr.update(value=lrc_text, visible=has_lrc))
+        final_accordion_updates.append(gr.update(visible=has_content))
+    
     yield (
         gr.skip(), gr.skip(), gr.skip(), gr.skip(), # Audio 1-4: SKIP
         gr.skip(), gr.skip(), gr.skip(), gr.skip(), # Audio 5-8: SKIP
@@ -465,12 +693,23 @@ def generate_with_progress(
         seed_value_for_ui,
         final_scores_list[0], final_scores_list[1], final_scores_list[2], final_scores_list[3],
         final_scores_list[4], final_scores_list[5], final_scores_list[6], final_scores_list[7],
-        updated_audio_codes,
-        final_codes_list[0], final_codes_list[1], final_codes_list[2], final_codes_list[3],
-        final_codes_list[4], final_codes_list[5], final_codes_list[6], final_codes_list[7],
+        # Codes display in results section
+        final_codes_display_updates[0], final_codes_display_updates[1], final_codes_display_updates[2], final_codes_display_updates[3],
+        final_codes_display_updates[4], final_codes_display_updates[5], final_codes_display_updates[6], final_codes_display_updates[7],
+        # Details accordion visibility
+        final_accordion_updates[0], final_accordion_updates[1], final_accordion_updates[2], final_accordion_updates[3],
+        final_accordion_updates[4], final_accordion_updates[5], final_accordion_updates[6], final_accordion_updates[7],
+        # LRC display
+        final_lrc_display_updates[0], final_lrc_display_updates[1], final_lrc_display_updates[2], final_lrc_display_updates[3],
+        final_lrc_display_updates[4], final_lrc_display_updates[5], final_lrc_display_updates[6], final_lrc_display_updates[7],
         lm_generated_metadata,
         is_format_caption,
-        result.extra_outputs,  # extra_outputs for LRC generation
+        {
+            **result.extra_outputs,
+            "lrcs": final_lrcs_list,
+            "subtitles": final_subtitles_list,
+        },  # extra_outputs for LRC generation (with auto_lrc results)
+        final_codes_list,  # Raw codes list for batch storage (index 47)
     )
 
 
@@ -652,6 +891,7 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
     
     This function retrieves cached generation data from batch_queue and calls
     the handler's get_lyric_timestamp method to generate LRC format lyrics.
+    Audio subtitles are automatically updated via lrc_display.change() event.
     
     Args:
         dit_handler: DiT handler instance with get_lyric_timestamp method
@@ -662,19 +902,19 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
         inference_steps: Number of inference steps used in generation
     
     Returns:
-        LRC formatted string or error message
+        Tuple of (lrc_display_update, details_accordion_update, batch_queue)
     """
     import torch
     
     if current_batch_index not in batch_queue:
-        return gr.skip(), gr.skip()
+        return gr.skip(), gr.skip(), batch_queue
     
     batch_data = batch_queue[current_batch_index]
     extra_outputs = batch_data.get("extra_outputs", {})
     
     # Check if required data is available
     if not extra_outputs:
-        return gr.update(value=t("messages.lrc_no_extra_outputs"), visible=True), gr.update(visible=True)
+        return gr.update(value=t("messages.lrc_no_extra_outputs"), visible=True), gr.update(visible=True), batch_queue
     
     pred_latents = extra_outputs.get("pred_latents")
     encoder_hidden_states = extra_outputs.get("encoder_hidden_states")
@@ -683,7 +923,7 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
     lyric_token_idss = extra_outputs.get("lyric_token_idss")
     
     if any(x is None for x in [pred_latents, encoder_hidden_states, encoder_attention_mask, context_latents, lyric_token_idss]):
-        return gr.update(value=t("messages.lrc_missing_tensors"), visible=True), gr.update(visible=True)
+        return gr.update(value=t("messages.lrc_missing_tensors"), visible=True), gr.update(visible=True), batch_queue
     
     # Adjust sample_idx to 0-based
     sample_idx_0based = sample_idx - 1
@@ -691,7 +931,7 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
     # Check if sample exists in batch
     batch_size = pred_latents.shape[0]
     if sample_idx_0based >= batch_size:
-        return gr.update(value=t("messages.lrc_sample_not_exist"), visible=True), gr.update(visible=True)
+        return gr.update(value=t("messages.lrc_sample_not_exist"), visible=True), gr.update(visible=True), batch_queue
     
     # Extract the specific sample's data
     try:
@@ -729,15 +969,72 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
         if result.get("success"):
             lrc_text = result.get("lrc_text", "")
             if not lrc_text:
-                return gr.update(value=t("messages.lrc_empty_result"), visible=True), gr.update(visible=True)
-            return gr.update(value=lrc_text, visible=True), gr.update(visible=True)
+                return gr.update(value=t("messages.lrc_empty_result"), visible=True), gr.update(visible=True), batch_queue
+            
+            # Store LRC in batch_queue for later retrieval when switching batches
+            if "lrcs" not in batch_queue[current_batch_index]:
+                batch_queue[current_batch_index]["lrcs"] = [""] * 8
+            batch_queue[current_batch_index]["lrcs"][sample_idx_0based] = lrc_text
+            
+            # Parse LRC to subtitles format for storage (audio subtitles will be updated via lrc_display.change())
+            subtitles_data = parse_lrc_to_subtitles(lrc_text, total_duration=float(audio_duration))
+            
+            # Store subtitles in batch_queue for batch navigation
+            if "subtitles" not in batch_queue[current_batch_index]:
+                batch_queue[current_batch_index]["subtitles"] = [None] * 8
+            batch_queue[current_batch_index]["subtitles"][sample_idx_0based] = subtitles_data
+            
+            # Return: lrc_display, details_accordion, batch_queue
+            # Audio subtitles are automatically updated via lrc_display.change() event
+            return (
+                gr.update(value=lrc_text, visible=True),
+                gr.update(visible=True),
+                batch_queue
+            )
         else:
             error_msg = result.get("error", "Unknown error")
-            return gr.update(value=f"❌ {error_msg}", visible=True), gr.update(visible=True)
+            return gr.update(value=f"❌ {error_msg}", visible=True), gr.update(visible=True), batch_queue
             
     except Exception as e:
         logger.exception("[generate_lrc_handler] Error generating LRC")
-        return gr.update(value=f"❌ Error: {str(e)}", visible=True), gr.update(visible=True)
+        return gr.update(value=f"❌ Error: {str(e)}", visible=True), gr.update(visible=True), batch_queue
+
+
+def update_audio_subtitles_from_lrc(lrc_text: str, audio_component_value, audio_duration: float = None):
+    """
+    Update Audio component's subtitles based on LRC text content.
+    
+    This function is triggered when lrc_display textbox changes.
+    It parses the LRC text and updates the corresponding Audio component's subtitles.
+    
+    Args:
+        lrc_text: LRC format lyrics string from lrc_display textbox
+        audio_component_value: Current value of the audio component (path or dict)
+        audio_duration: Optional audio duration for calculating last line's end time
+        
+    Returns:
+        gr.update for the Audio component with subtitles
+    """
+    # If no LRC text, skip update (don't clear subtitles to avoid flickering)
+    if not lrc_text or not lrc_text.strip():
+        return gr.skip()
+    
+    # Get audio path from component value
+    audio_path = None
+    if audio_component_value:
+        if isinstance(audio_component_value, dict):
+            audio_path = audio_component_value.get("path") or audio_component_value.get("value")
+        else:
+            audio_path = audio_component_value
+    
+    if not audio_path:
+        return gr.skip()
+    
+    # Parse LRC to subtitles format
+    subtitles_data = parse_lrc_to_subtitles(lrc_text, total_duration=audio_duration)
+    
+    # Return updated audio with subtitles
+    return gr.update(value=audio_path, subtitles=subtitles_data if subtitles_data else None)
 
 
 def capture_current_params(
@@ -749,7 +1046,7 @@ def capture_current_params(
     use_adg, cfg_interval_start, cfg_interval_end, shift, audio_format, lm_temperature,
     think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
     use_cot_metas, use_cot_caption, use_cot_language,
-    constrained_decoding_debug, allow_lm_batch, auto_score, score_scale, lm_batch_chunk_size,
+    constrained_decoding_debug, allow_lm_batch, auto_score, auto_lrc, score_scale, lm_batch_chunk_size,
     track_name, complete_track_classes
 ):
     """Capture current UI parameters for next batch generation
@@ -796,6 +1093,7 @@ def capture_current_params(
         "constrained_decoding_debug": constrained_decoding_debug,
         "allow_lm_batch": allow_lm_batch,
         "auto_score": auto_score,
+        "auto_lrc": auto_lrc,
         "score_scale": score_scale,
         "lm_batch_chunk_size": lm_batch_chunk_size,
         "track_name": track_name,
@@ -816,6 +1114,7 @@ def generate_with_batch_management(
     constrained_decoding_debug,
     allow_lm_batch,
     auto_score,
+    auto_lrc,
     score_scale,
     lm_batch_chunk_size,
     track_name,
@@ -844,6 +1143,7 @@ def generate_with_batch_management(
         constrained_decoding_debug,
         allow_lm_batch,
         auto_score,
+        auto_lrc,
         score_scale,
         lm_batch_chunk_size,
         progress
@@ -853,8 +1153,8 @@ def generate_with_batch_management(
         final_result_from_inner = partial_result
         # current_batch_index, total_batches, batch_queue, next_params, 
         # batch_indicator_text, prev_btn, next_btn, next_status, restore_btn
-        # Slice off extra_outputs (last item) before re-yielding to UI
-        ui_result = partial_result[:-1] if len(partial_result) > 31 else partial_result
+        # Slice off extra_outputs and raw_codes_list (last 2 items) before re-yielding to UI
+        ui_result = partial_result[:-2] if len(partial_result) > 47 else (partial_result[:-1] if len(partial_result) > 46 else partial_result)
         yield ui_result + (
             gr.skip(), gr.skip(), gr.skip(), gr.skip(), 
             gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
@@ -863,8 +1163,8 @@ def generate_with_batch_management(
     all_audio_paths = result[8]
 
     if all_audio_paths is None:
-        # Slice off extra_outputs before yielding to UI
-        ui_result = result[:-1] if len(result) > 31 else result
+        # Slice off extra_outputs and raw_codes_list before yielding to UI
+        ui_result = result[:-2] if len(result) > 47 else (result[:-1] if len(result) > 46 else result)
         yield ui_result + (
             gr.skip(), gr.skip(), gr.skip(), gr.skip(), 
             gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
@@ -872,14 +1172,18 @@ def generate_with_batch_management(
         return
 
     # Extract results from generation (使用 result 下标访问)
-    # New indices after removing 6 align_* items (was 12-17, now shifted down by 6)
+    # New structure after UI refactor (with lrc_display added):
+    # 0-7: audio_outputs, 8: all_audio_paths, 9: generation_info, 10: status, 11: seed
+    # 12-19: scores, 20-27: codes_display, 28-35: details_accordion, 36-43: lrc_display
+    # 44: lm_metadata, 45: is_format_caption, 46: extra_outputs, 47: raw_codes_list
     generation_info = result[9]
     seed_value_for_ui = result[11]
-    lm_generated_metadata = result[29]  # was 35, now 29
+    lm_generated_metadata = result[44]
     
-    # Extract codes
-    generated_codes_single = result[20]  # was 26, now 20
-    generated_codes_batch = [result[21], result[22], result[23], result[24], result[25], result[26], result[27], result[28]]  # was 27-34, now 21-28
+    # Extract raw codes list directly (index 47)
+    raw_codes_list = result[47] if len(result) > 47 else [""] * 8
+    generated_codes_batch = raw_codes_list if isinstance(raw_codes_list, list) else [""] * 8
+    generated_codes_single = generated_codes_batch[0] if generated_codes_batch else ""
 
     # Determine which codes to store based on mode
     if allow_lm_batch and batch_size_input >= 2:
@@ -926,6 +1230,7 @@ def generate_with_batch_management(
         "constrained_decoding_debug": constrained_decoding_debug,
         "allow_lm_batch": allow_lm_batch,
         "auto_score": auto_score,
+        "auto_lrc": auto_lrc,
         "score_scale": score_scale,
         "lm_batch_chunk_size": lm_batch_chunk_size,
         "track_name": track_name,
@@ -938,8 +1243,9 @@ def generate_with_batch_management(
     next_params["text2music_audio_code_string"] = ""
     next_params["random_seed_checkbox"] = True
     
-    # Extract extra_outputs from result tuple (index 31)
-    extra_outputs_from_result = result[31] if len(result) > 31 else {}
+    # Extract extra_outputs from result tuple (index 46 after adding lrc_display)
+    # Note: index 47 is raw_codes_list which we already extracted above
+    extra_outputs_from_result = result[46] if len(result) > 46 else {}
     
     # Store current batch in queue
     batch_queue = store_batch_in_queue(
@@ -957,6 +1263,13 @@ def generate_with_batch_management(
         status="completed"
     )
     
+    # Extract auto_lrc results from extra_outputs (generated in generate_with_progress)
+    if auto_lrc and extra_outputs_from_result:
+        lrcs_from_extra = extra_outputs_from_result.get("lrcs", [""] * 8)
+        subtitles_from_extra = extra_outputs_from_result.get("subtitles", [None] * 8)
+        batch_queue[current_batch_index]["lrcs"] = lrcs_from_extra
+        batch_queue[current_batch_index]["subtitles"] = subtitles_from_extra
+    
     # Update batch counters
     total_batches = max(total_batches, current_batch_index + 1)
     
@@ -973,8 +1286,14 @@ def generate_with_batch_management(
 
     # 4. Yield final result (includes Batch UI updates)
     # The result here is already a tuple structure
-    # Slice off extra_outputs (last item) before yielding to UI - it's already stored in batch_queue
-    ui_result = result[:-1] if len(result) > 31 else result
+    # Slice off extra_outputs and raw_codes_list (last 2 items) before yielding to UI - they're already stored in batch_queue
+    # New structure (with lrc_display):
+    # 0-7: audio_outputs, 8: all_audio_paths, 9: generation_info, 10: status, 11: seed
+    # 12-19: scores, 20-27: codes_display, 28-35: details_accordion, 36-43: lrc_display
+    # 44: lm_metadata, 45: is_format_caption, 46: extra_outputs, 47: raw_codes_list
+    # Note: Audio subtitles are already included in the intermediate yields from generate_with_progress
+    ui_result = result[:-2] if len(result) > 47 else (result[:-1] if len(result) > 46 else result)
+    
     yield ui_result + (
         current_batch_index,
         total_batches,
@@ -1086,6 +1405,7 @@ def generate_next_batch_background(
         params.setdefault("constrained_decoding_debug", False)
         params.setdefault("allow_lm_batch", True)
         params.setdefault("auto_score", False)
+        params.setdefault("auto_lrc", False)
         params.setdefault("score_scale", 0.5)
         params.setdefault("lm_batch_chunk_size", 8)
         params.setdefault("track_name", None)
@@ -1134,6 +1454,7 @@ def generate_next_batch_background(
             constrained_decoding_debug=params.get("constrained_decoding_debug"),
             allow_lm_batch=params.get("allow_lm_batch"),
             auto_score=params.get("auto_score"),
+            auto_lrc=params.get("auto_lrc"),
             score_scale=params.get("score_scale"),
             lm_batch_chunk_size=params.get("lm_batch_chunk_size"),
             progress=progress
@@ -1145,15 +1466,22 @@ def generate_next_batch_background(
             final_result = partial_result
         
         # Extract results from final_result
-        # Indices shifted by -6 after removing align_* items
+        # New structure after UI refactor (with lrc_display added):
+        # 0-7: audio_outputs, 8: all_audio_paths, 9: generation_info, 10: status, 11: seed
+        # 12-19: scores, 20-27: codes_display, 28-35: details_accordion, 36-43: lrc_display
+        # 44: lm_metadata, 45: is_format_caption, 46: extra_outputs, 47: raw_codes_list
         all_audio_paths = final_result[8]  # generated_audio_batch
         generation_info = final_result[9]
         seed_value_for_ui = final_result[11]
-        lm_generated_metadata = final_result[29]  # was 35, now 29
+        lm_generated_metadata = final_result[44]
         
-        # Extract codes
-        generated_codes_single = final_result[20]  # was 26, now 20
-        generated_codes_batch = [final_result[21], final_result[22], final_result[23], final_result[24], final_result[25], final_result[26], final_result[27], final_result[28]]  # was 27-34, now 21-28
+        # Extract raw codes list directly (index 47)
+        raw_codes_list = final_result[47] if len(final_result) > 47 else [""] * 8
+        generated_codes_batch = raw_codes_list if isinstance(raw_codes_list, list) else [""] * 8
+        generated_codes_single = generated_codes_batch[0] if generated_codes_batch else ""
+        
+        # Extract extra_outputs for LRC generation (index 46)
+        extra_outputs_from_bg = final_result[46] if len(final_result) > 46 else None
         
         # Determine which codes to store
         batch_size = params.get("batch_size_input", 2)
@@ -1168,6 +1496,7 @@ def generate_next_batch_background(
         logger.info(f"  - allow_lm_batch: {allow_lm_batch}")
         logger.info(f"  - batch_size: {batch_size}")
         logger.info(f"  - generated_codes_single exists: {bool(generated_codes_single)}")
+        logger.info(f"  - extra_outputs_from_bg exists: {extra_outputs_from_bg is not None}")
         if isinstance(codes_to_store, list):
             logger.info(f"  - codes_to_store: LIST with {len(codes_to_store)} items")
             for idx, code in enumerate(codes_to_store):
@@ -1176,7 +1505,6 @@ def generate_next_batch_background(
             logger.info(f"  - codes_to_store: STRING with {len(codes_to_store) if codes_to_store else 0} chars")
         
         # Store next batch in queue with codes, batch settings, and ALL generation params
-        # Note: extra_outputs not available for background batches (LRC not supported for auto-gen batches)
         batch_queue = store_batch_in_queue(
             batch_queue,
             next_batch_idx,
@@ -1188,7 +1516,7 @@ def generate_next_batch_background(
             batch_size=int(batch_size),
             generation_params=params,
             lm_generated_metadata=lm_generated_metadata,
-            extra_outputs=None,  # Not available for background batches
+            extra_outputs=extra_outputs_from_bg,  # Now properly extracted from generation result
             status="completed"
         )
         
@@ -1229,7 +1557,7 @@ def navigate_to_previous_batch(current_batch_index, batch_queue):
     """Navigate to previous batch (Result View Only - Never touches Input UI)"""
     if current_batch_index <= 0:
         gr.Warning(t("messages.at_first_batch"))
-        return [gr.update()] * 24
+        return [gr.update()] * 48  # 8 audio + 2 batch files/info + 1 index + 1 indicator + 2 btns + 1 status + 8 scores + 8 codes + 8 lrc + 8 accordions + 1 restore
     
     # Move to previous batch
     new_batch_index = current_batch_index - 1
@@ -1237,17 +1565,25 @@ def navigate_to_previous_batch(current_batch_index, batch_queue):
     # Load batch data from queue
     if new_batch_index not in batch_queue:
         gr.Warning(t("messages.batch_not_found", n=new_batch_index + 1))
-        return [gr.update()] * 24
+        return [gr.update()] * 48
     
     batch_data = batch_queue[new_batch_index]
     audio_paths = batch_data.get("audio_paths", [])
     generation_info_text = batch_data.get("generation_info", "")
     
-    # Prepare audio outputs (up to 8)
-    audio_outputs = [None] * 8
+    # Prepare audio outputs (up to 8) with subtitles
     real_audio_paths = [p for p in audio_paths if not p.lower().endswith('.json')]
-    for idx in range(min(len(real_audio_paths), 8)):
-        audio_outputs[idx] = real_audio_paths[idx]
+    stored_subtitles = batch_data.get("subtitles", [None] * 8)
+    
+    audio_updates = []
+    for idx in range(8):
+        if idx < len(real_audio_paths):
+            audio_path = real_audio_paths[idx]
+            subtitles_data = stored_subtitles[idx] if idx < len(stored_subtitles) else None
+            # Use gr.update to set both value and subtitles
+            audio_updates.append(gr.update(value=audio_path, subtitles=subtitles_data))
+        else:
+            audio_updates.append(gr.update(value=None, subtitles=None))
     
     # Update batch indicator
     total_batches = len(batch_queue)
@@ -1260,14 +1596,52 @@ def navigate_to_previous_batch(current_batch_index, batch_queue):
     stored_scores = batch_data.get("scores", [""] * 8)
     score_displays = stored_scores if stored_scores else [""] * 8
     
+    # Restore LRC displays from batch queue (clear if not stored)
+    stored_lrcs = batch_data.get("lrcs", [""] * 8)
+    lrc_displays = stored_lrcs if stored_lrcs else [""] * 8
+    
+    # Restore codes display from batch queue
+    stored_codes = batch_data.get("codes", "")
+    stored_allow_lm_batch = batch_data.get("allow_lm_batch", False)
+    batch_size = batch_data.get("batch_size", 2)
+    
+    codes_display_updates = []
+    lrc_display_updates = []
+    details_accordion_updates = []
+    for i in range(8):
+        if stored_allow_lm_batch and isinstance(stored_codes, list):
+            code_str = stored_codes[i] if i < len(stored_codes) else ""
+        else:
+            code_str = stored_codes if isinstance(stored_codes, str) and i == 0 else ""
+        
+        lrc_str = lrc_displays[i] if i < len(lrc_displays) else ""
+        score_str = score_displays[i] if i < len(score_displays) else ""
+        
+        has_code = bool(code_str) and i < batch_size
+        has_lrc = bool(lrc_str)
+        has_score = bool(score_str)
+        
+        # Show accordion if any content exists
+        has_content = has_code or has_lrc or has_score
+        
+        codes_display_updates.append(gr.update(value=code_str, visible=has_code))
+        lrc_display_updates.append(gr.update(value=lrc_str, visible=has_lrc))
+        details_accordion_updates.append(gr.update(visible=has_content))
+    
     return (
-        audio_outputs[0], audio_outputs[1], audio_outputs[2], audio_outputs[3],
-        audio_outputs[4], audio_outputs[5], audio_outputs[6], audio_outputs[7],
+        audio_updates[0], audio_updates[1], audio_updates[2], audio_updates[3],
+        audio_updates[4], audio_updates[5], audio_updates[6], audio_updates[7],
         audio_paths, generation_info_text, new_batch_index, batch_indicator_text,
         gr.update(interactive=can_go_previous), gr.update(interactive=can_go_next),
         t("messages.viewing_batch", n=new_batch_index + 1),
         score_displays[0], score_displays[1], score_displays[2], score_displays[3],
         score_displays[4], score_displays[5], score_displays[6], score_displays[7],
+        codes_display_updates[0], codes_display_updates[1], codes_display_updates[2], codes_display_updates[3],
+        codes_display_updates[4], codes_display_updates[5], codes_display_updates[6], codes_display_updates[7],
+        lrc_display_updates[0], lrc_display_updates[1], lrc_display_updates[2], lrc_display_updates[3],
+        lrc_display_updates[4], lrc_display_updates[5], lrc_display_updates[6], lrc_display_updates[7],
+        details_accordion_updates[0], details_accordion_updates[1], details_accordion_updates[2], details_accordion_updates[3],
+        details_accordion_updates[4], details_accordion_updates[5], details_accordion_updates[6], details_accordion_updates[7],
         gr.update(interactive=True),
     )
 
@@ -1276,7 +1650,7 @@ def navigate_to_next_batch(autogen_enabled, current_batch_index, total_batches, 
     """Navigate to next batch (Result View Only - Never touches Input UI)"""
     if current_batch_index >= total_batches - 1:
         gr.Warning(t("messages.at_last_batch"))
-        return [gr.update()] * 25
+        return [gr.update()] * 49  # 8 audio + 2 batch files/info + 1 index + 1 indicator + 2 btns + 1 status + 1 next_status + 8 scores + 8 codes + 8 lrc + 8 accordions + 1 restore
     
     # Move to next batch
     new_batch_index = current_batch_index + 1
@@ -1284,17 +1658,25 @@ def navigate_to_next_batch(autogen_enabled, current_batch_index, total_batches, 
     # Load batch data from queue
     if new_batch_index not in batch_queue:
         gr.Warning(t("messages.batch_not_found", n=new_batch_index + 1))
-        return [gr.update()] * 25
+        return [gr.update()] * 49
     
     batch_data = batch_queue[new_batch_index]
     audio_paths = batch_data.get("audio_paths", [])
     generation_info_text = batch_data.get("generation_info", "")
     
-    # Prepare audio outputs (up to 8)
-    audio_outputs = [None] * 8
+    # Prepare audio outputs (up to 8) with subtitles
     real_audio_paths = [p for p in audio_paths if not p.lower().endswith('.json')]
-    for idx in range(min(len(real_audio_paths), 8)):
-        audio_outputs[idx] = real_audio_paths[idx]
+    stored_subtitles = batch_data.get("subtitles", [None] * 8)
+    
+    audio_updates = []
+    for idx in range(8):
+        if idx < len(real_audio_paths):
+            audio_path = real_audio_paths[idx]
+            subtitles_data = stored_subtitles[idx] if idx < len(stored_subtitles) else None
+            # Use gr.update to set both value and subtitles
+            audio_updates.append(gr.update(value=audio_path, subtitles=subtitles_data))
+        else:
+            audio_updates.append(gr.update(value=None, subtitles=None))
     
     # Update batch indicator
     batch_indicator_text = update_batch_indicator(new_batch_index, total_batches)
@@ -1312,14 +1694,52 @@ def navigate_to_next_batch(autogen_enabled, current_batch_index, total_batches, 
     stored_scores = batch_data.get("scores", [""] * 8)
     score_displays = stored_scores if stored_scores else [""] * 8
     
+    # Restore LRC displays from batch queue (clear if not stored)
+    stored_lrcs = batch_data.get("lrcs", [""] * 8)
+    lrc_displays = stored_lrcs if stored_lrcs else [""] * 8
+    
+    # Restore codes display from batch queue
+    stored_codes = batch_data.get("codes", "")
+    stored_allow_lm_batch = batch_data.get("allow_lm_batch", False)
+    batch_size = batch_data.get("batch_size", 2)
+    
+    codes_display_updates = []
+    lrc_display_updates = []
+    details_accordion_updates = []
+    for i in range(8):
+        if stored_allow_lm_batch and isinstance(stored_codes, list):
+            code_str = stored_codes[i] if i < len(stored_codes) else ""
+        else:
+            code_str = stored_codes if isinstance(stored_codes, str) and i == 0 else ""
+        
+        lrc_str = lrc_displays[i] if i < len(lrc_displays) else ""
+        score_str = score_displays[i] if i < len(score_displays) else ""
+        
+        has_code = bool(code_str) and i < batch_size
+        has_lrc = bool(lrc_str)
+        has_score = bool(score_str)
+        
+        # Show accordion if any content exists
+        has_content = has_code or has_lrc or has_score
+        
+        codes_display_updates.append(gr.update(value=code_str, visible=has_code))
+        lrc_display_updates.append(gr.update(value=lrc_str, visible=has_lrc))
+        details_accordion_updates.append(gr.update(visible=has_content))
+    
     return (
-        audio_outputs[0], audio_outputs[1], audio_outputs[2], audio_outputs[3],
-        audio_outputs[4], audio_outputs[5], audio_outputs[6], audio_outputs[7],
+        audio_updates[0], audio_updates[1], audio_updates[2], audio_updates[3],
+        audio_updates[4], audio_updates[5], audio_updates[6], audio_updates[7],
         audio_paths, generation_info_text, new_batch_index, batch_indicator_text,
         gr.update(interactive=can_go_previous), gr.update(interactive=can_go_next),
         t("messages.viewing_batch", n=new_batch_index + 1), next_batch_status_text,
         score_displays[0], score_displays[1], score_displays[2], score_displays[3],
         score_displays[4], score_displays[5], score_displays[6], score_displays[7],
+        codes_display_updates[0], codes_display_updates[1], codes_display_updates[2], codes_display_updates[3],
+        codes_display_updates[4], codes_display_updates[5], codes_display_updates[6], codes_display_updates[7],
+        lrc_display_updates[0], lrc_display_updates[1], lrc_display_updates[2], lrc_display_updates[3],
+        lrc_display_updates[4], lrc_display_updates[5], lrc_display_updates[6], lrc_display_updates[7],
+        details_accordion_updates[0], details_accordion_updates[1], details_accordion_updates[2], details_accordion_updates[3],
+        details_accordion_updates[4], details_accordion_updates[5], details_accordion_updates[6], details_accordion_updates[7],
         gr.update(interactive=True),
     )
 
@@ -1331,7 +1751,7 @@ def restore_batch_parameters(current_batch_index, batch_queue):
     """
     if current_batch_index not in batch_queue:
         gr.Warning(t("messages.no_batch_data"))
-        return [gr.update()] * 29
+        return [gr.update()] * 20  # Updated count: 1 codes + 19 other params
     
     batch_data = batch_queue[current_batch_index]
     params = batch_data.get("generation_params", {})
@@ -1357,27 +1777,22 @@ def restore_batch_parameters(current_batch_index, batch_queue):
     track_name = params.get("track_name", None)
     complete_track_classes = params.get("complete_track_classes", [])
     
-    # Extract and process codes
+    # Extract codes - only restore to single input
     stored_codes = batch_data.get("codes", "")
-    stored_allow_lm_batch = params.get("allow_lm_batch", False)
-    
-    codes_outputs = [""] * 9  # [Main, 1-8]
     if stored_codes:
-        if stored_allow_lm_batch and isinstance(stored_codes, list):
-            # Batch mode: populate codes 1-8, main shows first
-            codes_outputs[0] = stored_codes[0] if stored_codes else ""
-            for idx in range(min(len(stored_codes), 8)):
-                codes_outputs[idx + 1] = stored_codes[idx]
+        if isinstance(stored_codes, list):
+            # Batch mode: use first codes for single input
+            codes_main = stored_codes[0] if stored_codes else ""
         else:
-            # Single mode: populate main, clear 1-8
-            codes_outputs[0] = stored_codes if isinstance(stored_codes, str) else (stored_codes[0] if stored_codes else "")
+            # Single mode
+            codes_main = stored_codes
+    else:
+        codes_main = ""
     
     gr.Info(t("messages.params_restored", n=current_batch_index + 1))
     
     return (
-        codes_outputs[0], codes_outputs[1], codes_outputs[2], codes_outputs[3],
-        codes_outputs[4], codes_outputs[5], codes_outputs[6], codes_outputs[7],
-        codes_outputs[8], captions, lyrics, bpm, key_scale, time_signature,
+        codes_main, captions, lyrics, bpm, key_scale, time_signature,
         vocal_language, audio_duration, batch_size_input, inference_steps,
         lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, think_checkbox,
         use_cot_caption, use_cot_language, allow_lm_batch,

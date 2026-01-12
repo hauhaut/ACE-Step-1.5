@@ -218,10 +218,9 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                                     size="sm"
                                 )
                         
-                    # Audio Codes for text2music (dynamic display based on batch size and allow_lm_batch)
+                    # Audio Codes for text2music - single input for transcription or cover task
                     with gr.Accordion(t("generation.lm_codes_hints"), open=False, visible=True) as text2music_audio_codes_group:
-                        # Single codes input (default mode)
-                        with gr.Row(equal_height=True, visible=True) as codes_single_row:
+                        with gr.Row(equal_height=True):
                             text2music_audio_code_string = gr.Textbox(
                                 label=t("generation.lm_codes_label"),
                                 placeholder=t("generation.lm_codes_placeholder"),
@@ -235,68 +234,6 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                                 size="sm",
                                 scale=1,
                             )
-                        
-                        # Multiple codes inputs (batch mode when allow_lm_batch is enabled)
-                        with gr.Row(visible=False) as codes_batch_row:
-                            with gr.Column(visible=True) as codes_col_1:
-                                text2music_audio_code_string_1 = gr.Textbox(
-                                    label=t("generation.lm_codes_sample", n=1),
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info=t("generation.lm_codes_sample_info", n=1),
-                                )
-                            with gr.Column(visible=True) as codes_col_2:
-                                text2music_audio_code_string_2 = gr.Textbox(
-                                    label=t("generation.lm_codes_sample", n=2),
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info=t("generation.lm_codes_sample_info", n=2),
-                                )
-                            with gr.Column(visible=False) as codes_col_3:
-                                text2music_audio_code_string_3 = gr.Textbox(
-                                    label=t("generation.lm_codes_sample", n=3),
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info=t("generation.lm_codes_sample_info", n=3),
-                                )
-                            with gr.Column(visible=False) as codes_col_4:
-                                text2music_audio_code_string_4 = gr.Textbox(
-                                    label=t("generation.lm_codes_sample", n=4),
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info=t("generation.lm_codes_sample_info", n=4),
-                                )
-                        
-                        # Additional row for codes 5-8
-                        with gr.Row(visible=False) as codes_batch_row_2:
-                            with gr.Column() as codes_col_5:
-                                text2music_audio_code_string_5 = gr.Textbox(
-                                    label=t("generation.lm_codes_sample", n=5),
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info=t("generation.lm_codes_sample_info", n=5),
-                                )
-                            with gr.Column() as codes_col_6:
-                                text2music_audio_code_string_6 = gr.Textbox(
-                                    label=t("generation.lm_codes_sample", n=6),
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info=t("generation.lm_codes_sample_info", n=6),
-                                )
-                            with gr.Column() as codes_col_7:
-                                text2music_audio_code_string_7 = gr.Textbox(
-                                    label=t("generation.lm_codes_sample", n=7),
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info=t("generation.lm_codes_sample_info", n=7),
-                                )
-                            with gr.Column() as codes_col_8:
-                                text2music_audio_code_string_8 = gr.Textbox(
-                                    label=t("generation.lm_codes_sample", n=8),
-                                    placeholder="<|audio_code_...|>",
-                                    lines=4,
-                                    info=t("generation.lm_codes_sample_info", n=8),
-                                )
                     
                     # Repainting controls
                     with gr.Group(visible=False) as repainting_group:
@@ -541,6 +478,12 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     info=t("generation.auto_score_info"),
                     scale=1,
                 )
+                auto_lrc = gr.Checkbox(
+                    label=t("generation.auto_lrc_label"),
+                    value=False,
+                    info=t("generation.auto_lrc_info"),
+                    scale=1,
+                )
                 lm_batch_chunk_size = gr.Number(
                     label=t("generation.lm_batch_chunk_label"),
                     value=8,
@@ -581,27 +524,30 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         # Set generate_btn to interactive if service is pre-initialized
         generate_btn_interactive = init_params.get('enable_generate', False) if service_pre_initialized else False
         with gr.Row(equal_height=True):
-            think_checkbox = gr.Checkbox(
-                label=t("generation.think_label"),
-                value=True,
-                scale=1,
-            )
-            allow_lm_batch = gr.Checkbox(
-                label=t("generation.parallel_thinking_label"),
-                value=True,
-                scale=1,
-            )
-            generate_btn = gr.Button(t("generation.generate_btn"), variant="primary", size="lg", interactive=generate_btn_interactive, scale=9)
-            autogen_checkbox = gr.Checkbox(
-                label=t("generation.autogen_label"),
-                value=True,
-                scale=1,
-            )
-            use_cot_caption = gr.Checkbox(
-                label=t("generation.caption_rewrite_label"),
-                value=True,
-                scale=1,
-            )
+            with gr.Column(scale=1, variant="compact"):
+                think_checkbox = gr.Checkbox(
+                    label=t("generation.think_label"),
+                    value=True,
+                    scale=1,
+                )
+                allow_lm_batch = gr.Checkbox(
+                    label=t("generation.parallel_thinking_label"),
+                    value=True,
+                    scale=1,
+                )
+            with gr.Column(scale=18):
+                generate_btn = gr.Button(t("generation.generate_btn"), variant="primary", size="lg", interactive=generate_btn_interactive)
+            with gr.Column(scale=1, variant="compact"):
+                autogen_checkbox = gr.Checkbox(
+                    label=t("generation.autogen_label"),
+                    value=True,
+                    scale=1,
+                )
+                use_cot_caption = gr.Checkbox(
+                    label=t("generation.caption_rewrite_label"),
+                    value=True,
+                    scale=1,
+                )
     
     return {
         "service_config_accordion": service_config_accordion,
@@ -669,25 +615,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         "score_scale": score_scale,
         "allow_lm_batch": allow_lm_batch,
         "auto_score": auto_score,
+        "auto_lrc": auto_lrc,
         "lm_batch_chunk_size": lm_batch_chunk_size,
-        "codes_single_row": codes_single_row,
-        "codes_batch_row": codes_batch_row,
-        "codes_batch_row_2": codes_batch_row_2,
-        "text2music_audio_code_string_1": text2music_audio_code_string_1,
-        "text2music_audio_code_string_2": text2music_audio_code_string_2,
-        "text2music_audio_code_string_3": text2music_audio_code_string_3,
-        "text2music_audio_code_string_4": text2music_audio_code_string_4,
-        "text2music_audio_code_string_5": text2music_audio_code_string_5,
-        "text2music_audio_code_string_6": text2music_audio_code_string_6,
-        "text2music_audio_code_string_7": text2music_audio_code_string_7,
-        "text2music_audio_code_string_8": text2music_audio_code_string_8,
-        "codes_col_1": codes_col_1,
-        "codes_col_2": codes_col_2,
-        "codes_col_3": codes_col_3,
-        "codes_col_4": codes_col_4,
-        "codes_col_5": codes_col_5,
-        "codes_col_6": codes_col_6,
-        "codes_col_7": codes_col_7,
-        "codes_col_8": codes_col_8,
     }
 
