@@ -534,7 +534,6 @@ def create_app() -> FastAPI:
                     sample_metadata, sample_status = llm.understand_audio_from_codes(
                         audio_codes="NO USER INPUT",
                         temperature=req.lm_temperature,
-                        cfg_scale=max(1.0, req.lm_cfg_scale),
                         negative_prompt=req.lm_negative_prompt,
                         top_k=lm_top_k if lm_top_k > 0 else None,
                         top_p=lm_top_p if lm_top_p < 1.0 else None,
