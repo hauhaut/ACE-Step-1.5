@@ -33,8 +33,16 @@ dependencies = [
     "nano-vllm",
 ]
 
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.uv.sources]
 nano-vllm = { path = "acestep/third_parts/nano-vllm" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
 
 [project.scripts]
 acestep = "acestep.acestep_v15_pipeline:main"
@@ -46,10 +54,6 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = []
-
-[[tool.uv.index]]
-name = "pytorch"
-url = "https://download.pytorch.org/whl/cu128"
 
 [tool.hatch.build.targets.wheel]
 packages = ["acestep"]
