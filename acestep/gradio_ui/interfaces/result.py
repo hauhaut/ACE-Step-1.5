@@ -50,11 +50,24 @@ def create_results_section(dit_handler) -> dict:
                         size="sm",
                         scale=1
                     )
-                score_display_1 = gr.Textbox(
-                    label=t("results.quality_score_label", n=1),
-                    interactive=False,
-                    placeholder=t("results.quality_score_placeholder")
-                )
+                    lrc_btn_1 = gr.Button(
+                        t("results.lrc_btn"),
+                        variant="secondary",
+                        size="sm",
+                        scale=1
+                    )
+                with gr.Accordion(t("results.details_accordion"), open=False, visible=False) as details_accordion_1:
+                    score_display_1 = gr.Textbox(
+                        label=t("results.quality_score_label", n=1),
+                        interactive=False,
+                        visible=False
+                    )
+                    lrc_display_1 = gr.Textbox(
+                        label=t("results.lrc_label", n=1),
+                        interactive=False,
+                        lines=8,
+                        visible=False
+                    )
             with gr.Column(visible=True) as audio_col_2:
                 generated_audio_2 = gr.Audio(
                     label=t("results.generated_music", n=2),
@@ -81,11 +94,24 @@ def create_results_section(dit_handler) -> dict:
                         size="sm",
                         scale=1
                     )
-                score_display_2 = gr.Textbox(
-                    label=t("results.quality_score_label", n=2),
-                    interactive=False,
-                    placeholder=t("results.quality_score_placeholder")
-                )
+                    lrc_btn_2 = gr.Button(
+                        t("results.lrc_btn"),
+                        variant="secondary",
+                        size="sm",
+                        scale=1
+                    )
+                with gr.Accordion(t("results.details_accordion"), open=False, visible=False) as details_accordion_2:
+                    score_display_2 = gr.Textbox(
+                        label=t("results.quality_score_label", n=2),
+                        interactive=False,
+                        visible=False
+                    )
+                    lrc_display_2 = gr.Textbox(
+                        label=t("results.lrc_label", n=2),
+                        interactive=False,
+                        lines=8,
+                        visible=False
+                    )
             with gr.Column(visible=False) as audio_col_3:
                 generated_audio_3 = gr.Audio(
                     label=t("results.generated_music", n=3),
@@ -112,11 +138,24 @@ def create_results_section(dit_handler) -> dict:
                         size="sm",
                         scale=1
                     )
-                score_display_3 = gr.Textbox(
-                    label=t("results.quality_score_label", n=3),
-                    interactive=False,
-                    placeholder=t("results.quality_score_placeholder")
-                )
+                    lrc_btn_3 = gr.Button(
+                        t("results.lrc_btn"),
+                        variant="secondary",
+                        size="sm",
+                        scale=1
+                    )
+                with gr.Accordion(t("results.details_accordion"), open=False, visible=False) as details_accordion_3:
+                    score_display_3 = gr.Textbox(
+                        label=t("results.quality_score_label", n=3),
+                        interactive=False,
+                        visible=False
+                    )
+                    lrc_display_3 = gr.Textbox(
+                        label=t("results.lrc_label", n=3),
+                        interactive=False,
+                        lines=8,
+                        visible=False
+                    )
             with gr.Column(visible=False) as audio_col_4:
                 generated_audio_4 = gr.Audio(
                     label=t("results.generated_music", n=4),
@@ -143,11 +182,24 @@ def create_results_section(dit_handler) -> dict:
                         size="sm",
                         scale=1
                     )
-                score_display_4 = gr.Textbox(
-                    label=t("results.quality_score_label", n=4),
-                    interactive=False,
-                    placeholder=t("results.quality_score_placeholder")
-                )
+                    lrc_btn_4 = gr.Button(
+                        t("results.lrc_btn"),
+                        variant="secondary",
+                        size="sm",
+                        scale=1
+                    )
+                with gr.Accordion(t("results.details_accordion"), open=False, visible=False) as details_accordion_4:
+                    score_display_4 = gr.Textbox(
+                        label=t("results.quality_score_label", n=4),
+                        interactive=False,
+                        visible=False
+                    )
+                    lrc_display_4 = gr.Textbox(
+                        label=t("results.lrc_label", n=4),
+                        interactive=False,
+                        lines=8,
+                        visible=False
+                    )
         
         # Second row for batch size 5-8 (initially hidden)
         with gr.Row(visible=False) as audio_row_5_8:
@@ -162,11 +214,19 @@ def create_results_section(dit_handler) -> dict:
                     send_to_src_btn_5 = gr.Button(t("results.send_to_src_btn"), variant="secondary", size="sm", scale=1)
                     save_btn_5 = gr.Button(t("results.save_btn"), variant="primary", size="sm", scale=1)
                     score_btn_5 = gr.Button(t("results.score_btn"), variant="secondary", size="sm", scale=1)
-                score_display_5 = gr.Textbox(
-                    label=t("results.quality_score_label", n=5),
-                    interactive=False,
-                    placeholder=t("results.quality_score_placeholder")
-                )
+                    lrc_btn_5 = gr.Button(t("results.lrc_btn"), variant="secondary", size="sm", scale=1)
+                with gr.Accordion(t("results.details_accordion"), open=False, visible=False) as details_accordion_5:
+                    score_display_5 = gr.Textbox(
+                        label=t("results.quality_score_label", n=5),
+                        interactive=False,
+                        visible=False
+                    )
+                    lrc_display_5 = gr.Textbox(
+                        label=t("results.lrc_label", n=5),
+                        interactive=False,
+                        lines=8,
+                        visible=False
+                    )
             with gr.Column() as audio_col_6:
                 generated_audio_6 = gr.Audio(
                     label=t("results.generated_music", n=6),
@@ -178,11 +238,19 @@ def create_results_section(dit_handler) -> dict:
                     send_to_src_btn_6 = gr.Button(t("results.send_to_src_btn"), variant="secondary", size="sm", scale=1)
                     save_btn_6 = gr.Button(t("results.save_btn"), variant="primary", size="sm", scale=1)
                     score_btn_6 = gr.Button(t("results.score_btn"), variant="secondary", size="sm", scale=1)
-                score_display_6 = gr.Textbox(
-                    label=t("results.quality_score_label", n=6),
-                    interactive=False,
-                    placeholder=t("results.quality_score_placeholder")
-                )
+                    lrc_btn_6 = gr.Button(t("results.lrc_btn"), variant="secondary", size="sm", scale=1)
+                with gr.Accordion(t("results.details_accordion"), open=False, visible=False) as details_accordion_6:
+                    score_display_6 = gr.Textbox(
+                        label=t("results.quality_score_label", n=6),
+                        interactive=False,
+                        visible=False
+                    )
+                    lrc_display_6 = gr.Textbox(
+                        label=t("results.lrc_label", n=6),
+                        interactive=False,
+                        lines=8,
+                        visible=False
+                    )
             with gr.Column() as audio_col_7:
                 generated_audio_7 = gr.Audio(
                     label=t("results.generated_music", n=7),
@@ -194,11 +262,19 @@ def create_results_section(dit_handler) -> dict:
                     send_to_src_btn_7 = gr.Button(t("results.send_to_src_btn"), variant="secondary", size="sm", scale=1)
                     save_btn_7 = gr.Button(t("results.save_btn"), variant="primary", size="sm", scale=1)
                     score_btn_7 = gr.Button(t("results.score_btn"), variant="secondary", size="sm", scale=1)
-                score_display_7 = gr.Textbox(
-                    label=t("results.quality_score_label", n=7),
-                    interactive=False,
-                    placeholder=t("results.quality_score_placeholder")
-                )
+                    lrc_btn_7 = gr.Button(t("results.lrc_btn"), variant="secondary", size="sm", scale=1)
+                with gr.Accordion(t("results.details_accordion"), open=False, visible=False) as details_accordion_7:
+                    score_display_7 = gr.Textbox(
+                        label=t("results.quality_score_label", n=7),
+                        interactive=False,
+                        visible=False
+                    )
+                    lrc_display_7 = gr.Textbox(
+                        label=t("results.lrc_label", n=7),
+                        interactive=False,
+                        lines=8,
+                        visible=False
+                    )
             with gr.Column() as audio_col_8:
                 generated_audio_8 = gr.Audio(
                     label=t("results.generated_music", n=8),
@@ -210,11 +286,19 @@ def create_results_section(dit_handler) -> dict:
                     send_to_src_btn_8 = gr.Button(t("results.send_to_src_btn"), variant="secondary", size="sm", scale=1)
                     save_btn_8 = gr.Button(t("results.save_btn"), variant="primary", size="sm", scale=1)
                     score_btn_8 = gr.Button(t("results.score_btn"), variant="secondary", size="sm", scale=1)
-                score_display_8 = gr.Textbox(
-                    label=t("results.quality_score_label", n=8),
-                    interactive=False,
-                    placeholder=t("results.quality_score_placeholder")
-                )
+                    lrc_btn_8 = gr.Button(t("results.lrc_btn"), variant="secondary", size="sm", scale=1)
+                with gr.Accordion(t("results.details_accordion"), open=False, visible=False) as details_accordion_8:
+                    score_display_8 = gr.Textbox(
+                        label=t("results.quality_score_label", n=8),
+                        interactive=False,
+                        visible=False
+                    )
+                    lrc_display_8 = gr.Textbox(
+                        label=t("results.lrc_label", n=8),
+                        interactive=False,
+                        lines=8,
+                        visible=False
+                    )
         
         status_output = gr.Textbox(label=t("results.generation_status"), interactive=False)
         
@@ -262,17 +346,6 @@ def create_results_section(dit_handler) -> dict:
                 interactive=False
             )
             generation_info = gr.Markdown(label=t("results.generation_details"))
-
-        with gr.Accordion(t("results.attention_analysis"), open=False):
-            with gr.Row():
-                with gr.Column():
-                    align_score_1 = gr.Textbox(label=t("results.attention_score", n=1), interactive=False)
-                    align_text_1 = gr.Textbox(label=t("results.lyric_timestamps", n=1), interactive=False, lines=10)
-                    align_plot_1 = gr.Plot(label=t("results.attention_heatmap", n=1))
-                with gr.Column():
-                    align_score_2 = gr.Textbox(label=t("results.attention_score", n=2), interactive=False)
-                    align_text_2 = gr.Textbox(label=t("results.lyric_timestamps", n=2), interactive=False, lines=10)
-                    align_plot_2 = gr.Plot(label=t("results.attention_heatmap", n=2))
     
     return {
         "lm_metadata_state": lm_metadata_state,
@@ -337,13 +410,31 @@ def create_results_section(dit_handler) -> dict:
         "score_display_6": score_display_6,
         "score_display_7": score_display_7,
         "score_display_8": score_display_8,
+        "lrc_btn_1": lrc_btn_1,
+        "lrc_btn_2": lrc_btn_2,
+        "lrc_btn_3": lrc_btn_3,
+        "lrc_btn_4": lrc_btn_4,
+        "lrc_btn_5": lrc_btn_5,
+        "lrc_btn_6": lrc_btn_6,
+        "lrc_btn_7": lrc_btn_7,
+        "lrc_btn_8": lrc_btn_8,
+        "lrc_display_1": lrc_display_1,
+        "lrc_display_2": lrc_display_2,
+        "lrc_display_3": lrc_display_3,
+        "lrc_display_4": lrc_display_4,
+        "lrc_display_5": lrc_display_5,
+        "lrc_display_6": lrc_display_6,
+        "lrc_display_7": lrc_display_7,
+        "lrc_display_8": lrc_display_8,
+        "details_accordion_1": details_accordion_1,
+        "details_accordion_2": details_accordion_2,
+        "details_accordion_3": details_accordion_3,
+        "details_accordion_4": details_accordion_4,
+        "details_accordion_5": details_accordion_5,
+        "details_accordion_6": details_accordion_6,
+        "details_accordion_7": details_accordion_7,
+        "details_accordion_8": details_accordion_8,
         "generated_audio_batch": generated_audio_batch,
         "generation_info": generation_info,
-        "align_score_1": align_score_1,
-        "align_text_1": align_text_1,
-        "align_plot_1": align_plot_1,
-        "align_score_2": align_score_2,
-        "align_text_2": align_text_2,
-        "align_plot_2": align_plot_2,
     }
 

@@ -30,7 +30,7 @@ dependencies = [
     "uvicorn[standard]>=0.27.0",
     
     # Local third-party packages
-    "nano-vllm @ file:///${PROJECT_ROOT}/acestep/third_parts/nano-vllm",
+    "nano-vllm @ {root:uri}/acestep/third_parts/nano-vllm",
 ]
 
 [project.scripts]
@@ -41,8 +41,8 @@ acestep-api = "acestep.api_server:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = []
+[dependency-groups]
+dev = []
 
 [[tool.uv.index]]
 name = "pytorch"

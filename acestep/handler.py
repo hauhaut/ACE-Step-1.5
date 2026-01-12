@@ -31,6 +31,7 @@ from acestep.constants import (
     SFT_GEN_PROMPT,
     DEFAULT_DIT_INSTRUCTION,
 )
+from acestep.dit_alignment_score import MusicStampsAligner
 
 
 warnings.filterwarnings("ignore")
@@ -65,13 +66,7 @@ class AceStepHandler:
         self.batch_size = 2
         
         # Custom layers config
-        self.custom_layers_config = {
-            2: [6, 7],
-            3: [10, 11],
-            4: [3],
-            5: [8, 9, 11],
-            6: [8]
-        }
+        self.custom_layers_config = {2: [6], 3: [10, 11], 4: [3], 5: [8, 9], 6: [8]}
         self.offload_to_cpu = False
         self.offload_dit_to_cpu = False
         self.current_offload_cost = 0.0
@@ -1953,6 +1948,23 @@ class AceStepHandler:
         }
         logger.info("[service_generate] Generating audio...")
         with self._load_model_context("model"):
+            # Prepare condition tensors first (for LRC timestamp generation)
+            encoder_hidden_states, encoder_attention_mask, context_latents = self.model.prepare_condition(
+                text_hidden_states=text_hidden_states,
+                text_attention_mask=text_attention_mask,
+                lyric_hidden_states=lyric_hidden_states,
+                lyric_attention_mask=lyric_attention_mask,
+                refer_audio_acoustic_hidden_states_packed=refer_audio_acoustic_hidden_states_packed,
+                refer_audio_order_mask=refer_audio_order_mask,
+                hidden_states=src_latents,
+                attention_mask=torch.ones(src_latents.shape[0], src_latents.shape[1], device=src_latents.device, dtype=src_latents.dtype),
+                silence_latent=self.silence_latent,
+                src_latents=src_latents,
+                chunk_masks=chunk_mask,
+                is_covers=is_covers,
+                precomputed_lm_hints_25Hz=precomputed_lm_hints_25Hz,
+            )
+            
             outputs = self.model.generate_audio(**generate_kwargs)
         
         # Add intermediate information to outputs for extra_outputs
@@ -1961,6 +1973,12 @@ class AceStepHandler:
         outputs["chunk_masks"] = chunk_mask
         outputs["spans"] = spans
         outputs["latent_masks"] = batch.get("latent_masks")  # Latent masks for valid length
+        
+        # Add condition tensors for LRC timestamp generation
+        outputs["encoder_hidden_states"] = encoder_hidden_states
+        outputs["encoder_attention_mask"] = encoder_attention_mask
+        outputs["context_latents"] = context_latents
+        outputs["lyric_token_idss"] = lyric_token_idss
         
         return outputs
 
@@ -2268,16 +2286,27 @@ class AceStepHandler:
             spans = outputs.get("spans", [])  # List of tuples
             latent_masks = outputs.get("latent_masks")  # [batch, T]
             
-            # Move latents to CPU to save memory (they can be large)
+            # Extract condition tensors for LRC timestamp generation
+            encoder_hidden_states = outputs.get("encoder_hidden_states")
+            encoder_attention_mask = outputs.get("encoder_attention_mask")
+            context_latents = outputs.get("context_latents")
+            lyric_token_idss = outputs.get("lyric_token_idss")
+            
+            # Move all tensors to CPU to save VRAM (detach to release computation graph)
             extra_outputs = {
-                "pred_latents": pred_latents.cpu() if pred_latents is not None else None,
-                "target_latents": target_latents_input.cpu() if target_latents_input is not None else None,
-                "src_latents": src_latents.cpu() if src_latents is not None else None,
-                "chunk_masks": chunk_masks.cpu() if chunk_masks is not None else None,
-                "latent_masks": latent_masks.cpu() if latent_masks is not None else None,
+                "pred_latents": pred_latents.detach().cpu() if pred_latents is not None else None,
+                "target_latents": target_latents_input.detach().cpu() if target_latents_input is not None else None,
+                "src_latents": src_latents.detach().cpu() if src_latents is not None else None,
+                "chunk_masks": chunk_masks.detach().cpu() if chunk_masks is not None else None,
+                "latent_masks": latent_masks.detach().cpu() if latent_masks is not None else None,
                 "spans": spans,
                 "time_costs": time_costs,
                 "seed_value": seed_value_for_ui,
+                # Condition tensors for LRC timestamp generation
+                "encoder_hidden_states": encoder_hidden_states.detach().cpu() if encoder_hidden_states is not None else None,
+                "encoder_attention_mask": encoder_attention_mask.detach().cpu() if encoder_attention_mask is not None else None,
+                "context_latents": context_latents.detach().cpu() if context_latents is not None else None,
+                "lyric_token_idss": lyric_token_idss.detach().cpu() if lyric_token_idss is not None else None,
             }
             
             # Build audios list with tensor data (no file paths, no UUIDs, handled outside)
@@ -2306,4 +2335,221 @@ class AceStepHandler:
                 "extra_outputs": {},
                 "success": False,
                 "error": str(e),
+            }
+
+    @torch.no_grad()
+    def get_lyric_timestamp(
+        self,
+        pred_latent: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        encoder_attention_mask: torch.Tensor,
+        context_latents: torch.Tensor,
+        lyric_token_ids: torch.Tensor,
+        total_duration_seconds: float,
+        vocal_language: str = "en",
+        inference_steps: int = 8,
+        seed: int = 42,
+        custom_layers_config: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate lyrics timestamps from generated audio latents using cross-attention alignment.
+        
+        This method adds noise to the final pred_latent and re-infers one step to get
+        cross-attention matrices, then uses DTW to align lyrics tokens with audio frames.
+        
+        Args:
+            pred_latent: Generated latent tensor [batch, T, D]
+            encoder_hidden_states: Cached encoder hidden states
+            encoder_attention_mask: Cached encoder attention mask
+            context_latents: Cached context latents
+            lyric_token_ids: Tokenized lyrics tensor [batch, seq_len]
+            total_duration_seconds: Total audio duration in seconds
+            vocal_language: Language code for lyrics header parsing
+            inference_steps: Number of inference steps (for noise level calculation)
+            seed: Random seed for noise generation
+            custom_layers_config: Dict mapping layer indices to head indices
+            
+        Returns:
+            Dict containing:
+            - lrc_text: LRC formatted lyrics with timestamps
+            - sentence_timestamps: List of SentenceTimestamp objects
+            - token_timestamps: List of TokenTimestamp objects
+            - success: Whether generation succeeded
+            - error: Error message if failed
+        """
+        from transformers.cache_utils import EncoderDecoderCache, DynamicCache
+        
+        if self.model is None:
+            return {
+                "lrc_text": "",
+                "sentence_timestamps": [],
+                "token_timestamps": [],
+                "success": False,
+                "error": "Model not initialized"
+            }
+        
+        if custom_layers_config is None:
+            custom_layers_config = self.custom_layers_config
+        
+        try:
+            # Move tensors to device
+            device = self.device
+            dtype = self.dtype
+            
+            pred_latent = pred_latent.to(device=device, dtype=dtype)
+            encoder_hidden_states = encoder_hidden_states.to(device=device, dtype=dtype)
+            encoder_attention_mask = encoder_attention_mask.to(device=device, dtype=dtype)
+            context_latents = context_latents.to(device=device, dtype=dtype)
+            
+            bsz = pred_latent.shape[0]
+            
+            # Calculate noise level: t_last = 1.0 / inference_steps
+            t_last_val = 1.0 / inference_steps
+            t_curr_tensor = torch.tensor([t_last_val] * bsz, device=device, dtype=dtype)
+            
+            x1 = pred_latent
+            
+            # Generate noise
+            if seed is None:
+                x0 = torch.randn_like(x1)
+            else:
+                generator = torch.Generator(device=device).manual_seed(int(seed))
+                x0 = torch.randn(x1.shape, generator=generator, device=device, dtype=dtype)
+            
+            # Add noise to pred_latent: xt = t * noise + (1 - t) * x1
+            xt = t_last_val * x0 + (1.0 - t_last_val) * x1
+
+            xt_in = xt
+            t_in = t_curr_tensor
+            
+            # Get null condition embedding
+            encoder_hidden_states_in = encoder_hidden_states
+            encoder_attention_mask_in = encoder_attention_mask
+            context_latents_in = context_latents
+            latent_length = x1.shape[1]
+            attention_mask = torch.ones(bsz, latent_length, device=device, dtype=dtype)
+            attention_mask_in = attention_mask
+            past_key_values = None
+            
+            # Run decoder with output_attentions=True
+            with self._load_model_context("model"):
+                decoder = self.model.decoder
+                decoder_outputs = decoder(
+                    hidden_states=xt_in,
+                    timestep=t_in,
+                    timestep_r=t_in,
+                    attention_mask=attention_mask_in,
+                    encoder_hidden_states=encoder_hidden_states_in,
+                    use_cache=False,
+                    past_key_values=past_key_values,
+                    encoder_attention_mask=encoder_attention_mask_in,
+                    context_latents=context_latents_in,
+                    output_attentions=True,
+                    custom_layers_config=custom_layers_config,
+                    enable_early_exit=True
+                )
+                
+                # Extract cross-attention matrices
+                if decoder_outputs[2] is None:
+                    return {
+                        "lrc_text": "",
+                        "sentence_timestamps": [],
+                        "token_timestamps": [],
+                        "success": False,
+                        "error": "Model did not return attentions"
+                    }
+                
+                cross_attns = decoder_outputs[2]  # Tuple of tensors (some may be None)
+                
+                captured_layers_list = []
+                for layer_attn in cross_attns:
+                    # Skip None values (layers that didn't return attention)
+                    if layer_attn is None:
+                        continue
+                    # Only take conditional part (first half of batch)
+                    cond_attn = layer_attn[:bsz]
+                    layer_matrix = cond_attn.transpose(-1, -2)
+                    captured_layers_list.append(layer_matrix)
+                
+                if not captured_layers_list:
+                    return {
+                        "lrc_text": "",
+                        "sentence_timestamps": [],
+                        "token_timestamps": [],
+                        "success": False,
+                        "error": "No valid attention layers returned"
+                    }
+                
+                stacked = torch.stack(captured_layers_list)
+                if bsz == 1:
+                    all_layers_matrix = stacked.squeeze(1)
+                else:
+                    all_layers_matrix = stacked
+            
+            # Process lyric token IDs to extract pure lyrics
+            if isinstance(lyric_token_ids, torch.Tensor):
+                raw_lyric_ids = lyric_token_ids[0].tolist()
+            else:
+                raw_lyric_ids = lyric_token_ids
+            
+            # Parse header to find lyrics start position
+            header_str = f"# Languages\n{vocal_language}\n\n# Lyric\n"
+            header_ids = self.text_tokenizer.encode(header_str, add_special_tokens=False)
+            start_idx = len(header_ids)
+            
+            # Find end of lyrics (before endoftext token)
+            try:
+                end_idx = raw_lyric_ids.index(151643)  # <|endoftext|> token
+            except ValueError:
+                end_idx = len(raw_lyric_ids)
+            
+            pure_lyric_ids = raw_lyric_ids[start_idx:end_idx]
+            pure_lyric_matrix = all_layers_matrix[:, :, start_idx:end_idx, :]
+            
+            # Create aligner and generate timestamps
+            aligner = MusicStampsAligner(self.text_tokenizer)
+            
+            align_info = aligner.stamps_align_info(
+                attention_matrix=pure_lyric_matrix,
+                lyrics_tokens=pure_lyric_ids,
+                total_duration_seconds=total_duration_seconds,
+                custom_config=custom_layers_config,
+                return_matrices=False,
+                violence_level=2.0,
+                medfilt_width=1,
+            )
+            
+            if align_info.get("calc_matrix") is None:
+                return {
+                    "lrc_text": "",
+                    "sentence_timestamps": [],
+                    "token_timestamps": [],
+                    "success": False,
+                    "error": align_info.get("error", "Failed to process attention matrix")
+                }
+            
+            # Generate timestamps
+            result = aligner.get_timestamps_and_lrc(
+                calc_matrix=align_info["calc_matrix"],
+                lyrics_tokens=pure_lyric_ids,
+                total_duration_seconds=total_duration_seconds
+            )
+            
+            return {
+                "lrc_text": result["lrc_text"],
+                "sentence_timestamps": result["sentence_timestamps"],
+                "token_timestamps": result["token_timestamps"],
+                "success": True,
+                "error": None
+            }
+            
+        except Exception as e:
+            error_msg = f"Error generating timestamps: {str(e)}"
+            logger.exception("[get_lyric_timestamp] Failed")
+            return {
+                "lrc_text": "",
+                "sentence_timestamps": [],
+                "token_timestamps": [],
+                "success": False,
+                "error": error_msg
             }

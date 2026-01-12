@@ -148,8 +148,6 @@
     "cover_strength_info": "カバーモードを使用するデノイジングステップ数を制御",
     "score_sensitivity_label": "品質スコア感度",
     "score_sensitivity_info": "低い = より敏感(デフォルト: 1.0)。PMIが[0,1]にマッピングする方法を調整",
-    "attention_focus_label": "注意焦点スコアを出力(無効)",
-    "attention_focus_info": "注意焦点スコア分析を出力",
     "think_label": "思考",
     "parallel_thinking_label": "並列思考",
     "generate_btn": "🎵 音楽を生成",
@@ -162,8 +160,12 @@
     "send_to_src_btn": "🔗 ソースオーディオに送信",
     "save_btn": "💾 保存",
     "score_btn": "📊 スコア",
+    "lrc_btn": "🎵 LRC",
     "quality_score_label": "品質スコア(サンプル {n})",
     "quality_score_placeholder": "'スコア'をクリックしてパープレキシティベースの品質スコアを計算",
+    "lrc_label": "歌詞タイムスタンプ(サンプル {n})",
+    "lrc_placeholder": "'LRC'をクリックしてタイムスタンプを生成",
+    "details_accordion": "📊 スコア & LRC",
     "generation_status": "生成ステータス",
     "current_batch": "現在のバッチ",
     "batch_indicator": "バッチ {current} / {total}",
@@ -173,11 +175,7 @@
     "restore_params_btn": "↙️ これらの設定をUIに適用(バッチパラメータを復元)",
     "batch_results_title": "📁 バッチ結果と生成詳細",
     "all_files_label": "📁 すべての生成ファイル(ダウンロード)",
-    "generation_details": "生成詳細",
-    "attention_analysis": "⚖️ 注意焦点スコア分析",
-    "attention_score": "注意焦点スコア(サンプル {n})",
-    "lyric_timestamps": "歌詞タイムスタンプ(サンプル {n})",
-    "attention_heatmap": "注意焦点スコアヒートマップ(サンプル {n})"
+    "generation_details": "生成詳細"
   },
   "messages": {
     "no_audio_to_save": "❌ 保存するオーディオがありません",
@@ -206,6 +204,11 @@
     "scoring_failed": "❌ エラー: バッチデータが見つかりません",
     "no_codes": "❌ 利用可能なオーディオコードがありません。最初に音楽を生成してください。",
     "score_failed": "❌ スコアリングに失敗しました: {error}",
-    "score_error": "❌ スコア計算エラー: {error}"
+    "score_error": "❌ スコア計算エラー: {error}",
+    "lrc_no_batch_data": "❌ バッチデータが見つかりません。最初に音楽を生成してください。",
+    "lrc_no_extra_outputs": "❌ 追加出力が見つかりません。条件テンソルが利用できません。",
+    "lrc_missing_tensors": "❌ LRC生成に必要なテンソルがありません。",
+    "lrc_sample_not_exist": "❌ 現在のバッチにサンプルが存在しません。",
+    "lrc_empty_result": "⚠️ LRC生成の結果が空です。"
   }
 }

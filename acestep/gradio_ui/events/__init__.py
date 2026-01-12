@@ -358,19 +358,49 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         )
     
     # ========== Score Calculation Handlers ==========
+    # Use default argument to capture btn_idx value at definition time (Python closure fix)
+    def make_score_handler(idx):
+        return lambda scale, batch_idx, queue: res_h.calculate_score_handler_with_selection(
+            llm_handler, idx, scale, batch_idx, queue
+        )
+    
     for btn_idx in range(1, 9):
         results_section[f"score_btn_{btn_idx}"].click(
-            fn=lambda sample_idx, scale, batch_idx, queue: res_h.calculate_score_handler_with_selection(
-                llm_handler, sample_idx, scale, batch_idx, queue
-            ),
+            fn=make_score_handler(btn_idx),
             inputs=[
-                gr.State(value=btn_idx),
                 generation_section["score_scale"],
                 results_section["current_batch_index"],
                 results_section["batch_queue"],
             ],
-            outputs=[results_section[f"score_display_{btn_idx}"], results_section["batch_queue"]]
+            outputs=[
+                results_section[f"score_display_{btn_idx}"],
+                results_section[f"details_accordion_{btn_idx}"],
+                results_section["batch_queue"]
+            ]
         )
+    
+    # ========== LRC Timestamp Handlers ==========
+    # Use default argument to capture btn_idx value at definition time (Python closure fix)
+    def make_lrc_handler(idx):
+        return lambda batch_idx, queue, vocal_lang, infer_steps: res_h.generate_lrc_handler(
+            dit_handler, idx, batch_idx, queue, vocal_lang, infer_steps
+        )
+    
+    for btn_idx in range(1, 9):
+        results_section[f"lrc_btn_{btn_idx}"].click(
+            fn=make_lrc_handler(btn_idx),
+            inputs=[
+                results_section["current_batch_index"],
+                results_section["batch_queue"],
+                generation_section["vocal_language"],
+                generation_section["inference_steps"],
+            ],
+            outputs=[
+                results_section[f"lrc_display_{btn_idx}"],
+                results_section[f"details_accordion_{btn_idx}"]
+            ]
+        )
+    
     def generation_wrapper(*args):
         yield from res_h.generate_with_batch_management(dit_handler, llm_handler, *args)
     # ========== Generation Handler ==========
@@ -438,12 +468,6 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             results_section["generation_info"],
             results_section["status_output"],
             generation_section["seed"],
-            results_section["align_score_1"],
-            results_section["align_text_1"],
-            results_section["align_plot_1"],
-            results_section["align_score_2"],
-            results_section["align_text_2"],
-            results_section["align_plot_2"],
             results_section["score_display_1"],
             results_section["score_display_2"],
             results_section["score_display_3"],

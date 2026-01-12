@@ -148,8 +148,6 @@
     "cover_strength_info": "Control how many denoising steps use cover mode",
     "score_sensitivity_label": "Quality Score Sensitivity",
     "score_sensitivity_info": "Lower = more sensitive (default: 1.0). Adjusts how PMI maps to [0,1]",
-    "attention_focus_label": "Output Attention Focus Score (disabled)",
-    "attention_focus_info": "Output attention focus score analysis",
     "think_label": "Think",
     "parallel_thinking_label": "ParallelThinking",
     "generate_btn": "🎵 Generate Music",
@@ -162,8 +160,12 @@
     "send_to_src_btn": "🔗 Send To Src Audio",
     "save_btn": "💾 Save",
     "score_btn": "📊 Score",
+    "lrc_btn": "🎵 LRC",
     "quality_score_label": "Quality Score (Sample {n})",
     "quality_score_placeholder": "Click 'Score' to calculate perplexity-based quality score",
+    "lrc_label": "Lyrics Timestamps (Sample {n})",
+    "lrc_placeholder": "Click 'LRC' to generate timestamps",
+    "details_accordion": "📊 Score & LRC",
     "generation_status": "Generation Status",
     "current_batch": "Current Batch",
     "batch_indicator": "Batch {current} / {total}",
@@ -173,11 +175,7 @@
     "restore_params_btn": "↙️ Apply These Settings to UI (Restore Batch Parameters)",
     "batch_results_title": "📁 Batch Results & Generation Details",
     "all_files_label": "📁 All Generated Files (Download)",
-    "generation_details": "Generation Details",
-    "attention_analysis": "⚖️ Attention Focus Score Analysis",
-    "attention_score": "Attention Focus Score (Sample {n})",
-    "lyric_timestamps": "Lyric Timestamps (Sample {n})",
-    "attention_heatmap": "Attention Focus Score Heatmap (Sample {n})"
+    "generation_details": "Generation Details"
   },
   "messages": {
     "no_audio_to_save": "❌ No audio to save",
@@ -206,6 +204,11 @@
     "scoring_failed": "❌ Error: Batch data not found",
     "no_codes": "❌ No audio codes available. Please generate music first.",
     "score_failed": "❌ Scoring failed: {error}",
-    "score_error": "❌ Error calculating score: {error}"
+    "score_error": "❌ Error calculating score: {error}",
+    "lrc_no_batch_data": "❌ No batch data found. Please generate music first.",
+    "lrc_no_extra_outputs": "❌ No extra outputs found. Condition tensors not available.",
+    "lrc_missing_tensors": "❌ Missing required tensors for LRC generation.",
+    "lrc_sample_not_exist": "❌ Sample does not exist in current batch.",
+    "lrc_empty_result": "⚠️ LRC generation produced empty result."
   }
 }

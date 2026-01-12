@@ -148,8 +148,6 @@
     "cover_strength_info": "控制使用覆盖模式的去噪步骤数量",
     "score_sensitivity_label": "质量评分敏感度",
     "score_sensitivity_info": "更低 = 更敏感(默认: 1.0). 调整PMI如何映射到[0,1]",
-    "attention_focus_label": "输出注意力焦点分数(已禁用)",
-    "attention_focus_info": "输出注意力焦点分数分析",
     "think_label": "思考",
     "parallel_thinking_label": "并行思考",
     "generate_btn": "🎵 生成音乐",
@@ -162,8 +160,12 @@
     "send_to_src_btn": "🔗 发送到源音频",
     "save_btn": "💾 保存",
     "score_btn": "📊 评分",
+    "lrc_btn": "🎵 LRC",
     "quality_score_label": "质量分数(样本 {n})",
     "quality_score_placeholder": "点击'评分'以计算基于困惑度的质量分数",
+    "lrc_label": "歌词时间戳(样本 {n})",
+    "lrc_placeholder": "点击'LRC'生成时间戳",
+    "details_accordion": "📊 评分与LRC",
     "generation_status": "生成状态",
     "current_batch": "当前批次",
     "batch_indicator": "批次 {current} / {total}",
@@ -173,11 +175,7 @@
     "restore_params_btn": "↙️ 将这些设置应用到UI(恢复批次参数)",
     "batch_results_title": "📁 批量结果和生成详情",
     "all_files_label": "📁 所有生成的文件(下载)",
-    "generation_details": "生成详情",
-    "attention_analysis": "⚖️ 注意力焦点分数分析",
-    "attention_score": "注意力焦点分数(样本 {n})",
-    "lyric_timestamps": "歌词时间戳(样本 {n})",
-    "attention_heatmap": "注意力焦点分数热图(样本 {n})"
+    "generation_details": "生成详情"
   },
   "messages": {
     "no_audio_to_save": "❌ 没有要保存的音频",
@@ -206,6 +204,11 @@
     "scoring_failed": "❌ 错误: 未找到批次数据",
     "no_codes": "❌ 没有可用的音频代码。请先生成音乐。",
     "score_failed": "❌ 评分失败: {error}",
-    "score_error": "❌ 计算分数时出错: {error}"
+    "score_error": "❌ 计算分数时出错: {error}",
+    "lrc_no_batch_data": "❌ 未找到批次数据。请先生成音乐。",
+    "lrc_no_extra_outputs": "❌ 未找到额外输出。条件张量不可用。",
+    "lrc_missing_tensors": "❌ 缺少LRC生成所需的张量。",
+    "lrc_sample_not_exist": "❌ 当前批次中不存在该样本。",
+    "lrc_empty_result": "⚠️ LRC生成结果为空。"
   }
 }

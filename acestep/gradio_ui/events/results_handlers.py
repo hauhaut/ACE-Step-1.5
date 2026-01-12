@@ -141,6 +141,7 @@ def store_batch_in_queue(
     batch_size=2,
     generation_params=None,
     lm_generated_metadata=None,
+    extra_outputs=None,
     status="completed"
 ):
     """Store batch results in queue with ALL generation parameters
@@ -152,6 +153,7 @@ def store_batch_in_queue(
         batch_size: Batch size used for this batch
         generation_params: Complete dictionary of ALL generation parameters used
         lm_generated_metadata: LM-generated metadata for scoring (optional)
+        extra_outputs: Dictionary containing pred_latents, encoder_hidden_states, etc. for LRC generation
     """
     batch_queue[batch_index] = {
         "status": status,
@@ -164,6 +166,7 @@ def store_batch_in_queue(
         "batch_size": batch_size,  # Store batch size
         "generation_params": generation_params if generation_params else {},  # Store ALL parameters
         "lm_generated_metadata": lm_generated_metadata,  # Store LM metadata for scoring
+        "extra_outputs": extra_outputs if extra_outputs else {},  # Store extra outputs for LRC generation
         "timestamp": datetime.datetime.now().isoformat()
     }
     return batch_queue
@@ -355,12 +358,6 @@ def generate_with_progress(
     audio_conversion_start_time = time_module.time()
     total_auto_score_time = 0.0
     
-    align_score_1 = ""
-    align_text_1 = ""
-    align_plot_1 = None
-    align_score_2 = ""
-    align_text_2 = ""
-    align_plot_2 = None
     updated_audio_codes = text2music_audio_code_string if not think_checkbox else ""
     
     # Build initial generation_info (will be updated with post-processing times at the end)
@@ -373,7 +370,7 @@ def generate_with_progress(
     )
     
     if not result.success:
-        yield (None,) * 8 + (None, generation_info, result.status_message) + (gr.skip(),) * 26
+        yield (None,) * 8 + (None, generation_info, result.status_message) + (gr.skip(),) * 20 + (None,)  # +1 for extra_outputs
         return
     
     audios = result.audios
@@ -421,8 +418,6 @@ def generate_with_progress(
                 generation_info,
                 status_message,
                 seed_value_for_ui,
-                # Align plot placeholders (assume no need to update in real time)
-                gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(),
                 # Scores
                 scores_ui_updates[0], scores_ui_updates[1], scores_ui_updates[2], scores_ui_updates[3], scores_ui_updates[4], scores_ui_updates[5], scores_ui_updates[6], scores_ui_updates[7],
                 updated_audio_codes,
@@ -431,6 +426,7 @@ def generate_with_progress(
                 audio_codes_ui_updates[4], audio_codes_ui_updates[5], audio_codes_ui_updates[6], audio_codes_ui_updates[7],
                 lm_generated_metadata,
                 is_format_caption,
+                None,  # Placeholder for extra_outputs (only filled in final yield)
             )
         else:
             # If i exceeds the generated count (e.g., batch=2, i=2..7), do not yield
@@ -467,7 +463,6 @@ def generate_with_progress(
         generation_info,
         "Generation Complete",
         seed_value_for_ui,
-        align_score_1, align_text_1, align_plot_1, align_score_2, align_text_2, align_plot_2,
         final_scores_list[0], final_scores_list[1], final_scores_list[2], final_scores_list[3],
         final_scores_list[4], final_scores_list[5], final_scores_list[6], final_scores_list[7],
         updated_audio_codes,
@@ -475,6 +470,7 @@ def generate_with_progress(
         final_codes_list[4], final_codes_list[5], final_codes_list[6], final_codes_list[7],
         lm_generated_metadata,
         is_format_caption,
+        result.extra_outputs,  # extra_outputs for LRC generation
     )
 
 
@@ -595,7 +591,7 @@ def calculate_score_handler_with_selection(llm_handler, sample_idx, score_scale,
         batch_queue: Batch queue containing historical generation data
     """
     if current_batch_index not in batch_queue:
-        return t("messages.scoring_failed"), batch_queue
+        return gr.skip(), gr.skip(), batch_queue
     
     batch_data = batch_queue[current_batch_index]
     params = batch_data.get("generation_params", {})
@@ -642,7 +638,106 @@ def calculate_score_handler_with_selection(llm_handler, sample_idx, score_scale,
             batch_queue[current_batch_index]["scores"] = [""] * 8
         batch_queue[current_batch_index]["scores"][sample_idx - 1] = score_display
     
-    return score_display, batch_queue
+    # Return: score_display (content + visible), accordion visible, batch_queue
+    return (
+        gr.update(value=score_display, visible=True),  # score_display with content
+        gr.update(visible=True),  # details_accordion
+        batch_queue
+    )
+
+
+def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_queue, vocal_language, inference_steps):
+    """
+    Generate LRC timestamps for a specific audio sample.
+    
+    This function retrieves cached generation data from batch_queue and calls
+    the handler's get_lyric_timestamp method to generate LRC format lyrics.
+    
+    Args:
+        dit_handler: DiT handler instance with get_lyric_timestamp method
+        sample_idx: Which sample to generate LRC for (1-8)
+        current_batch_index: Current batch index in batch_queue
+        batch_queue: Dictionary storing all batch generation data
+        vocal_language: Language code for lyrics
+        inference_steps: Number of inference steps used in generation
+    
+    Returns:
+        LRC formatted string or error message
+    """
+    import torch
+    
+    if current_batch_index not in batch_queue:
+        return gr.skip(), gr.skip()
+    
+    batch_data = batch_queue[current_batch_index]
+    extra_outputs = batch_data.get("extra_outputs", {})
+    
+    # Check if required data is available
+    if not extra_outputs:
+        return gr.update(value=t("messages.lrc_no_extra_outputs"), visible=True), gr.update(visible=True)
+    
+    pred_latents = extra_outputs.get("pred_latents")
+    encoder_hidden_states = extra_outputs.get("encoder_hidden_states")
+    encoder_attention_mask = extra_outputs.get("encoder_attention_mask")
+    context_latents = extra_outputs.get("context_latents")
+    lyric_token_idss = extra_outputs.get("lyric_token_idss")
+    
+    if any(x is None for x in [pred_latents, encoder_hidden_states, encoder_attention_mask, context_latents, lyric_token_idss]):
+        return gr.update(value=t("messages.lrc_missing_tensors"), visible=True), gr.update(visible=True)
+    
+    # Adjust sample_idx to 0-based
+    sample_idx_0based = sample_idx - 1
+    
+    # Check if sample exists in batch
+    batch_size = pred_latents.shape[0]
+    if sample_idx_0based >= batch_size:
+        return gr.update(value=t("messages.lrc_sample_not_exist"), visible=True), gr.update(visible=True)
+    
+    # Extract the specific sample's data
+    try:
+        # Get audio duration from batch data
+        params = batch_data.get("generation_params", {})
+        audio_duration = params.get("audio_duration", -1)
+        
+        # Calculate duration from latents if not specified
+        if audio_duration is None or audio_duration <= 0:
+            # latent_length * frames_per_second_ratio ≈ audio_duration
+            # Assuming 25 Hz latent rate: latent_length / 25 = duration
+            latent_length = pred_latents.shape[1]
+            audio_duration = latent_length / 25.0  # 25 Hz latent rate
+        
+        # Get the sample's data (keep batch dimension for handler)
+        sample_pred_latent = pred_latents[sample_idx_0based:sample_idx_0based+1]
+        sample_encoder_hidden_states = encoder_hidden_states[sample_idx_0based:sample_idx_0based+1]
+        sample_encoder_attention_mask = encoder_attention_mask[sample_idx_0based:sample_idx_0based+1]
+        sample_context_latents = context_latents[sample_idx_0based:sample_idx_0based+1]
+        sample_lyric_token_ids = lyric_token_idss[sample_idx_0based:sample_idx_0based+1]
+        
+        # Call handler to generate timestamps
+        result = dit_handler.get_lyric_timestamp(
+            pred_latent=sample_pred_latent,
+            encoder_hidden_states=sample_encoder_hidden_states,
+            encoder_attention_mask=sample_encoder_attention_mask,
+            context_latents=sample_context_latents,
+            lyric_token_ids=sample_lyric_token_ids,
+            total_duration_seconds=float(audio_duration),
+            vocal_language=vocal_language or "en",
+            inference_steps=int(inference_steps),
+            seed=42,  # Use fixed seed for reproducibility
+        )
+        
+        if result.get("success"):
+            lrc_text = result.get("lrc_text", "")
+            if not lrc_text:
+                return gr.update(value=t("messages.lrc_empty_result"), visible=True), gr.update(visible=True)
+            return gr.update(value=lrc_text, visible=True), gr.update(visible=True)
+        else:
+            error_msg = result.get("error", "Unknown error")
+            return gr.update(value=f"❌ {error_msg}", visible=True), gr.update(visible=True)
+            
+    except Exception as e:
+        logger.exception("[generate_lrc_handler] Error generating LRC")
+        return gr.update(value=f"❌ Error: {str(e)}", visible=True), gr.update(visible=True)
 
 
 def capture_current_params(
@@ -758,7 +853,9 @@ def generate_with_batch_management(
         final_result_from_inner = partial_result
         # current_batch_index, total_batches, batch_queue, next_params, 
         # batch_indicator_text, prev_btn, next_btn, next_status, restore_btn
-        yield partial_result + (
+        # Slice off extra_outputs (last item) before re-yielding to UI
+        ui_result = partial_result[:-1] if len(partial_result) > 31 else partial_result
+        yield ui_result + (
             gr.skip(), gr.skip(), gr.skip(), gr.skip(), 
             gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
         )
@@ -766,21 +863,23 @@ def generate_with_batch_management(
     all_audio_paths = result[8]
 
     if all_audio_paths is None:
-        
-        yield result + (
+        # Slice off extra_outputs before yielding to UI
+        ui_result = result[:-1] if len(result) > 31 else result
+        yield ui_result + (
             gr.skip(), gr.skip(), gr.skip(), gr.skip(), 
             gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
         )
         return
 
     # Extract results from generation (使用 result 下标访问)
+    # New indices after removing 6 align_* items (was 12-17, now shifted down by 6)
     generation_info = result[9]
     seed_value_for_ui = result[11]
-    lm_generated_metadata = result[35]  # Fixed: lm_metadata is at index 35, not 34
+    lm_generated_metadata = result[29]  # was 35, now 29
     
     # Extract codes
-    generated_codes_single = result[26]
-    generated_codes_batch = [result[27], result[28], result[29], result[30], result[31], result[32], result[33], result[34]]
+    generated_codes_single = result[20]  # was 26, now 20
+    generated_codes_batch = [result[21], result[22], result[23], result[24], result[25], result[26], result[27], result[28]]  # was 27-34, now 21-28
 
     # Determine which codes to store based on mode
     if allow_lm_batch and batch_size_input >= 2:
@@ -839,6 +938,9 @@ def generate_with_batch_management(
     next_params["text2music_audio_code_string"] = ""
     next_params["random_seed_checkbox"] = True
     
+    # Extract extra_outputs from result tuple (index 31)
+    extra_outputs_from_result = result[31] if len(result) > 31 else {}
+    
     # Store current batch in queue
     batch_queue = store_batch_in_queue(
         batch_queue,
@@ -851,6 +953,7 @@ def generate_with_batch_management(
         batch_size=int(batch_size_input),
         generation_params=saved_params,
         lm_generated_metadata=lm_generated_metadata,
+        extra_outputs=extra_outputs_from_result,  # Store extra outputs for LRC generation
         status="completed"
     )
     
@@ -870,7 +973,9 @@ def generate_with_batch_management(
 
     # 4. Yield final result (includes Batch UI updates)
     # The result here is already a tuple structure
-    yield result + (
+    # Slice off extra_outputs (last item) before yielding to UI - it's already stored in batch_queue
+    ui_result = result[:-1] if len(result) > 31 else result
+    yield ui_result + (
         current_batch_index,
         total_batches,
         batch_queue,
@@ -1040,14 +1145,15 @@ def generate_next_batch_background(
             final_result = partial_result
         
         # Extract results from final_result
+        # Indices shifted by -6 after removing align_* items
         all_audio_paths = final_result[8]  # generated_audio_batch
         generation_info = final_result[9]
         seed_value_for_ui = final_result[11]
-        lm_generated_metadata = final_result[35]  # Fixed: lm_metadata is at index 35, not 34
+        lm_generated_metadata = final_result[29]  # was 35, now 29
         
         # Extract codes
-        generated_codes_single = final_result[26]
-        generated_codes_batch = [final_result[27], final_result[28], final_result[29], final_result[30], final_result[31], final_result[32], final_result[33], final_result[34]]
+        generated_codes_single = final_result[20]  # was 26, now 20
+        generated_codes_batch = [final_result[21], final_result[22], final_result[23], final_result[24], final_result[25], final_result[26], final_result[27], final_result[28]]  # was 27-34, now 21-28
         
         # Determine which codes to store
         batch_size = params.get("batch_size_input", 2)
@@ -1070,6 +1176,7 @@ def generate_next_batch_background(
             logger.info(f"  - codes_to_store: STRING with {len(codes_to_store) if codes_to_store else 0} chars")
         
         # Store next batch in queue with codes, batch settings, and ALL generation params
+        # Note: extra_outputs not available for background batches (LRC not supported for auto-gen batches)
         batch_queue = store_batch_in_queue(
             batch_queue,
             next_batch_idx,
@@ -1081,6 +1188,7 @@ def generate_next_batch_background(
             batch_size=int(batch_size),
             generation_params=params,
             lm_generated_metadata=lm_generated_metadata,
+            extra_outputs=None,  # Not available for background batches
             status="completed"
         )
         
