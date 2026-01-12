@@ -148,6 +148,10 @@ class JobResult(BaseModel):
     genres: Optional[str] = None
     keyscale: Optional[str] = None
     timesignature: Optional[str] = None
+    
+    # Model information
+    lm_model: Optional[str] = None
+    dit_model: Optional[str] = None
 
 
 class JobResponse(BaseModel):
@@ -695,6 +699,10 @@ def create_app() -> FastAPI:
                         return None
                     return s
 
+                # Get model information from environment variables
+                lm_model_name = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B-v3")
+                dit_model_name = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo-rl")
+                
                 return {
                     "first_audio_path": _path_to_audio_url(first_audio) if first_audio else None,
                     "second_audio_path": _path_to_audio_url(second_audio) if second_audio else None,
@@ -708,6 +716,8 @@ def create_app() -> FastAPI:
                     "genres": _none_if_na_str(metas_out.get("genres")),
                     "keyscale": _none_if_na_str(metas_out.get("keyscale")),
                     "timesignature": _none_if_na_str(metas_out.get("timesignature")),
+                    "lm_model": lm_model_name,
+                    "dit_model": dit_model_name,
                 }
 
             t0 = time.time()
