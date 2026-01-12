@@ -10,12 +10,10 @@ dependencies = [
     "torch>=2.9.1; sys_platform != 'darwin'",
     "torchvision; sys_platform != 'darwin'",
     "torchaudio>=2.9.1; sys_platform != 'darwin'",
-    
     # PyTorch for macOS (CPU / MPS)
     "torch>=2.9.1; sys_platform == 'darwin'",
     "torchvision; sys_platform == 'darwin'",
     "torchaudio>=2.9.1; sys_platform == 'darwin'",
-
     # Common dependencies
     "transformers",
     "diffusers",
@@ -28,10 +26,15 @@ dependencies = [
     "accelerate>=1.12.0",
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
-    
+    "numba>=0.63.1",
+    "vector-quantize-pytorch>=1.27.15",
+    "torchcodec>=0.9.1",
     # Local third-party packages
-    "nano-vllm @ {root:uri}/acestep/third_parts/nano-vllm",
+    "nano-vllm",
 ]
+
+[tool.uv.sources]
+nano-vllm = { path = "acestep/third_parts/nano-vllm" }
 
 [project.scripts]
 acestep = "acestep.acestep_v15_pipeline:main"
@@ -50,3 +53,10 @@ url = "https://download.pytorch.org/whl/cu128"
 
 [tool.hatch.build.targets.wheel]
 packages = ["acestep"]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [
+  "packaging",
+  "wheel",
+  { requirement = "torch", match-runtime = true },
+]
