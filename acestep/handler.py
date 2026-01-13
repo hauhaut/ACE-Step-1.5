@@ -31,7 +31,7 @@ from acestep.constants import (
     SFT_GEN_PROMPT,
     DEFAULT_DIT_INSTRUCTION,
 )
-from acestep.dit_alignment_score import MusicStampsAligner
+from acestep.dit_alignment_score import MusicStampsAligner, MusicLyricScorer
 
 
 warnings.filterwarnings("ignore")
@@ -2550,6 +2550,232 @@ class AceStepHandler:
                 "lrc_text": "",
                 "sentence_timestamps": [],
                 "token_timestamps": [],
+                "success": False,
+                "error": error_msg
+            }
+
+    @torch.no_grad()
+    def get_lyric_score(
+            self,
+            pred_latent: torch.Tensor,
+            encoder_hidden_states: torch.Tensor,
+            encoder_attention_mask: torch.Tensor,
+            context_latents: torch.Tensor,
+            lyric_token_ids: torch.Tensor,
+            vocal_language: str = "en",
+            inference_steps: int = 8,
+            seed: int = 42,
+            custom_layers_config: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """
+        Calculate both LM and DiT alignment scores in one pass.
+
+        - lm_score: Checks structural alignment using pure noise at t=1.0.
+        - dit_score: Checks denoising alignment using regressed latents at t=1/steps.
+
+        Args:
+            pred_latent: Generated latent tensor [batch, T, D]
+            encoder_hidden_states: Cached encoder hidden states
+            encoder_attention_mask: Cached encoder attention mask
+            context_latents: Cached context latents
+            lyric_token_ids: Tokenized lyrics tensor [batch, seq_len]
+            vocal_language: Language code for lyrics header parsing
+            inference_steps: Number of inference steps (for noise level calculation)
+            seed: Random seed for noise generation
+            custom_layers_config: Dict mapping layer indices to head indices
+
+        Returns:
+            Dict containing:
+            - lm_score: float
+            - dit_score: float
+            - success: Whether generation succeeded
+            - error: Error message if failed
+        """
+        from transformers.cache_utils import EncoderDecoderCache, DynamicCache
+
+        if self.model is None:
+            return {
+                "lm_score": 0.0,
+                "dit_score": 0.0,
+                "success": False,
+                "error": "Model not initialized"
+            }
+
+        if custom_layers_config is None:
+            custom_layers_config = self.custom_layers_config
+
+        try:
+            # Move tensors to device
+            device = self.device
+            dtype = self.dtype
+
+            pred_latent = pred_latent.to(device=device, dtype=dtype)
+            encoder_hidden_states = encoder_hidden_states.to(device=device, dtype=dtype)
+            encoder_attention_mask = encoder_attention_mask.to(device=device, dtype=dtype)
+            context_latents = context_latents.to(device=device, dtype=dtype)
+
+            bsz = pred_latent.shape[0]
+
+            if seed is None:
+                x0 = torch.randn_like(pred_latent)
+            else:
+                generator = torch.Generator(device=device).manual_seed(int(seed))
+                x0 = torch.randn(pred_latent.shape, generator=generator, device=device, dtype=dtype)
+
+            # --- Input A: LM Score ---
+            # t = 1.0, xt = Pure Noise
+            t_lm = torch.tensor([1.0] * bsz, device=device, dtype=dtype)
+            xt_lm = x0
+
+            # --- Input B: DiT Score ---
+            # t = 1.0/steps, xt = Regressed Latent
+            t_last_val = 1.0 / inference_steps
+            t_dit = torch.tensor([t_last_val] * bsz, device=device, dtype=dtype)
+            # Flow Matching Regression: xt = t*x0 + (1-t)*x1
+            xt_dit = t_last_val * x0 + (1.0 - t_last_val) * pred_latent
+
+            # Order: [Think_Batch, DiT_Batch]
+            xt_in = torch.cat([xt_lm, xt_dit], dim=0)
+            t_in = torch.cat([t_lm, t_dit], dim=0)
+
+            # Duplicate conditions
+            encoder_hidden_states_in = torch.cat([encoder_hidden_states, encoder_hidden_states], dim=0)
+            encoder_attention_mask_in = torch.cat([encoder_attention_mask, encoder_attention_mask], dim=0)
+            context_latents_in = torch.cat([context_latents, context_latents], dim=0)
+
+            # Prepare Attention Mask
+            latent_length = xt_in.shape[1]
+            attention_mask_in = torch.ones(2 * bsz, latent_length, device=device, dtype=dtype)
+            past_key_values = None
+
+            # Run decoder with output_attentions=True
+            with self._load_model_context("model"):
+                decoder = self.model.decoder
+                if hasattr(decoder, 'eval'):
+                    decoder.eval()
+
+                decoder_outputs = decoder(
+                    hidden_states=xt_in,
+                    timestep=t_in,
+                    timestep_r=t_in,
+                    attention_mask=attention_mask_in,
+                    encoder_hidden_states=encoder_hidden_states_in,
+                    use_cache=False,
+                    past_key_values=past_key_values,
+                    encoder_attention_mask=encoder_attention_mask_in,
+                    context_latents=context_latents_in,
+                    output_attentions=True,
+                    custom_layers_config=custom_layers_config,
+                    enable_early_exit=True
+                )
+
+                # Extract cross-attention matrices
+                if decoder_outputs[2] is None:
+                    return {
+                        "lm_score": 0.0,
+                        "dit_score": 0.0,
+                        "success": False,
+                        "error": "Model did not return attentions"
+                    }
+
+                cross_attns = decoder_outputs[2]  # Tuple of tensors (some may be None)
+
+                captured_layers_list = []
+                for layer_attn in cross_attns:
+                    if layer_attn is None:
+                        continue
+
+                    # Only take conditional part (first half of batch)
+                    layer_matrix = layer_attn.transpose(-1, -2)
+                    captured_layers_list.append(layer_matrix)
+
+                if not captured_layers_list:
+                    return {
+                        "lm_score": 0.0,
+                        "dit_score": 0.0,
+                        "success": False,
+                        "error": "No valid attention layers returned"
+                    }
+
+                stacked = torch.stack(captured_layers_list)
+
+                all_layers_matrix_lm = stacked[:, :bsz, ...]
+                all_layers_matrix_dit = stacked[:, bsz:, ...]
+
+                if bsz == 1:
+                    all_layers_matrix_lm = all_layers_matrix_lm.squeeze(1)
+                    all_layers_matrix_dit = all_layers_matrix_dit.squeeze(1)
+                else:
+                    pass
+
+            # Process lyric token IDs to extract pure lyrics
+            if isinstance(lyric_token_ids, torch.Tensor):
+                raw_lyric_ids = lyric_token_ids[0].tolist()
+            else:
+                raw_lyric_ids = lyric_token_ids
+
+            # Parse header to find lyrics start position
+            header_str = f"# Languages\n{vocal_language}\n\n# Lyric\n"
+            header_ids = self.text_tokenizer.encode(header_str, add_special_tokens=False)
+            start_idx = len(header_ids)
+
+            # Find end of lyrics (before endoftext token)
+            try:
+                end_idx = raw_lyric_ids.index(151643)  # <|endoftext|> token
+            except ValueError:
+                end_idx = len(raw_lyric_ids)
+
+            pure_lyric_ids = raw_lyric_ids[start_idx:end_idx]
+            if start_idx >= all_layers_matrix_lm.shape[-2]:  # Check text dim
+                return {
+                    "lm_score": 0.0,
+                    "dit_score": 0.0,
+                    "success": False,
+                    "error": "Lyrics indices out of bounds"
+                }
+
+            pure_matrix_lm = all_layers_matrix_lm[..., start_idx:end_idx, :]
+            pure_matrix_dit = all_layers_matrix_dit[..., start_idx:end_idx, :]
+
+            # Create aligner and calculate alignment info
+            aligner = MusicLyricScorer(self.text_tokenizer)
+
+            def calculate_single_score(matrix):
+                """Helper to run aligner on a matrix"""
+                info = aligner.lyrics_alignment_info(
+                    attention_matrix=matrix,
+                    token_ids=pure_lyric_ids,
+                    custom_config=custom_layers_config,
+                    return_matrices=False,
+                    medfilt_width=1,
+                )
+                if info.get("energy_matrix") is None:
+                    return 0.0
+
+                res = aligner.calculate_score(
+                    energy_matrix=info["energy_matrix"],
+                    type_mask=info["type_mask"],
+                    path_coords=info["path_coords"],
+                )
+                # Return the final score (check return key)
+                return res.get("lyrics_score", res.get("final_score", 0.0))
+
+            lm_score = calculate_single_score(pure_matrix_lm)
+            dit_score = calculate_single_score(pure_matrix_dit)
+
+            return {
+                "lm_score": lm_score,
+                "dit_score": dit_score,
+                "success": True,
+                "error": None
+            }
+
+        except Exception as e:
+            error_msg = f"Error generating score: {str(e)}"
+            logger.exception("[get_lyric_score] Failed")
+            return {
+                "lm_score": 0.0,
+                "dit_score": 0.0,
                 "success": False,
                 "error": error_msg
             }

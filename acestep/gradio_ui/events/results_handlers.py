@@ -532,7 +532,37 @@ def generate_with_progress(
             score_str = "Done!"
             if auto_score:
                 auto_score_start = time_module.time()
-                score_str = calculate_score_handler(llm_handler, code_str, captions, lyrics, lm_generated_metadata, bpm, key_scale, time_signature, audio_duration, vocal_language, score_scale)
+
+                sample_tensor_data = None
+                try:
+                    full_pred = result.extra_outputs.get("pred_latents")
+
+                    if full_pred is not None and i < full_pred.shape[0]:
+                        sample_tensor_data = {
+                            "pred_latent": full_pred[i:i + 1],
+                            "encoder_hidden_states": result.extra_outputs.get("encoder_hidden_states")[
+                                                     i:i + 1] if result.extra_outputs.get(
+                                "encoder_hidden_states") is not None else None,
+                            "encoder_attention_mask": result.extra_outputs.get("encoder_attention_mask")[
+                                                      i:i + 1] if result.extra_outputs.get(
+                                "encoder_attention_mask") is not None else None,
+                            "context_latents": result.extra_outputs.get("context_latents")[
+                                               i:i + 1] if result.extra_outputs.get(
+                                "context_latents") is not None else None,
+                            "lyric_token_ids": result.extra_outputs.get("lyric_token_idss")[
+                                               i:i + 1] if result.extra_outputs.get(
+                                "lyric_token_idss") is not None else None,
+                        }
+
+                        # 简单校验完整性
+                        if any(v is None for v in sample_tensor_data.values()):
+                            sample_tensor_data = None
+
+                except Exception as e:
+                    print(f"[Auto Score] Failed to prepare tensor data for sample {i}: {e}")
+                    sample_tensor_data = None
+
+                score_str = calculate_score_handler(llm_handler, code_str, captions, lyrics, lm_generated_metadata, bpm, key_scale, time_signature, audio_duration, vocal_language, score_scale, dit_handler, sample_tensor_data, inference_steps)
                 auto_score_end = time_module.time()
                 total_auto_score_time += (auto_score_end - auto_score_start)
             scores_ui_updates[i] = score_str
@@ -714,7 +744,22 @@ def generate_with_progress(
 
 
 
-def calculate_score_handler(llm_handler, audio_codes_str, caption, lyrics, lm_metadata, bpm, key_scale, time_signature, audio_duration, vocal_language, score_scale):
+def calculate_score_handler(
+        llm_handler,
+        audio_codes_str,
+        caption,
+        lyrics,
+        lm_metadata,
+        bpm,
+        key_scale,
+        time_signature,
+        audio_duration,
+        vocal_language,
+        score_scale,
+        dit_handler,
+        extra_tensor_data,
+        inference_steps,
+):
     """
     Calculate PMI-based quality score for generated audio.
     
@@ -733,6 +778,9 @@ def calculate_score_handler(llm_handler, audio_codes_str, caption, lyrics, lm_me
         audio_duration: Audio duration value
         vocal_language: Vocal language value
         score_scale: Sensitivity scale parameter
+        dit_handler: DiT handler instance (for alignment scoring)
+        extra_tensor_data: Dictionary containing tensors for the specific sample
+        inference_steps: Number of inference steps used
         
     Returns:
         Score display string
@@ -791,7 +839,37 @@ def calculate_score_handler(llm_handler, audio_codes_str, caption, lyrics, lm_me
             topk=10,
             score_scale=score_scale
         )
-        
+
+        alignment_report = ""
+
+        # Only calculate if we have the handler, tensor data, and actual lyrics
+        if dit_handler and extra_tensor_data and lyrics and lyrics.strip():
+            try:
+                align_result = dit_handler.get_lyric_score(
+                    pred_latent=extra_tensor_data.get('pred_latent'),
+                    encoder_hidden_states=extra_tensor_data.get('encoder_hidden_states'),
+                    encoder_attention_mask=extra_tensor_data.get('encoder_attention_mask'),
+                    context_latents=extra_tensor_data.get('context_latents'),
+                    lyric_token_ids=extra_tensor_data.get('lyric_token_ids'),
+                    vocal_language=vocal_language or "en",
+                    inference_steps=int(inference_steps),
+                    seed=42,
+                )
+
+                if align_result.get("success"):
+                    lm_align_score = align_result.get("lm_score", 0.0)
+                    dit_align_score = align_result.get("dit_score", 0.0)
+                    alignment_report = (
+                        f"  • llm lyrics alignment score: {lm_align_score:.4f}\n"
+                        f"  • dit lyrics alignment score: {dit_align_score:.4f}\n"
+                        "\n(Measures how well lyrics timestamps match audio energy using Cross-Attention)"
+                    )
+                else:
+                    align_err = align_result.get("error", "Unknown error")
+                    alignment_report = f"\n⚠️ Alignment Score Failed: {align_err}"
+            except Exception as e:
+                alignment_report = f"\n⚠️ Alignment Score Error: {str(e)}"
+
         # Format display string with per-condition breakdown
         if global_score == 0.0 and not scores_per_condition:
             return t("messages.score_failed", error=status)
@@ -804,12 +882,17 @@ def calculate_score_handler(llm_handler, audio_codes_str, caption, lyrics, lm_me
                 )
             
             conditions_display = "\n".join(condition_lines) if condition_lines else "  (no conditions)"
-            
-            return (
+
+            final_output = (
                 f"✅ Global Quality Score: {global_score:.4f} (0-1, higher=better)\n\n"
-                f"📊 Per-Condition Scores (0-1):\n{conditions_display}\n\n"
-                f"Note: Metadata uses Top-k Recall, Caption/Lyrics use PMI\n"
+                f"📊 Per-Condition Scores (0-1):\n{conditions_display}\n"
             )
+
+            if alignment_report:
+                final_output += alignment_report + "\n"
+
+            final_output += "Note: Metadata uses Top-k Recall, Caption/Lyrics use PMI"
+            return final_output
             
     except Exception as e:
         import traceback
@@ -817,12 +900,19 @@ def calculate_score_handler(llm_handler, audio_codes_str, caption, lyrics, lm_me
         return error_msg
 
 
-def calculate_score_handler_with_selection(llm_handler, sample_idx, score_scale, current_batch_index, batch_queue):
+def calculate_score_handler_with_selection(
+        dit_handler,
+        llm_handler,
+        sample_idx,
+        score_scale,
+        current_batch_index,
+        batch_queue):
     """
     Calculate PMI-based quality score - REFACTORED to read from batch_queue only.
     This ensures scoring uses the actual generation parameters, not current UI values.
     
     Args:
+        dit_handler: DiT Handler
         llm_handler: LLM handler instance
         sample_idx: Which sample to score (1-8)
         score_scale: Sensitivity scale parameter (tool setting, can be from UI)
@@ -843,6 +933,7 @@ def calculate_score_handler_with_selection(llm_handler, sample_idx, score_scale,
     time_signature = params.get("time_signature", "")
     audio_duration = params.get("audio_duration", -1)
     vocal_language = params.get("vocal_language", "")
+    inference_steps = params.get("inference_steps", 8)
     
     # Get LM metadata from batch_data (if it was saved during generation)
     lm_metadata = batch_data.get("lm_generated_metadata", None)
@@ -862,13 +953,51 @@ def calculate_score_handler_with_selection(llm_handler, sample_idx, score_scale,
     else:
         # Single mode: all samples use same codes
         audio_codes_str = stored_codes if isinstance(stored_codes, str) else ""
-    
+
+    # Extract Tensor Data for Alignment Score (Extra Outputs)
+    extra_tensor_data = None
+    extra_outputs = batch_data.get("extra_outputs", {})
+
+    # Only proceed if we have tensors and a valid index
+    if extra_outputs and dit_handler:
+        pred_latents = extra_outputs.get("pred_latents")
+        # Ensure we have the critical tensor to check batch size
+        if pred_latents is not None:
+            sample_idx_0based = sample_idx - 1
+            batch_size = pred_latents.shape[0]
+
+            if 0 <= sample_idx_0based < batch_size:
+                # Slice tensors for this specific sample (keep dimension [1, ...])
+                # We assume all stored tensors are aligned in batch dim 0
+                try:
+                    extra_tensor_data = {
+                        "pred_latent": pred_latents[sample_idx_0based:sample_idx_0based + 1],
+                        "encoder_hidden_states": extra_outputs.get("encoder_hidden_states")[
+                                                 sample_idx_0based:sample_idx_0based + 1],
+                        "encoder_attention_mask": extra_outputs.get("encoder_attention_mask")[
+                                                  sample_idx_0based:sample_idx_0based + 1],
+                        "context_latents": extra_outputs.get("context_latents")[
+                                           sample_idx_0based:sample_idx_0based + 1],
+                        "lyric_token_ids": extra_outputs.get("lyric_token_idss")[
+                                           sample_idx_0based:sample_idx_0based + 1]
+                    }
+
+                    # Verify no None values in the sliced dict
+                    if any(v is None for v in extra_tensor_data.values()):
+                        extra_tensor_data = None
+                except Exception as e:
+                    print(f"Error slicing tensor data for score: {e}")
+                    extra_tensor_data = None
+
     # Calculate score using historical parameters
     score_display = calculate_score_handler(
         llm_handler,
         audio_codes_str, caption, lyrics, lm_metadata,
         bpm, key_scale, time_signature, audio_duration, vocal_language,
-        score_scale
+        score_scale,
+        dit_handler,
+        extra_tensor_data,
+        inference_steps,
     )
     
     # Update batch_queue with the calculated score
