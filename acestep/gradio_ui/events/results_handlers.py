@@ -532,7 +532,37 @@ def generate_with_progress(
             score_str = "Done!"
             if auto_score:
                 auto_score_start = time_module.time()
-                score_str = calculate_score_handler(llm_handler, code_str, captions, lyrics, lm_generated_metadata, bpm, key_scale, time_signature, audio_duration, vocal_language, score_scale)
+
+                sample_tensor_data = None
+                try:
+                    full_pred = result.extra_outputs.get("pred_latents")
+
+                    if full_pred is not None and i < full_pred.shape[0]:
+                        sample_tensor_data = {
+                            "pred_latent": full_pred[i:i + 1],
+                            "encoder_hidden_states": result.extra_outputs.get("encoder_hidden_states")[
+                                                     i:i + 1] if result.extra_outputs.get(
+                                "encoder_hidden_states") is not None else None,
+                            "encoder_attention_mask": result.extra_outputs.get("encoder_attention_mask")[
+                                                      i:i + 1] if result.extra_outputs.get(
+                                "encoder_attention_mask") is not None else None,
+                            "context_latents": result.extra_outputs.get("context_latents")[
+                                               i:i + 1] if result.extra_outputs.get(
+                                "context_latents") is not None else None,
+                            "lyric_token_ids": result.extra_outputs.get("lyric_token_idss")[
+                                               i:i + 1] if result.extra_outputs.get(
+                                "lyric_token_idss") is not None else None,
+                        }
+
+                        # 简单校验完整性
+                        if any(v is None for v in sample_tensor_data.values()):
+                            sample_tensor_data = None
+
+                except Exception as e:
+                    print(f"[Auto Score] Failed to prepare tensor data for sample {i}: {e}")
+                    sample_tensor_data = None
+
+                score_str = calculate_score_handler(llm_handler, code_str, captions, lyrics, lm_generated_metadata, bpm, key_scale, time_signature, audio_duration, vocal_language, score_scale, dit_handler, sample_tensor_data, inference_steps)
                 auto_score_end = time_module.time()
                 total_auto_score_time += (auto_score_end - auto_score_start)
             scores_ui_updates[i] = score_str
