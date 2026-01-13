@@ -336,7 +336,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     # Use default argument to capture btn_idx value at definition time (Python closure fix)
     def make_score_handler(idx):
         return lambda scale, batch_idx, queue: res_h.calculate_score_handler_with_selection(
-            llm_handler, idx, scale, batch_idx, queue
+            dit_handler, llm_handler, idx, scale, batch_idx, queue
         )
     
     for btn_idx in range(1, 9):
