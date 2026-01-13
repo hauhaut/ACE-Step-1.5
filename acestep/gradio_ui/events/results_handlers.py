@@ -625,7 +625,9 @@ def generate_with_progress(
             
             status_message = f"Encoding & Ready: {i+1}/{len(audios)}"
             current_audio_updates = [gr.skip() for _ in range(8)]
-            # Always set audio path first, subtitles will be applied via Audio component's subtitles parameter
+            # Set audio path - subtitles will be handled separately
+            # Note: gr.update() in yield doesn't work reliably, so we pass the path directly
+            # and rely on lrc_display.change() or final update for subtitles
             current_audio_updates[i] = audio_path
 
             # Codes display updates (for results section)
@@ -697,14 +699,16 @@ def generate_with_progress(
         num_audios=len(result.audios),
     )
     
-    # Build final codes display, LRC display, and accordion visibility updates
+    # Build final codes display, LRC display, accordion visibility updates, and audio subtitles
     final_codes_display_updates = []
     final_lrc_display_updates = []
     final_accordion_updates = []
+    final_audio_updates = []
     for i in range(8):
         code_str = final_codes_list[i]
         lrc_text = final_lrcs_list[i]
         score_str = final_scores_list[i]
+        subtitles = final_subtitles_list[i]
         has_code = bool(code_str)
         has_lrc = bool(lrc_text)
         has_score = bool(score_str) and score_str != "Done!"
@@ -713,10 +717,16 @@ def generate_with_progress(
         final_codes_display_updates.append(gr.update(value=code_str, visible=has_code))
         final_lrc_display_updates.append(gr.update(value=lrc_text, visible=has_lrc))
         final_accordion_updates.append(gr.update(visible=has_content))
+        # Set subtitles in final yield (only subtitles, not value - to avoid reload)
+        # This applies auto_lrc subtitles after all audio paths are set
+        if subtitles:
+            final_audio_updates.append(gr.update(subtitles=subtitles))
+        else:
+            final_audio_updates.append(gr.skip())
     
     yield (
-        gr.skip(), gr.skip(), gr.skip(), gr.skip(), # Audio 1-4: SKIP
-        gr.skip(), gr.skip(), gr.skip(), gr.skip(), # Audio 5-8: SKIP
+        final_audio_updates[0], final_audio_updates[1], final_audio_updates[2], final_audio_updates[3],
+        final_audio_updates[4], final_audio_updates[5], final_audio_updates[6], final_audio_updates[7],
         all_audio_paths,
         generation_info,
         "Generation Complete",
@@ -1020,7 +1030,7 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
     
     This function retrieves cached generation data from batch_queue and calls
     the handler's get_lyric_timestamp method to generate LRC format lyrics.
-    Audio subtitles are automatically updated via lrc_display.change() event.
+    Audio subtitles are directly updated by this handler (not via lrc_display.change()).
     
     Args:
         dit_handler: DiT handler instance with get_lyric_timestamp method
@@ -1031,19 +1041,19 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
         inference_steps: Number of inference steps used in generation
     
     Returns:
-        Tuple of (lrc_display_update, details_accordion_update, batch_queue)
+        Tuple of (lrc_display_update, details_accordion_update, audio_update, batch_queue)
     """
     import torch
     
     if current_batch_index not in batch_queue:
-        return gr.skip(), gr.skip(), batch_queue
+        return gr.skip(), gr.skip(), gr.skip(), batch_queue
     
     batch_data = batch_queue[current_batch_index]
     extra_outputs = batch_data.get("extra_outputs", {})
     
     # Check if required data is available
     if not extra_outputs:
-        return gr.update(value=t("messages.lrc_no_extra_outputs"), visible=True), gr.update(visible=True), batch_queue
+        return gr.update(value=t("messages.lrc_no_extra_outputs"), visible=True), gr.update(visible=True), gr.skip(), batch_queue
     
     pred_latents = extra_outputs.get("pred_latents")
     encoder_hidden_states = extra_outputs.get("encoder_hidden_states")
@@ -1052,7 +1062,7 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
     lyric_token_idss = extra_outputs.get("lyric_token_idss")
     
     if any(x is None for x in [pred_latents, encoder_hidden_states, encoder_attention_mask, context_latents, lyric_token_idss]):
-        return gr.update(value=t("messages.lrc_missing_tensors"), visible=True), gr.update(visible=True), batch_queue
+        return gr.update(value=t("messages.lrc_missing_tensors"), visible=True), gr.update(visible=True), gr.skip(), batch_queue
     
     # Adjust sample_idx to 0-based
     sample_idx_0based = sample_idx - 1
@@ -1060,7 +1070,7 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
     # Check if sample exists in batch
     batch_size = pred_latents.shape[0]
     if sample_idx_0based >= batch_size:
-        return gr.update(value=t("messages.lrc_sample_not_exist"), visible=True), gr.update(visible=True), batch_queue
+        return gr.update(value=t("messages.lrc_sample_not_exist"), visible=True), gr.update(visible=True), gr.skip(), batch_queue
     
     # Extract the specific sample's data
     try:
@@ -1098,14 +1108,14 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
         if result.get("success"):
             lrc_text = result.get("lrc_text", "")
             if not lrc_text:
-                return gr.update(value=t("messages.lrc_empty_result"), visible=True), gr.update(visible=True), batch_queue
+                return gr.update(value=t("messages.lrc_empty_result"), visible=True), gr.update(visible=True), gr.skip(), batch_queue
             
             # Store LRC in batch_queue for later retrieval when switching batches
             if "lrcs" not in batch_queue[current_batch_index]:
                 batch_queue[current_batch_index]["lrcs"] = [""] * 8
             batch_queue[current_batch_index]["lrcs"][sample_idx_0based] = lrc_text
             
-            # Parse LRC to subtitles format for storage (audio subtitles will be updated via lrc_display.change())
+            # Parse LRC to subtitles format
             subtitles_data = parse_lrc_to_subtitles(lrc_text, total_duration=float(audio_duration))
             
             # Store subtitles in batch_queue for batch navigation
@@ -1113,28 +1123,32 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
                 batch_queue[current_batch_index]["subtitles"] = [None] * 8
             batch_queue[current_batch_index]["subtitles"][sample_idx_0based] = subtitles_data
             
-            # Return: lrc_display, details_accordion, batch_queue
-            # Audio subtitles are automatically updated via lrc_display.change() event
+            # Return: lrc_display, details_accordion, audio (subtitles only!), batch_queue
+            # IMPORTANT: Only update subtitles, NOT value - this avoids audio reload/flickering
             return (
                 gr.update(value=lrc_text, visible=True),
                 gr.update(visible=True),
+                gr.update(subtitles=subtitles_data),  # Only update subtitles, not value!
                 batch_queue
             )
         else:
             error_msg = result.get("error", "Unknown error")
-            return gr.update(value=f"❌ {error_msg}", visible=True), gr.update(visible=True), batch_queue
+            return gr.update(value=f"❌ {error_msg}", visible=True), gr.update(visible=True), gr.skip(), batch_queue
             
     except Exception as e:
         logger.exception("[generate_lrc_handler] Error generating LRC")
-        return gr.update(value=f"❌ Error: {str(e)}", visible=True), gr.update(visible=True), batch_queue
+        return gr.update(value=f"❌ Error: {str(e)}", visible=True), gr.update(visible=True), gr.skip(), batch_queue
 
 
 def update_audio_subtitles_from_lrc(lrc_text: str, audio_component_value, audio_duration: float = None):
     """
     Update Audio component's subtitles based on LRC text content.
     
-    This function is triggered when lrc_display textbox changes.
+    This function is triggered when lrc_display textbox changes (user manual edit).
     It parses the LRC text and updates the corresponding Audio component's subtitles.
+    
+    Note: When LRC button is clicked, subtitles are updated directly by generate_lrc_handler,
+    not through this function. This function handles manual LRC text edits only.
     
     Args:
         lrc_text: LRC format lyrics string from lrc_display textbox
@@ -1144,10 +1158,6 @@ def update_audio_subtitles_from_lrc(lrc_text: str, audio_component_value, audio_
     Returns:
         gr.update for the Audio component with subtitles
     """
-    # If no LRC text, skip update (don't clear subtitles to avoid flickering)
-    if not lrc_text or not lrc_text.strip():
-        return gr.skip()
-    
     # Get audio path from component value
     audio_path = None
     if audio_component_value:
@@ -1156,14 +1166,21 @@ def update_audio_subtitles_from_lrc(lrc_text: str, audio_component_value, audio_
         else:
             audio_path = audio_component_value
     
+    # If no audio, skip update
     if not audio_path:
         return gr.skip()
+    
+    # If LRC text is empty, clear subtitles
+    # Must set value together with subtitles=None to ensure Gradio properly clears the subtitles
+    if not lrc_text or not lrc_text.strip():
+        return gr.update(value=audio_path, subtitles=None)
     
     # Parse LRC to subtitles format
     subtitles_data = parse_lrc_to_subtitles(lrc_text, total_duration=audio_duration)
     
-    # Return updated audio with subtitles
-    return gr.update(value=audio_path, subtitles=subtitles_data if subtitles_data else None)
+    # For non-empty LRC updates, only set subtitles (avoid audio reload/flickering)
+    # This is for manual LRC text edits - the audio value should remain unchanged
+    return gr.update(subtitles=subtitles_data if subtitles_data else None)
 
 
 def capture_current_params(
@@ -1374,7 +1391,8 @@ def generate_with_batch_management(
     
     # Extract extra_outputs from result tuple (index 46 after adding lrc_display)
     # Note: index 47 is raw_codes_list which we already extracted above
-    extra_outputs_from_result = result[46] if len(result) > 46 else {}
+    # Must check both length AND that the value is not None (intermediate yields use None as placeholder)
+    extra_outputs_from_result = result[46] if len(result) > 46 and result[46] is not None else {}
     
     # Store current batch in queue
     batch_queue = store_batch_in_queue(
@@ -1610,7 +1628,8 @@ def generate_next_batch_background(
         generated_codes_single = generated_codes_batch[0] if generated_codes_batch else ""
         
         # Extract extra_outputs for LRC generation (index 46)
-        extra_outputs_from_bg = final_result[46] if len(final_result) > 46 else None
+        # Must check both length AND that the value is not None (intermediate yields use None as placeholder)
+        extra_outputs_from_bg = final_result[46] if len(final_result) > 46 and final_result[46] is not None else {}
         
         # Determine which codes to store
         batch_size = params.get("batch_size_input", 2)

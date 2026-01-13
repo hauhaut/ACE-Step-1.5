@@ -373,7 +373,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             outputs=[
                 results_section[f"lrc_display_{btn_idx}"],
                 results_section[f"details_accordion_{btn_idx}"],
-                # Audio subtitles now auto-updated via lrc_display.change()
+                results_section[f"generated_audio_{btn_idx}"],  # Direct audio update (subtitles only)
                 results_section["batch_queue"]
             ]
         )
@@ -723,14 +723,11 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     )
     
     # ========== LRC Display Change Handlers ==========
-    # When lrc_display textbox changes, update the corresponding audio component's subtitles
-    for i in range(1, 9):
-        results_section[f"lrc_display_{i}"].change(
-            fn=res_h.update_audio_subtitles_from_lrc,
-            inputs=[
-                results_section[f"lrc_display_{i}"],
-                results_section[f"generated_audio_{i}"],
-                generation_section["audio_duration"],
-            ],
-            outputs=[results_section[f"generated_audio_{i}"]]
-        )
+    # REMOVED: lrc_display.change() event was causing audio flickering issues
+    # 
+    # Subtitles are now updated through:
+    # 1. Manual LRC button click -> generate_lrc_handler directly updates subtitles
+    # 2. Auto LRC generation -> subtitles stored in batch_queue, applied during batch navigation
+    # 3. Batch navigation (prev/next) -> subtitles applied from batch_queue
+    #
+    # If user manually edits LRC text, they can click the LRC button to apply changes.
