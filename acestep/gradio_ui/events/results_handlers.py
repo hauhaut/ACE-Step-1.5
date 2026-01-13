@@ -477,15 +477,20 @@ def generate_with_progress(
     audios = result.audios
     progress(0.99, "Converting audio to mp3...")
     
-    # Clear all scores, codes, and lrc displays at the start of generation
+    # Clear all scores, codes, lrc displays at the start of generation
     # Note: Create independent gr.update objects (not references to the same object)
+    # CRITICAL: Must clear audio subtitles here! Otherwise old subtitles persist on new audio
+    # causing flickering when second generation loads new audio but old subtitles remain.
     clear_scores = [gr.update(value="", visible=False) for _ in range(8)]
     clear_codes = [gr.update(value="", visible=False) for _ in range(8)]
     clear_lrcs = [gr.update(value="", visible=False) for _ in range(8)]
     clear_accordions = [gr.update(visible=False) for _ in range(8)]
+    # Clear subtitles FIRST before any new audio is loaded
+    clear_audio_subtitles = [gr.update(subtitles=[]) for _ in range(8)]
     yield (
-        # Audio outputs (keep as skip, will be updated in loop)
-        gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+        # Clear audio subtitles (value will be updated in loop, but clear subtitles NOW)
+        clear_audio_subtitles[0], clear_audio_subtitles[1], clear_audio_subtitles[2], clear_audio_subtitles[3],
+        clear_audio_subtitles[4], clear_audio_subtitles[5], clear_audio_subtitles[6], clear_audio_subtitles[7],
         None,  # all_audio_paths (clear batch files)
         generation_info,
         "Clearing previous results...",
@@ -507,6 +512,7 @@ def generate_with_progress(
         None,  # extra_outputs placeholder
         None,  # raw_codes placeholder
     )
+    time_module.sleep(0.1)
     
     for i in range(8):
         if i < len(audios):
@@ -625,9 +631,8 @@ def generate_with_progress(
             
             status_message = f"Encoding & Ready: {i+1}/{len(audios)}"
             current_audio_updates = [gr.skip() for _ in range(8)]
-            # Set audio path - subtitles will be handled separately
-            # Note: gr.update() in yield doesn't work reliably, so we pass the path directly
-            # and rely on lrc_display.change() or final update for subtitles
+            # Only set value here, subtitles will be set in the final yield
+            # Setting value and subtitles together causes flickering issues
             current_audio_updates[i] = audio_path
 
             # Codes display updates (for results section)
@@ -700,30 +705,26 @@ def generate_with_progress(
     )
     
     # Build final codes display, LRC display, accordion visibility updates, and audio subtitles
-    final_codes_display_updates = []
-    final_lrc_display_updates = []
-    final_accordion_updates = []
+    final_codes_display_updates = [gr.skip() for _ in range(8)]
+    final_lrc_display_updates = [gr.skip() for _ in range(8)]
+    final_accordion_updates = [gr.skip() for _ in range(8)]
+    
+    # Set subtitles separately from value (setting both together causes flickering)
+    # For samples with auto_lrc subtitles: set the subtitles
+    # For samples without subtitles: clear any old subtitles by setting to None
+    # This ensures old subtitles from previous generation are removed
     final_audio_updates = []
     for i in range(8):
-        code_str = final_codes_list[i]
-        lrc_text = final_lrcs_list[i]
-        score_str = final_scores_list[i]
-        subtitles = final_subtitles_list[i]
-        has_code = bool(code_str)
-        has_lrc = bool(lrc_text)
-        has_score = bool(score_str) and score_str != "Done!"
-        # Show accordion if code OR LRC OR score exists
-        has_content = has_code or has_lrc or has_score
-        final_codes_display_updates.append(gr.update(value=code_str, visible=has_code))
-        final_lrc_display_updates.append(gr.update(value=lrc_text, visible=has_lrc))
-        final_accordion_updates.append(gr.update(visible=has_content))
-        # Set subtitles in final yield (only subtitles, not value - to avoid reload)
-        # This applies auto_lrc subtitles after all audio paths are set
-        if subtitles:
-            final_audio_updates.append(gr.update(subtitles=subtitles))
+        if i < len(audios):
+            # This sample was generated - set or clear subtitles
+            # Use empty array [] to clear subtitles (None doesn't work!)
+            subtitles_data = final_subtitles_list[i] if auto_lrc and final_subtitles_list[i] else []
+            # Apply subtitles (or [] to clear old ones) - only update subtitles, not value!
+            final_audio_updates.append(gr.update(subtitles=subtitles_data))
         else:
+            # This sample slot was not used - skip
             final_audio_updates.append(gr.skip())
-    
+
     yield (
         final_audio_updates[0], final_audio_updates[1], final_audio_updates[2], final_audio_updates[3],
         final_audio_updates[4], final_audio_updates[5], final_audio_updates[6], final_audio_updates[7],
@@ -1171,16 +1172,16 @@ def update_audio_subtitles_from_lrc(lrc_text: str, audio_component_value, audio_
         return gr.skip()
     
     # If LRC text is empty, clear subtitles
-    # Must set value together with subtitles=None to ensure Gradio properly clears the subtitles
+    # Use empty array [] to clear subtitles (None doesn't work!)
     if not lrc_text or not lrc_text.strip():
-        return gr.update(value=audio_path, subtitles=None)
+        return gr.update(value=audio_path, subtitles=[])
     
     # Parse LRC to subtitles format
     subtitles_data = parse_lrc_to_subtitles(lrc_text, total_duration=audio_duration)
     
     # For non-empty LRC updates, only set subtitles (avoid audio reload/flickering)
     # This is for manual LRC text edits - the audio value should remain unchanged
-    return gr.update(subtitles=subtitles_data if subtitles_data else None)
+    return gr.update(subtitles=subtitles_data if subtitles_data else [])
 
 
 def capture_current_params(
@@ -1438,8 +1439,17 @@ def generate_with_batch_management(
     # 0-7: audio_outputs, 8: all_audio_paths, 9: generation_info, 10: status, 11: seed
     # 12-19: scores, 20-27: codes_display, 28-35: details_accordion, 36-43: lrc_display
     # 44: lm_metadata, 45: is_format_caption, 46: extra_outputs, 47: raw_codes_list
-    # Note: Audio subtitles are already included in the intermediate yields from generate_with_progress
+    # 
+    # IMPORTANT: Audio updates (including subtitles) were already sent in the for-loop above.
+    # We must NOT send them again here, otherwise the audio component receives duplicate updates
+    # which can cause subtitle flickering. Replace audio updates (indices 0-7) with gr.skip().
     ui_result = result[:-2] if len(result) > 47 else (result[:-1] if len(result) > 46 else result)
+    
+    # Replace audio outputs (0-7) with gr.skip() to avoid duplicate updates
+    ui_result_list = list(ui_result)
+    for i in range(8):
+        ui_result_list[i] = gr.skip()
+    ui_result = tuple(ui_result_list)
     
     yield ui_result + (
         current_batch_index,
@@ -1727,11 +1737,12 @@ def navigate_to_previous_batch(current_batch_index, batch_queue):
     for idx in range(8):
         if idx < len(real_audio_paths):
             audio_path = real_audio_paths[idx]
-            subtitles_data = stored_subtitles[idx] if idx < len(stored_subtitles) else None
+            # Use empty array [] if no subtitles stored (None doesn't clear properly)
+            subtitles_data = stored_subtitles[idx] if idx < len(stored_subtitles) and stored_subtitles[idx] else []
             # Use gr.update to set both value and subtitles
             audio_updates.append(gr.update(value=audio_path, subtitles=subtitles_data))
         else:
-            audio_updates.append(gr.update(value=None, subtitles=None))
+            audio_updates.append(gr.update(value=None, subtitles=[]))
     
     # Update batch indicator
     total_batches = len(batch_queue)
@@ -1820,11 +1831,12 @@ def navigate_to_next_batch(autogen_enabled, current_batch_index, total_batches, 
     for idx in range(8):
         if idx < len(real_audio_paths):
             audio_path = real_audio_paths[idx]
-            subtitles_data = stored_subtitles[idx] if idx < len(stored_subtitles) else None
+            # Use empty array [] if no subtitles stored (None doesn't clear properly)
+            subtitles_data = stored_subtitles[idx] if idx < len(stored_subtitles) and stored_subtitles[idx] else []
             # Use gr.update to set both value and subtitles
             audio_updates.append(gr.update(value=audio_path, subtitles=subtitles_data))
         else:
-            audio_updates.append(gr.update(value=None, subtitles=None))
+            audio_updates.append(gr.update(value=None, subtitles=[]))
     
     # Update batch indicator
     batch_indicator_text = update_batch_indicator(new_batch_index, total_batches)
