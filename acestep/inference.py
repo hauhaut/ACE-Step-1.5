@@ -297,8 +297,14 @@ def generate_music(
         actual_seed_list, _ = dit_handler.prepare_seeds(actual_batch_size, seed_for_generation, config.use_random_seed)
 
         # LM-based Chain-of-Thought reasoning
-        use_lm = params.thinking and llm_handler.llm_initialized
+        # Skip LM for cover/repaint tasks - these tasks use reference/src audio directly
+        # and don't need LM to generate audio codes
+        skip_lm_tasks = {"cover", "repaint"}
+        use_lm = params.thinking and llm_handler.llm_initialized and params.task_type not in skip_lm_tasks
         lm_status = []
+        
+        if params.task_type in skip_lm_tasks:
+            logger.info(f"Skipping LM for task_type='{params.task_type}' - using DiT directly")
         if use_lm:
             # Convert sampling parameters - handle None values safely
             top_k_value = None if not params.lm_top_k or params.lm_top_k == 0 else int(params.lm_top_k)

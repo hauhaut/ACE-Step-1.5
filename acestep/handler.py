@@ -793,8 +793,11 @@ class AceStepHandler:
         Returns:
             Latents tensor [T, D] or [batch, T, D]
         """
+        # Save original dimension info BEFORE modifying audio
+        input_was_2d = (audio.dim() == 2)
+        
         # Ensure batch dimension
-        if audio.dim() == 2:
+        if input_was_2d:
             audio = audio.unsqueeze(0)
         
         # Ensure input is in VAE's dtype
@@ -811,7 +814,7 @@ class AceStepHandler:
         latents = latents.transpose(1, 2)
         
         # Remove batch dimension if input didn't have it
-        if audio.dim() == 2:
+        if input_was_2d:
             latents = latents.squeeze(0)
         
         return latents

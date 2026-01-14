@@ -21,87 +21,149 @@ from acestep.audio_utils import save_audio
 
 def parse_lrc_to_subtitles(lrc_text: str, total_duration: Optional[float] = None) -> List[Dict[str, Any]]:
     """
-    Parse LRC lyrics text to Gradio subtitles format.
+    Parse LRC lyrics text to Gradio subtitles format with SMART POST-PROCESSING.
     
-    LRC format: [MM:SS.ss]Lyric text or [MM:SS.ss][MM:SS.ss]Lyric text (with end time)
-    Gradio subtitles format: [{"text": str, "timestamp": [start, end]}]
+    Fixes the issue where lines starting very close to each other (e.g. Intro/Verse tags)
+    disappear too quickly. It merges short lines into the subsequent line.
     
     Args:
         lrc_text: LRC format lyrics string
-        total_duration: Total audio duration in seconds (used for last line's end time)
+        total_duration: Total audio duration in seconds
         
     Returns:
-        List of subtitle dictionaries for Gradio Audio component
+        List of subtitle dictionaries
     """
     if not lrc_text or not lrc_text.strip():
         return []
     
-    subtitles = []
-    lines = lrc_text.strip().split('\n')
-    
     # Regex patterns for LRC timestamps
-    # Pattern 1: [MM:SS.ss] or [MM:SS.sss] - standard LRC with start time only
-    # Pattern 2: [MM:SS.ss][MM:SS.ss] - LRC with both start and end time
-    # Support both 2-digit (centiseconds) and 3-digit (milliseconds) formats
     timestamp_pattern = r'\[(\d{2}):(\d{2})\.(\d{2,3})\]'
     
-    parsed_lines = []
+    raw_entries = []
+    lines = lrc_text.strip().split('\n')
     
     for line in lines:
         line = line.strip()
         if not line:
             continue
         
-        # Find all timestamps in the line
         timestamps = re.findall(timestamp_pattern, line)
         if not timestamps:
             continue
         
-        # Remove timestamps from text to get the lyric content
         text = re.sub(timestamp_pattern, '', line).strip()
+        # Even if text is empty, we might want to capture the timestamp to mark an end,
+        # but for subtitles, empty text usually means silence or instrumental.
+        # We keep it if it has text, or if it looks like a functional tag.
         if not text:
             continue
-        
-        # Parse first timestamp as start time
-        # Handle both 2-digit (centiseconds, /100) and 3-digit (milliseconds, /1000) formats
+            
+        # Parse start time
         start_minutes, start_seconds, start_centiseconds = timestamps[0]
         cs = int(start_centiseconds)
+        # Handle 2-digit (1/100) vs 3-digit (1/1000)
         start_time = int(start_minutes) * 60 + int(start_seconds) + (cs / 100.0 if len(start_centiseconds) == 2 else cs / 1000.0)
         
-        # If there's a second timestamp, use it as end time
+        # Determine explicit end time if present (e.g. [start][end]text)
         end_time = None
         if len(timestamps) >= 2:
             end_minutes, end_seconds, end_centiseconds = timestamps[1]
             cs_end = int(end_centiseconds)
             end_time = int(end_minutes) * 60 + int(end_seconds) + (cs_end / 100.0 if len(end_centiseconds) == 2 else cs_end / 1000.0)
-        
-        parsed_lines.append({
+            
+        raw_entries.append({
             'start': start_time,
-            'end': end_time,
+            'explicit_end': end_time,
             'text': text
         })
     
     # Sort by start time
-    parsed_lines.sort(key=lambda x: x['start'])
+    raw_entries.sort(key=lambda x: x['start'])
     
-    # Fill in missing end times using next line's start time
-    for i, line_data in enumerate(parsed_lines):
-        if line_data['end'] is None:
-            if i + 1 < len(parsed_lines):
-                # Use next line's start time as end time
-                line_data['end'] = parsed_lines[i + 1]['start']
-            elif total_duration is not None:
-                # Use total duration for last line
-                line_data['end'] = total_duration
-            else:
-                # Default: add 5 seconds if no duration info
-                line_data['end'] = line_data['start'] + 5.0
+    if not raw_entries:
+        return []
+
+    # --- POST-PROCESSING: MERGE SHORT LINES ---
+    # Threshold: If a line displays for less than X seconds before the next line, merge them.
+    MIN_DISPLAY_DURATION = 2.0  # seconds
+    
+    merged_entries = []
+    i = 0
+    while i < len(raw_entries):
+        current = raw_entries[i]
         
-        subtitles.append({
-            'text': line_data['text'],
-            'timestamp': [line_data['start'], line_data['end']]
+        # Look ahead to see if we need to merge multiple lines
+        # We act as an accumulator
+        combined_text = current['text']
+        combined_start = current['start']
+        # Default end is strictly the explicit end, or we figure it out later
+        combined_explicit_end = current['explicit_end'] 
+        
+        next_idx = i + 1
+        
+        # While there is a next line, and the gap between current start and next start is too small
+        while next_idx < len(raw_entries):
+            next_entry = raw_entries[next_idx]
+            gap = next_entry['start'] - combined_start
+            
+            # If the gap is smaller than threshold (and the next line doesn't start way later)
+            # We merge 'current' into 'next' visually by stacking text
+            if gap < MIN_DISPLAY_DURATION:
+                # Merge text
+                # If text is wrapped in brackets [], likely a tag, separate with space
+                # If regular lyrics, maybe newline? Let's use newline for clarity in subtitles.
+                combined_text += "\n" + next_entry['text']
+                
+                # The explicit end becomes the next entry's explicit end (if any), 
+                # effectively extending the block
+                if next_entry['explicit_end']:
+                    combined_explicit_end = next_entry['explicit_end']
+                
+                # Consume this next entry
+                next_idx += 1
+            else:
+                # Gap is big enough, stop merging
+                break
+        
+        # Add the (potentially merged) entry
+        merged_entries.append({
+            'start': combined_start,
+            'explicit_end': combined_explicit_end,
+            'text': combined_text
         })
-    
+        
+        # Move loop index
+        i = next_idx
+
+    # --- GENERATE FINAL SUBTITLES ---
+    subtitles = []
+    for i, entry in enumerate(merged_entries):
+        start = entry['start']
+        text = entry['text']
+        
+        # Determine End Time
+        if entry['explicit_end'] is not None:
+            end = entry['explicit_end']
+        else:
+            # If no explicit end, use next line's start
+            if i + 1 < len(merged_entries):
+                end = merged_entries[i + 1]['start']
+            else:
+                # Last line
+                if total_duration is not None and total_duration > start:
+                    end = total_duration
+                else:
+                    end = start + 5.0  # Default duration for last line
+        
+        # Final safety: Ensure end > start
+        if end <= start:
+            end = start + 3.0
+            
+        subtitles.append({
+            'text': text,
+            'timestamp': [start, end]
+        })
+        
     return subtitles
 
 
@@ -351,82 +413,35 @@ def update_navigation_buttons(current_batch, total_batches):
     return can_go_previous, can_go_next
 
 def send_audio_to_src_with_metadata(audio_file, lm_metadata):
-    """Send generated audio file to src_audio input and populate metadata fields
+    """Send generated audio file to src_audio input WITHOUT modifying other fields
+    
+    This function ONLY sets the src_audio field. All other metadata fields (caption, lyrics, etc.)
+    are preserved by returning gr.skip() to avoid overwriting user's existing inputs.
     
     Args:
         audio_file: Audio file path
-        lm_metadata: Dictionary containing LM-generated metadata
+        lm_metadata: Dictionary containing LM-generated metadata (unused, kept for API compatibility)
         
     Returns:
         Tuple of (audio_file, bpm, caption, lyrics, duration, key_scale, language, time_signature, is_format_caption)
+        All values except audio_file are gr.skip() to preserve existing UI values
     """
     if audio_file is None:
-        return None, None, None, None, None, None, None, None, True  # Keep is_format_caption as True
+        # Return all skip to not modify anything
+        return (gr.skip(),) * 9
     
-    # Extract metadata fields if available
-    bpm_value = None
-    caption_value = None
-    lyrics_value = None
-    duration_value = None
-    key_scale_value = None
-    language_value = None
-    time_signature_value = None
-    
-    if lm_metadata:
-        # BPM
-        if lm_metadata.get('bpm'):
-            bpm_str = lm_metadata.get('bpm')
-            if bpm_str and bpm_str != "N/A":
-                try:
-                    bpm_value = int(bpm_str)
-                except (ValueError, TypeError):
-                    pass
-        
-        # Caption (Rewritten Caption)
-        if lm_metadata.get('caption'):
-            caption_value = lm_metadata.get('caption')
-        
-        # Lyrics
-        if lm_metadata.get('lyrics'):
-            lyrics_value = lm_metadata.get('lyrics')
-        
-        # Duration
-        if lm_metadata.get('duration'):
-            duration_str = lm_metadata.get('duration')
-            if duration_str and duration_str != "N/A":
-                try:
-                    duration_value = float(duration_str)
-                except (ValueError, TypeError):
-                    pass
-        
-        # KeyScale
-        if lm_metadata.get('keyscale'):
-            key_scale_str = lm_metadata.get('keyscale')
-            if key_scale_str and key_scale_str != "N/A":
-                key_scale_value = key_scale_str
-        
-        # Language
-        if lm_metadata.get('language'):
-            language_str = lm_metadata.get('language')
-            if language_str and language_str != "N/A":
-                language_value = language_str
-        
-        # Time Signature
-        if lm_metadata.get('timesignature'):
-            time_sig_str = lm_metadata.get('timesignature')
-            if time_sig_str and time_sig_str != "N/A":
-                time_signature_value = time_sig_str
-    
+    # Only set the audio file, skip all other fields to preserve existing values
+    # This ensures user's caption, lyrics, bpm, etc. are NOT cleared
     return (
-        audio_file,
-        bpm_value,
-        caption_value,
-        lyrics_value,
-        duration_value,
-        key_scale_value,
-        language_value,
-        time_signature_value,
-        True  # Set is_format_caption to True (from LM-generated metadata)
+        audio_file,      # src_audio - set the audio file
+        gr.skip(),       # bpm - preserve existing value
+        gr.skip(),       # caption - preserve existing value
+        gr.skip(),       # lyrics - preserve existing value
+        gr.skip(),       # duration - preserve existing value
+        gr.skip(),       # key_scale - preserve existing value
+        gr.skip(),       # language - preserve existing value
+        gr.skip(),       # time_signature - preserve existing value
+        gr.skip(),       # is_format_caption - preserve existing value
     )
 
 
