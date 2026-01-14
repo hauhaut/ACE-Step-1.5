@@ -183,6 +183,44 @@ class GenerationResult:
         return asdict(self)
 
 
+@dataclass
+class UnderstandResult:
+    """Result of music understanding from audio codes.
+    
+    Attributes:
+        # Metadata Fields
+        caption: Generated caption describing the music
+        lyrics: Generated or extracted lyrics
+        bpm: Beats per minute (None if not detected)
+        duration: Duration in seconds (None if not detected)
+        keyscale: Musical key (e.g., "C Major")
+        language: Vocal language code (e.g., "en", "zh")
+        timesignature: Time signature (e.g., "4/4")
+        
+        # Status
+        status_message: Status message from understanding
+        success: Whether understanding completed successfully
+        error: Error message if understanding failed
+    """
+    # Metadata Fields
+    caption: str = ""
+    lyrics: str = ""
+    bpm: Optional[int] = None
+    duration: Optional[float] = None
+    keyscale: str = ""
+    language: str = ""
+    timesignature: str = ""
+    
+    # Status
+    status_message: str = ""
+    success: bool = True
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert result to dictionary for JSON serialization."""
+        return asdict(self)
+
+
 def _update_metadata_from_lm(
     metadata: Dict[str, Any],
     bpm: Optional[int],
@@ -624,6 +662,138 @@ def generate_music(
             audios=[],
             status_message=f"Error: {str(e)}",
             extra_outputs={},
+            success=False,
+            error=str(e),
+        )
+
+
+def understand_music(
+    llm_handler,
+    audio_codes: str,
+    temperature: float = 0.85,
+    cfg_scale: float = 1.0,
+    negative_prompt: str = "NO USER INPUT",
+    top_k: Optional[int] = None,
+    top_p: Optional[float] = None,
+    repetition_penalty: float = 1.0,
+    use_constrained_decoding: bool = True,
+    constrained_decoding_debug: bool = False,
+) -> UnderstandResult:
+    """Understand music from audio codes using the 5Hz Language Model.
+    
+    This function analyzes audio semantic codes and generates metadata about the music,
+    including caption, lyrics, BPM, duration, key scale, language, and time signature.
+    
+    If audio_codes is empty or "NO USER INPUT", the LM will generate a sample example
+    instead of analyzing existing codes.
+    
+    Args:
+        llm_handler: Initialized LLM handler (LLMHandler instance)
+        audio_codes: String of audio code tokens (e.g., "<|audio_code_123|><|audio_code_456|>...")
+                     Use empty string or "NO USER INPUT" to generate a sample example.
+        temperature: Sampling temperature for generation (0.0-2.0). Higher = more creative.
+        cfg_scale: Classifier-Free Guidance scale (1.0 = no CFG, >1.0 = use CFG)
+        negative_prompt: Negative prompt for CFG guidance
+        top_k: Top-K sampling (None or 0 = disabled)
+        top_p: Top-P (nucleus) sampling (None or 1.0 = disabled)
+        repetition_penalty: Repetition penalty (1.0 = no penalty)
+        use_constrained_decoding: Whether to use FSM-based constrained decoding for metadata
+        constrained_decoding_debug: Whether to enable debug logging for constrained decoding
+        
+    Returns:
+        UnderstandResult with parsed metadata fields and status
+        
+    Example:
+        >>> result = understand_music(llm_handler, audio_codes="<|audio_code_123|>...")
+        >>> if result.success:
+        ...     print(f"Caption: {result.caption}")
+        ...     print(f"BPM: {result.bpm}")
+        ...     print(f"Lyrics: {result.lyrics}")
+    """
+    # Check if LLM is initialized
+    if not llm_handler.llm_initialized:
+        return UnderstandResult(
+            status_message="5Hz LM not initialized. Please initialize it first.",
+            success=False,
+            error="LLM not initialized",
+        )
+    
+    # If codes are empty, use "NO USER INPUT" to generate a sample example
+    if not audio_codes or not audio_codes.strip():
+        audio_codes = "NO USER INPUT"
+    
+    try:
+        # Call LLM understanding
+        metadata, status = llm_handler.understand_audio_from_codes(
+            audio_codes=audio_codes,
+            temperature=temperature,
+            cfg_scale=cfg_scale,
+            negative_prompt=negative_prompt,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            use_constrained_decoding=use_constrained_decoding,
+            constrained_decoding_debug=constrained_decoding_debug,
+        )
+        
+        # Check if LLM returned empty metadata (error case)
+        if not metadata:
+            return UnderstandResult(
+                status_message=status or "Failed to understand audio codes",
+                success=False,
+                error=status or "Empty metadata returned",
+            )
+        
+        # Extract and convert fields
+        caption = metadata.get('caption', '')
+        lyrics = metadata.get('lyrics', '')
+        keyscale = metadata.get('keyscale', '')
+        language = metadata.get('language', metadata.get('vocal_language', ''))
+        timesignature = metadata.get('timesignature', '')
+        
+        # Convert BPM to int
+        bpm = None
+        bpm_value = metadata.get('bpm')
+        if bpm_value is not None and bpm_value != 'N/A' and bpm_value != '':
+            try:
+                bpm = int(bpm_value)
+            except (ValueError, TypeError):
+                pass
+        
+        # Convert duration to float
+        duration = None
+        duration_value = metadata.get('duration')
+        if duration_value is not None and duration_value != 'N/A' and duration_value != '':
+            try:
+                duration = float(duration_value)
+            except (ValueError, TypeError):
+                pass
+        
+        # Clean up N/A values
+        if keyscale == 'N/A':
+            keyscale = ''
+        if language == 'N/A':
+            language = ''
+        if timesignature == 'N/A':
+            timesignature = ''
+        
+        return UnderstandResult(
+            caption=caption,
+            lyrics=lyrics,
+            bpm=bpm,
+            duration=duration,
+            keyscale=keyscale,
+            language=language,
+            timesignature=timesignature,
+            status_message=status,
+            success=True,
+            error=None,
+        )
+        
+    except Exception as e:
+        logger.exception("Music understanding failed")
+        return UnderstandResult(
+            status_message=f"Error: {str(e)}",
             success=False,
             error=str(e),
         )

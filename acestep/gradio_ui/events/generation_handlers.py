@@ -13,6 +13,7 @@ from acestep.constants import (
     TASK_TYPES_BASE,
 )
 from acestep.gradio_ui.i18n import t
+from acestep.inference import understand_music
 
 
 def load_metadata(file_obj):
@@ -206,6 +207,9 @@ def load_random_example(task_type: str):
 def sample_example_smart(llm_handler, task_type: str, constrained_decoding_debug: bool = False):
     """Smart sample function that uses LM if initialized, otherwise falls back to examples
     
+    This is a Gradio wrapper that uses the understand_music API from acestep.inference
+    to generate examples when LM is available.
+    
     Args:
         llm_handler: LLM handler instance
         task_type: The task type (e.g., "text2music")
@@ -216,50 +220,28 @@ def sample_example_smart(llm_handler, task_type: str, constrained_decoding_debug
     """
     # Check if LM is initialized
     if llm_handler.llm_initialized:
-        # Use LM to generate example
+        # Use LM to generate example via understand_music API
         try:
-            # Generate example using LM with empty input (NO USER INPUT)
-            metadata, status = llm_handler.understand_audio_from_codes(
-                audio_codes="NO USER INPUT",
-                use_constrained_decoding=True,
+            result = understand_music(
+                llm_handler=llm_handler,
+                audio_codes="NO USER INPUT",  # Empty input triggers example generation
                 temperature=0.85,
+                use_constrained_decoding=True,
                 constrained_decoding_debug=constrained_decoding_debug,
             )
             
-            if metadata:
-                caption_value = metadata.get('caption', '')
-                lyrics_value = metadata.get('lyrics', '')
-                think_value = True  # Always enable think when using LM-generated examples
-                
-                # Extract optional metadata fields
-                bpm_value = None
-                if 'bpm' in metadata and metadata['bpm'] not in [None, "N/A", ""]:
-                    try:
-                        bpm_value = int(metadata['bpm'])
-                    except (ValueError, TypeError):
-                        pass
-                
-                duration_value = None
-                if 'duration' in metadata and metadata['duration'] not in [None, "N/A", ""]:
-                    try:
-                        duration_value = float(metadata['duration'])
-                    except (ValueError, TypeError):
-                        pass
-                
-                keyscale_value = metadata.get('keyscale', '')
-                if keyscale_value in [None, "N/A"]:
-                    keyscale_value = ''
-                
-                language_value = metadata.get('language', '')
-                if language_value in [None, "N/A"]:
-                    language_value = ''
-                
-                timesignature_value = metadata.get('timesignature', '')
-                if timesignature_value in [None, "N/A"]:
-                    timesignature_value = ''
-                
+            if result.success:
                 gr.Info(t("messages.lm_generated"))
-                return caption_value, lyrics_value, think_value, bpm_value, duration_value, keyscale_value, language_value, timesignature_value
+                return (
+                    result.caption,
+                    result.lyrics,
+                    True,  # Always enable think when using LM-generated examples
+                    result.bpm,
+                    result.duration,
+                    result.keyscale,
+                    result.language,
+                    result.timesignature,
+                )
             else:
                 gr.Warning(t("messages.lm_fallback"))
                 return load_random_example(task_type)
@@ -437,58 +419,40 @@ def transcribe_audio_codes(llm_handler, audio_code_string, constrained_decoding_
     Transcribe audio codes to metadata using LLM understanding.
     If audio_code_string is empty, generate a sample example instead.
     
+    This is a Gradio wrapper around the understand_music API in acestep.inference.
+    
     Args:
         llm_handler: LLM handler instance
         audio_code_string: String containing audio codes (or empty for example generation)
         constrained_decoding_debug: Whether to enable debug logging for constrained decoding
         
     Returns:
-        Tuple of (status_message, caption, lyrics, bpm, duration, keyscale, language, timesignature)
+        Tuple of (status_message, caption, lyrics, bpm, duration, keyscale, language, timesignature, is_format_caption)
     """
-    if not llm_handler.llm_initialized:
-        return t("messages.lm_not_initialized"), "", "", None, None, "", "", ""
-    
-    # If codes are empty, this becomes a "generate example" task
-    # Use "NO USER INPUT" as the input to generate a sample
-    if not audio_code_string or not audio_code_string.strip():
-        audio_code_string = "NO USER INPUT"
-    
-    # Call LLM understanding
-    metadata, status = llm_handler.understand_audio_from_codes(
+    # Call the inference API
+    result = understand_music(
+        llm_handler=llm_handler,
         audio_codes=audio_code_string,
         use_constrained_decoding=True,
         constrained_decoding_debug=constrained_decoding_debug,
     )
     
-    # Extract fields for UI update
-    caption = metadata.get('caption', '')
-    lyrics = metadata.get('lyrics', '')
-    bpm = metadata.get('bpm')
-    duration = metadata.get('duration')
-    keyscale = metadata.get('keyscale', '')
-    language = metadata.get('language', '')
-    timesignature = metadata.get('timesignature', '')
-    
-    # Convert to appropriate types
-    try:
-        bpm = int(bpm) if bpm and bpm != 'N/A' else None
-    except:
-        bpm = None
-    
-    try:
-        duration = float(duration) if duration and duration != 'N/A' else None
-    except:
-        duration = None
+    # Handle error case with localized message
+    if not result.success:
+        # Use localized error message for LLM not initialized
+        if result.error == "LLM not initialized":
+            return t("messages.lm_not_initialized"), "", "", None, None, "", "", "", False
+        return result.status_message, "", "", None, None, "", "", "", False
     
     return (
-        status,
-        caption,
-        lyrics,
-        bpm,
-        duration,
-        keyscale,
-        language,
-        timesignature,
+        result.status_message,
+        result.caption,
+        result.lyrics,
+        result.bpm,
+        result.duration,
+        result.keyscale,
+        result.language,
+        result.timesignature,
         True  # Set is_format_caption to True (from Transcribe/LM understanding)
     )
 
