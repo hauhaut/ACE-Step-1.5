@@ -84,7 +84,7 @@
     "mode_simple": "简单",
     "mode_custom": "自定义",
     "simple_query_label": "歌曲描述",
-    "simple_query_placeholder": "描述你想创作的音乐，例如：'给我生成一首暗黑的戏剧古风，歌词要华丽'",
+    "simple_query_placeholder": "描述你想创作的音乐，例如：'给我生成一首暗黑的戏剧古风，歌词要华丽'。留空则随机生成样本。",
     "simple_query_info": "输入你想生成的音乐的自然语言描述",
     "simple_vocal_language_label": "人声语言(可选)",
     "simple_vocal_language_info": "选择歌词的首选语言。使用 'unknown' 表示任意语言。",
@@ -98,6 +98,7 @@
     "lyrics_placeholder": "[第一段]\\n在星空下\\n我感到如此活跃...",
     "lyrics_info": "带有结构的歌曲歌词",
     "instrumental_label": "纯音乐",
+    "format_btn": "格式化",
     "optional_params": "⚙️ 可选参数",
     "vocal_language_label": "人声语言(可选)",
     "vocal_language_info": "纯音乐使用 `unknown`",
@@ -227,6 +228,9 @@
     "sample_created": "✅ 样本已创建！检查描述和歌词，然后点击生成音乐。",
     "simple_examples_not_found": "⚠️ 未找到简单模式示例目录。",
     "simple_examples_empty": "⚠️ 简单模式示例中没有示例文件。",
-    "simple_example_loaded": "🎲 已从 {filename} 加载随机示例"
+    "simple_example_loaded": "🎲 已从 {filename} 加载随机示例",
+    "format_success": "✅ 描述和歌词格式化成功",
+    "format_failed": "❌ 格式化失败: {error}",
+    "skipping_metas_cot": "⚡ 跳过 Phase 1 元数据 COT（样本已格式化）"
   }
 }

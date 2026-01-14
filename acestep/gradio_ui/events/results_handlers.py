@@ -465,6 +465,14 @@ def generate_with_progress(
 ):
     """Generate audio with progress tracking"""
     
+    # Skip Phase 1 metas COT if sample is already formatted (from LLM/file/random)
+    # This avoids redundant LLM calls since metas (bpm, keyscale, etc.) are already generated
+    actual_use_cot_metas = use_cot_metas
+    if is_format_caption and use_cot_metas:
+        actual_use_cot_metas = False
+        logger.info("[generate_with_progress] Skipping Phase 1 metas COT: sample is already formatted (is_format_caption=True)")
+        gr.Info(t("messages.skipping_metas_cot"))
+    
     # step 1: prepare inputs
     # generate_music, GenerationParams, GenerationConfig
     gen_params = GenerationParams(
@@ -496,7 +504,7 @@ def generate_with_progress(
         lm_top_k=lm_top_k,
         lm_top_p=lm_top_p,
         lm_negative_prompt=lm_negative_prompt,
-        use_cot_metas=use_cot_metas,
+        use_cot_metas=actual_use_cot_metas,
         use_cot_caption=use_cot_caption,
         use_cot_language=use_cot_language,
         use_constrained_decoding=True,
@@ -587,7 +595,7 @@ def generate_with_progress(
     # Clear lrc_display with empty string - this triggers .change() to clear subtitles
     clear_lrcs = [gr.update(value="", visible=True) for _ in range(8)]
     clear_accordions = [gr.skip() for _ in range(8)]  # Don't change accordion visibility
-    dump_audio = [None for _ in range(8)]
+    dump_audio = [gr.update(value="", subtitles="") for _ in range(8)]
     yield (
         # Audio outputs - just skip, value will be updated in loop
         # Subtitles will be cleared via lrc_display.change()
@@ -1682,6 +1690,8 @@ def generate_next_batch_background(
         
         # Call generate_with_progress with the saved parameters
         # Note: generate_with_progress is a generator, need to iterate through it
+        # For AutoGen background batches, always skip metas COT since we want to 
+        # generate NEW audio codes with new seeds, not regenerate the same metas
         generator = generate_with_progress(
             dit_handler,
             llm_handler,
@@ -1719,7 +1729,7 @@ def generate_next_batch_background(
             use_cot_metas=params.get("use_cot_metas"),
             use_cot_caption=params.get("use_cot_caption"),
             use_cot_language=params.get("use_cot_language"),
-            is_format_caption=is_format_caption,
+            is_format_caption=is_format_caption,  # Pass through - will skip metas COT if True
             constrained_decoding_debug=params.get("constrained_decoding_debug"),
             allow_lm_batch=params.get("allow_lm_batch"),
             auto_score=params.get("auto_score"),
