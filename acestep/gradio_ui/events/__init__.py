@@ -373,7 +373,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             outputs=[
                 results_section[f"lrc_display_{btn_idx}"],
                 results_section[f"details_accordion_{btn_idx}"],
-                # Audio subtitles now auto-updated via lrc_display.change()
+                # NOTE: Removed generated_audio output!
+                # Audio subtitles are now updated via lrc_display.change() event.
                 results_section["batch_queue"]
             ]
         )
@@ -723,14 +724,21 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     )
     
     # ========== LRC Display Change Handlers ==========
-    # When lrc_display textbox changes, update the corresponding audio component's subtitles
-    for i in range(1, 9):
-        results_section[f"lrc_display_{i}"].change(
+    # NEW APPROACH: Use lrc_display.change() to update audio subtitles
+    # This decouples audio value updates from subtitle updates, avoiding flickering.
+    #
+    # When lrc_display text changes (from generate, LRC button, or manual edit):
+    # 1. lrc_display.change() is triggered
+    # 2. update_audio_subtitles_from_lrc() parses LRC and updates audio subtitles
+    # 3. Audio value is NEVER updated here - only subtitles
+    for lrc_idx in range(1, 9):
+        results_section[f"lrc_display_{lrc_idx}"].change(
             fn=res_h.update_audio_subtitles_from_lrc,
             inputs=[
-                results_section[f"lrc_display_{i}"],
-                results_section[f"generated_audio_{i}"],
-                generation_section["audio_duration"],
+                results_section[f"lrc_display_{lrc_idx}"],
+                # audio_duration not needed - parse_lrc_to_subtitles calculates end time from timestamps
             ],
-            outputs=[results_section[f"generated_audio_{i}"]]
+            outputs=[
+                results_section[f"generated_audio_{lrc_idx}"],  # Only updates subtitles, not value
+            ]
         )
