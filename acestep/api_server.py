@@ -535,10 +535,10 @@ def create_app() -> FastAPI:
                 
                 if sample_mode:
                     print("[api_server] Sample mode: generating random caption/lyrics via LM")
+                    # Note: understand_audio_from_codes does not support cfg_scale or negative_prompt
                     sample_metadata, sample_status = llm.understand_audio_from_codes(
                         audio_codes="NO USER INPUT",
                         temperature=req.lm_temperature,
-                        negative_prompt=req.lm_negative_prompt,
                         top_k=lm_top_k if lm_top_k > 0 else None,
                         top_p=lm_top_p if lm_top_p < 1.0 else None,
                         repetition_penalty=req.lm_repetition_penalty,
