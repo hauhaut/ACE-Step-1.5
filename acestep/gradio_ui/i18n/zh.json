@@ -128,6 +128,8 @@
     "use_adg_info": "启用角域引导",
     "shift_label": "Shift",
     "shift_info": "时间步偏移因子，仅对 base 模型生效 (范围 1.0~5.0，默认 3.0)。对 turbo 模型无效。",
+    "infer_method_label": "推理方法",
+    "infer_method_info": "扩散推理方法。ODE (欧拉) 更快，SDE (随机) 可能产生不同结果。",
     "cfg_interval_start": "CFG 间隔开始",
     "cfg_interval_end": "CFG 间隔结束",
     "lm_params_title": "🤖 LM 生成参数",

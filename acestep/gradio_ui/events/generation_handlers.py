@@ -86,6 +86,7 @@ def load_metadata(file_obj):
         track_name = metadata.get('track_name')
         complete_track_classes = metadata.get('complete_track_classes', [])
         shift = metadata.get('shift', 3.0)  # Default 3.0 for base models
+        infer_method = metadata.get('infer_method', 'ode')  # Default 'ode' for diffusion inference
         instrumental = metadata.get('instrumental', False)  # Added: read instrumental
         
         gr.Info(t("messages.params_loaded", filename=os.path.basename(filepath)))
@@ -93,7 +94,7 @@ def load_metadata(file_obj):
         return (
             task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature,
             audio_duration, batch_size, inference_steps, guidance_scale, seed, random_seed,
-            use_adg, cfg_interval_start, cfg_interval_end, shift, audio_format,
+            use_adg, cfg_interval_start, cfg_interval_end, shift, infer_method, audio_format,
             lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
             use_cot_metas, use_cot_caption, use_cot_language, audio_cover_strength,
             think, audio_codes, repainting_start, repainting_end,
@@ -103,10 +104,10 @@ def load_metadata(file_obj):
         
     except json.JSONDecodeError as e:
         gr.Warning(t("messages.invalid_json", error=str(e)))
-        return [None] * 34 + [False]
+        return [None] * 35 + [False]
     except Exception as e:
         gr.Warning(t("messages.load_error", error=str(e)))
-        return [None] * 34 + [False]
+        return [None] * 35 + [False]
 
 
 def load_random_example(task_type: str):

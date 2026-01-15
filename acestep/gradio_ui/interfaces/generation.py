@@ -455,6 +455,12 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     info=t("generation.shift_info"),
                     visible=False
                 )
+                infer_method = gr.Dropdown(
+                    choices=["ode", "sde"],
+                    value="ode",
+                    label=t("generation.infer_method_label"),
+                    info=t("generation.infer_method_info"),
+                )
             
             with gr.Row():
                 cfg_interval_start = gr.Slider(
@@ -691,6 +697,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         "cfg_interval_start": cfg_interval_start,
         "cfg_interval_end": cfg_interval_end,
         "shift": shift,
+        "infer_method": infer_method,
         "audio_format": audio_format,
         "output_alignment_preference": output_alignment_preference,
         "think_checkbox": think_checkbox,

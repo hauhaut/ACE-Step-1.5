@@ -96,6 +96,7 @@ class GenerationParams:
     cfg_interval_start: float = 0.0
     cfg_interval_end: float = 1.0
     shift: float = 1.0
+    infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
 
     repainting_start: float = 0.0
     repainting_end: float = -1
@@ -532,6 +533,7 @@ def generate_music(
             cfg_interval_start=params.cfg_interval_start,
             cfg_interval_end=params.cfg_interval_end,
             shift=params.shift,
+            infer_method=params.infer_method,
             progress=progress,
         )
 

@@ -128,6 +128,8 @@
     "use_adg_info": "角度ドメインガイダンスを有効化",
     "shift_label": "シフト",
     "shift_info": "baseモデル用タイムステップシフト係数 (範囲 1.0~5.0、デフォルト 3.0)。turboモデルには無効。",
+    "infer_method_label": "推論方法",
+    "infer_method_info": "拡散推論方法。ODE (オイラー) は高速、SDE (確率的) は異なる結果を生成する可能性があります。",
     "cfg_interval_start": "CFG 間隔開始",
     "cfg_interval_end": "CFG 間隔終了",
     "lm_params_title": "🤖 LM 生成パラメータ",
