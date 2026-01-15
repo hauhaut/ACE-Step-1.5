@@ -94,6 +94,7 @@ class GenerateMusicRequest(BaseModel):
     use_adg: bool = False
     cfg_interval_start: float = 0.0
     cfg_interval_end: float = 1.0
+    infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
 
     audio_format: str = "mp3"
     use_tiled_decode: bool = True
@@ -535,10 +536,10 @@ def create_app() -> FastAPI:
                 
                 if sample_mode:
                     print("[api_server] Sample mode: generating random caption/lyrics via LM")
+                    # Note: understand_audio_from_codes does not support cfg_scale or negative_prompt
                     sample_metadata, sample_status = llm.understand_audio_from_codes(
                         audio_codes="NO USER INPUT",
                         temperature=req.lm_temperature,
-                        negative_prompt=req.lm_negative_prompt,
                         top_k=lm_top_k if lm_top_k > 0 else None,
                         top_p=lm_top_p if lm_top_p < 1.0 else None,
                         repetition_penalty=req.lm_repetition_penalty,
@@ -584,6 +585,7 @@ def create_app() -> FastAPI:
                     use_adg=req.use_adg,
                     cfg_interval_start=req.cfg_interval_start,
                     cfg_interval_end=req.cfg_interval_end,
+                    infer_method=req.infer_method,
                     repainting_start=req.repainting_start,
                     repainting_end=req.repainting_end if req.repainting_end else -1,
                     audio_cover_strength=req.audio_cover_strength,
@@ -854,6 +856,7 @@ def create_app() -> FastAPI:
                 use_adg=_to_bool(get("use_adg"), False),
                 cfg_interval_start=_to_float(get("cfg_interval_start"), 0.0) or 0.0,
                 cfg_interval_end=_to_float(get("cfg_interval_end"), 1.0) or 1.0,
+                infer_method=str(_get_any("infer_method", "inferMethod", default="ode") or "ode"),
                 audio_format=str(get("audio_format", "mp3") or "mp3"),
                 use_tiled_decode=_to_bool(_get_any("use_tiled_decode", "useTiledDecode"), True),
                 lm_model_path=str(get("lm_model_path") or "").strip() or None,

@@ -19,7 +19,7 @@ from transformers.generation.logits_process import (
     RepetitionPenaltyLogitsProcessor,
 )
 from acestep.constrained_logits_processor import MetadataConstrainedLogitsProcessor
-from acestep.constants import DEFAULT_LM_INSTRUCTION, DEFAULT_LM_UNDERSTAND_INSTRUCTION, DEFAULT_LM_INSPIRED_INSTRUCTION
+from acestep.constants import DEFAULT_LM_INSTRUCTION, DEFAULT_LM_UNDERSTAND_INSTRUCTION, DEFAULT_LM_INSPIRED_INSTRUCTION, DEFAULT_LM_REWRITE_INSTRUCTION
 
 
 class LLMHandler:
@@ -1296,8 +1296,6 @@ class LLMHandler:
         self,
         audio_codes: str,
         temperature: float = 0.3,
-        cfg_scale: float = 1.0,
-        negative_prompt: str = "NO USER INPUT",
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
         repetition_penalty: float = 1.0,
@@ -1306,16 +1304,16 @@ class LLMHandler:
     ) -> Tuple[Dict[str, Any], str]:
         """
         Understand audio codes and generate metadata + lyrics.
-        
+
         This is the reverse of the normal generation flow:
         - Input: Audio codes
         - Output: Metadata (bpm, caption, duration, etc.) + Lyrics
-        
+
+        Note: cfg_scale and negative_prompt are not supported in understand mode.
+
         Args:
             audio_codes: String of audio code tokens (e.g., "<|audio_code_123|><|audio_code_456|>...")
             temperature: Sampling temperature for generation
-            cfg_scale: Classifier-Free Guidance scale (1.0 = no CFG, >1.0 = use CFG)
-            negative_prompt: Negative prompt for CFG
             top_k: Top-K sampling (None = disabled)
             top_p: Top-P (nucleus) sampling (None = disabled)
             repetition_penalty: Repetition penalty (1.0 = no penalty)
@@ -1352,12 +1350,11 @@ class LLMHandler:
         print(f"formatted_prompt: {formatted_prompt}")
         # Generate using constrained decoding (understand phase)
         # We want to generate metadata first (CoT), then lyrics (natural text)
+        # Note: cfg_scale and negative_prompt are not used in understand mode
         output_text, status = self.generate_from_formatted_prompt(
             formatted_prompt=formatted_prompt,
             cfg={
                 "temperature": temperature,
-                "cfg_scale": cfg_scale,
-                "negative_prompt": negative_prompt,
                 "top_k": top_k,
                 "top_p": top_p,
                 "repetition_penalty": repetition_penalty,
@@ -1491,7 +1488,7 @@ class LLMHandler:
         self,
         query: str,
         instrumental: bool = False,
-        vocal_language: Optional[List[str]] = None,
+        vocal_language: Optional[str] = None,
         temperature: float = 0.85,
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
@@ -1509,8 +1506,8 @@ class LLMHandler:
         Args:
             query: User's natural language music description
             instrumental: Whether to generate instrumental music (no vocals)
-            vocal_language: List of allowed vocal languages for constrained decoding (e.g., ["en", "zh"]).
-                           If provided and not ["unknown"], the first language will be used.
+            vocal_language: Allowed vocal language for constrained decoding (e.g., "en", "zh").
+                           If provided and not "unknown", it will be used.
             temperature: Sampling temperature for generation (0.0-2.0)
             top_k: Top-K sampling (None = disabled)
             top_p: Top-P (nucleus) sampling (None = disabled)
@@ -1532,7 +1529,7 @@ class LLMHandler:
         
         Example:
             query = "a soft Bengali love song for a quiet evening"
-            metadata, status = handler.create_sample_from_query(query, instrumental=False, vocal_language=["bn"])
+            metadata, status = handler.create_sample_from_query(query, instrumental=False, vocal_language="bn")
             print(metadata['caption'])  # "A gentle romantic acoustic pop ballad..."
             print(metadata['lyrics'])   # "[Intro: ...]\\n..."
         """
@@ -1540,7 +1537,7 @@ class LLMHandler:
             return {}, "❌ 5Hz LM not initialized. Please initialize it first."
         
         if not query or not query.strip():
-            return {}, "❌ No query provided. Please enter a music description."
+            query = "NO USER INPUT"
         
         logger.info(f"Creating sample from query: {query[:100]}... (instrumental={instrumental}, vocal_language={vocal_language})")
         
@@ -1554,14 +1551,11 @@ class LLMHandler:
         # Build user_metadata if vocal_language is specified and is not "unknown"
         user_metadata = None
         skip_language = False
-        if vocal_language and len(vocal_language) > 0:
-            # Filter out "unknown" from the list
-            valid_languages = [lang for lang in vocal_language if lang and lang.lower() != "unknown"]
-            if valid_languages:
-                # Use the first valid language for constrained decoding
-                user_metadata = {"language": valid_languages[0]}
-                skip_language = True  # Skip language generation since we're injecting it
-                logger.info(f"Using user-specified language: {valid_languages[0]}")
+        if vocal_language and vocal_language.strip() and vocal_language.strip().lower() != "unknown":
+            # Use the specified language for constrained decoding
+            user_metadata = {"language": vocal_language.strip()}
+            # skip_language = True  # Skip language generation since we're injecting it
+            logger.info(f"Using user-specified language: {vocal_language.strip()}")
         
         # Generate using constrained decoding (inspiration phase)
         # Similar to understand mode - generate metadata first (CoT), then lyrics
@@ -1576,7 +1570,7 @@ class LLMHandler:
                 "target_duration": None,  # No duration constraint
                 "user_metadata": user_metadata,  # Inject language if specified
                 "skip_caption": False,  # Generate caption
-                "skip_language": skip_language,  # Skip if we're injecting language
+                "skip_language": False,
                 "skip_genres": False,  # Generate genres
                 "generation_phase": "understand",  # Use understand phase for metadata + free-form lyrics
                 "caption": "",
@@ -1604,12 +1598,210 @@ class LLMHandler:
         # Echo back the instrumental flag
         metadata['instrumental'] = instrumental
         
-        logger.info(f"Sample created successfully. Generated {len(metadata)} fields")
+        logger.info(f"Sample created successfully. Generated {metadata} fields")
         if constrained_decoding_debug:
             logger.debug(f"Generated metadata: {list(metadata.keys())}")
             logger.debug(f"Output text preview: {output_text[:300]}...")
         
-        status_msg = f"✅ Sample created successfully\nGenerated fields: {', '.join(metadata.keys())}"
+        status_msg = f"✅ Sample created successfully\nGenerated fields: {metadata}"
+        return metadata, status_msg
+    
+    def build_formatted_prompt_for_format(
+        self,
+        caption: str,
+        lyrics: str,
+        is_negative_prompt: bool = False,
+        negative_prompt: str = "NO USER INPUT"
+    ) -> str:
+        """
+        Build the chat-formatted prompt for format/rewrite mode.
+        
+        This formats user-provided caption and lyrics into a more detailed and specific
+        musical description with metadata.
+        
+        Args:
+            caption: User's caption/description of the music
+            lyrics: User's lyrics
+            is_negative_prompt: If True, builds unconditional prompt for CFG
+            negative_prompt: Negative prompt for CFG (used when is_negative_prompt=True)
+            
+        Returns:
+            Formatted prompt string
+            
+        Example:
+            caption = "Latin pop, reggaeton, flamenco-pop"
+            lyrics = "[Verse 1]\\nTengo un nudo..."
+            prompt = handler.build_formatted_prompt_for_format(caption, lyrics)
+        """
+        if self.llm_tokenizer is None:
+            raise ValueError("LLM tokenizer is not initialized. Call initialize() first.")
+        
+        if is_negative_prompt:
+            # For CFG unconditional prompt
+            user_content = negative_prompt if negative_prompt and negative_prompt.strip() else ""
+        else:
+            # Normal prompt: caption + lyrics
+            user_content = f"# Caption\n{caption}\n\n# Lyric\n{lyrics}"
+        
+        return self.llm_tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "system",
+                    "content": f"# Instruction\n{DEFAULT_LM_REWRITE_INSTRUCTION}\n\n"
+                },
+                {
+                    "role": "user",
+                    "content": user_content
+                },
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    
+    def format_sample_from_input(
+        self,
+        caption: str,
+        lyrics: str,
+        user_metadata: Optional[Dict[str, Any]] = None,
+        temperature: float = 0.85,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        repetition_penalty: float = 1.0,
+        use_constrained_decoding: bool = True,
+        constrained_decoding_debug: bool = False,
+    ) -> Tuple[Dict[str, Any], str]:
+        """
+        Format user-provided caption and lyrics into structured music metadata.
+        
+        This is the "Format" feature that takes user input and generates:
+        - Enhanced caption with detailed music description
+        - Metadata (bpm, duration, keyscale, language, timesignature)
+        - Formatted lyrics (preserved from input)
+        
+        Note: cfg_scale and negative_prompt are not supported in format mode.
+        
+        Args:
+            caption: User's caption/description (e.g., "Latin pop, reggaeton")
+            lyrics: User's lyrics with structure tags
+            user_metadata: Optional dict with user-provided metadata to constrain decoding.
+                          Supported keys: bpm, duration, keyscale, timesignature, language
+            temperature: Sampling temperature for generation (0.0-2.0)
+            top_k: Top-K sampling (None = disabled)
+            top_p: Top-P (nucleus) sampling (None = disabled)
+            repetition_penalty: Repetition penalty (1.0 = no penalty)
+            use_constrained_decoding: Whether to use FSM-based constrained decoding
+            constrained_decoding_debug: Whether to enable debug logging
+            
+        Returns:
+            Tuple of (metadata_dict, status_message)
+            metadata_dict contains:
+                - bpm: int or str
+                - caption: str (enhanced)
+                - duration: int or str
+                - keyscale: str
+                - language: str
+                - timesignature: str
+                - lyrics: str (from input, possibly formatted)
+        
+        Example:
+            caption = "Latin pop, reggaeton, flamenco-pop"
+            lyrics = "[Verse 1]\\nTengo un nudo en la garganta..."
+            metadata, status = handler.format_sample_from_input(caption, lyrics)
+            print(metadata['caption'])  # "A dramatic and powerful Latin pop track..."
+            print(metadata['bpm'])      # 100
+        """
+        if not getattr(self, "llm_initialized", False):
+            return {}, "❌ 5Hz LM not initialized. Please initialize it first."
+        
+        if not caption or not caption.strip():
+            caption = "NO USER INPUT"
+        if not lyrics or not lyrics.strip():
+            lyrics = "[Instrumental]"
+        
+        logger.info(f"Formatting sample from input: caption={caption[:50]}..., lyrics length={len(lyrics)}")
+        
+        # Build formatted prompt for format task
+        formatted_prompt = self.build_formatted_prompt_for_format(
+            caption=caption,
+            lyrics=lyrics,
+        )
+        logger.debug(f"Formatted prompt for format: {formatted_prompt}")
+        
+        # Build constrained decoding metadata from user_metadata
+        constrained_metadata = None
+        if user_metadata:
+            constrained_metadata = {}
+            if user_metadata.get('bpm') is not None:
+                try:
+                    bpm_val = int(user_metadata['bpm'])
+                    if bpm_val > 0:
+                        constrained_metadata['bpm'] = bpm_val
+                except (ValueError, TypeError):
+                    pass
+            if user_metadata.get('duration') is not None:
+                try:
+                    dur_val = int(user_metadata['duration'])
+                    if dur_val > 0:
+                        constrained_metadata['duration'] = dur_val
+                except (ValueError, TypeError):
+                    pass
+            if user_metadata.get('keyscale'):
+                constrained_metadata['keyscale'] = user_metadata['keyscale']
+            if user_metadata.get('timesignature'):
+                constrained_metadata['timesignature'] = user_metadata['timesignature']
+            if user_metadata.get('language'):
+                constrained_metadata['language'] = user_metadata['language']
+            
+            # Only use if we have at least one field
+            if not constrained_metadata:
+                constrained_metadata = None
+            else:
+                logger.info(f"Using user-provided metadata constraints: {constrained_metadata}")
+        
+        # Generate using constrained decoding (format phase)
+        # Similar to understand/inspiration mode - generate metadata first (CoT), then formatted lyrics
+        # Note: cfg_scale and negative_prompt are not used in format mode
+        output_text, status = self.generate_from_formatted_prompt(
+            formatted_prompt=formatted_prompt,
+            cfg={
+                "temperature": temperature,
+                "top_k": top_k,
+                "top_p": top_p,
+                "repetition_penalty": repetition_penalty,
+                "target_duration": None,  # No duration constraint for generation length
+                "user_metadata": constrained_metadata,  # Inject user-provided metadata
+                "skip_caption": False,  # Generate caption
+                "skip_language": constrained_metadata.get('language') is not None if constrained_metadata else False,
+                "skip_genres": False,  # Generate genres
+                "generation_phase": "understand",  # Use understand phase for metadata + free-form lyrics
+                "caption": "",
+                "lyrics": "",
+            },
+            use_constrained_decoding=use_constrained_decoding,
+            constrained_decoding_debug=constrained_decoding_debug,
+            stop_at_reasoning=False,  # Continue after </think> to get formatted lyrics
+        )
+        
+        if not output_text:
+            return {}, status
+        
+        # Parse metadata and extract lyrics
+        metadata, _ = self.parse_lm_output(output_text)
+        
+        # Extract formatted lyrics section (everything after </think>)
+        formatted_lyrics = self._extract_lyrics_from_output(output_text)
+        if formatted_lyrics:
+            metadata['lyrics'] = formatted_lyrics
+        else:
+            # If no lyrics generated, keep original input
+            metadata['lyrics'] = lyrics
+        
+        logger.info(f"Format completed successfully. Generated {len(metadata)} fields")
+        if constrained_decoding_debug:
+            logger.debug(f"Generated metadata: {list(metadata.keys())}")
+            logger.debug(f"Output text preview: {output_text[:300]}...")
+        
+        status_msg = f"✅ Format completed successfully\nGenerated fields: {', '.join(metadata.keys())}"
         return metadata, status_msg
     
     def generate_from_formatted_prompt(

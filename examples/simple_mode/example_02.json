@@ -1,5 +1,5 @@
 {
     "description": "an upbeat summer pop song with catchy hooks",
     "instrumental": false,
-    "vocal_language": ["en"]
+    "vocal_language": "en"
 }

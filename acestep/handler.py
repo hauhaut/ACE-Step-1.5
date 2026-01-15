@@ -2079,6 +2079,7 @@ class AceStepHandler:
         cfg_interval_start: float = 0.0,
         cfg_interval_end: float = 1.0,
         shift: float = 1.0,
+        infer_method: str = "ode",
         use_tiled_decode: bool = True,
         progress=None
     ) -> Dict[str, Any]:
@@ -2227,6 +2228,7 @@ class AceStepHandler:
                 cfg_interval_start=cfg_interval_start,  # Pass CFG interval start
                 cfg_interval_end=cfg_interval_end,  # Pass CFG interval end
                 shift=shift,  # Pass shift parameter
+                infer_method=infer_method,  # Pass infer method (ode or sde)
                 audio_code_hints=audio_code_hints_batch,  # Pass audio code hints as list
                 return_intermediate=should_return_intermediate
             )

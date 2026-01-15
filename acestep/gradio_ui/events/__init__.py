@@ -190,6 +190,37 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         outputs=[generation_section["lyrics"]]
     )
     
+    # ========== Format Button ==========
+    # Note: cfg_scale and negative_prompt are not supported in format mode
+    generation_section["format_btn"].click(
+        fn=lambda caption, lyrics, bpm, duration, key_scale, time_sig, temp, top_k, top_p, debug: gen_h.handle_format_sample(
+            llm_handler, caption, lyrics, bpm, duration, key_scale, time_sig, temp, top_k, top_p, debug
+        ),
+        inputs=[
+            generation_section["captions"],
+            generation_section["lyrics"],
+            generation_section["bpm"],
+            generation_section["audio_duration"],
+            generation_section["key_scale"],
+            generation_section["time_signature"],
+            generation_section["lm_temperature"],
+            generation_section["lm_top_k"],
+            generation_section["lm_top_p"],
+            generation_section["constrained_decoding_debug"],
+        ],
+        outputs=[
+            generation_section["captions"],
+            generation_section["lyrics"],
+            generation_section["bpm"],
+            generation_section["audio_duration"],
+            generation_section["key_scale"],
+            generation_section["vocal_language"],
+            generation_section["time_signature"],
+            results_section["is_format_caption_state"],
+            results_section["status_output"],
+        ]
+    )
+    
     # ========== Simple/Custom Mode Toggle ==========
     generation_section["generation_mode"].change(
         fn=gen_h.handle_generation_mode_change,
@@ -245,6 +276,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["audio_duration"],
             generation_section["key_scale"],
             generation_section["vocal_language"],
+            generation_section["simple_vocal_language"],
             generation_section["time_signature"],
             generation_section["instrumental_checkbox"],
             generation_section["caption_accordion"],
@@ -279,6 +311,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["cfg_interval_start"],
             generation_section["cfg_interval_end"],
             generation_section["shift"],
+            generation_section["infer_method"],
             generation_section["audio_format"],
             generation_section["lm_temperature"],
             generation_section["lm_cfg_scale"],
@@ -476,6 +509,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["cfg_interval_start"],
             generation_section["cfg_interval_end"],
             generation_section["shift"],
+            generation_section["infer_method"],
             generation_section["audio_format"],
             generation_section["lm_temperature"],
             generation_section["think_checkbox"],
@@ -662,6 +696,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["cfg_interval_start"],
             generation_section["cfg_interval_end"],
             generation_section["shift"],
+            generation_section["infer_method"],
             generation_section["audio_format"],
             generation_section["lm_temperature"],
             generation_section["think_checkbox"],

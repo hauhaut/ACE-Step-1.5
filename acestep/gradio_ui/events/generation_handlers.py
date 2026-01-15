@@ -13,7 +13,7 @@ from acestep.constants import (
     TASK_TYPES_BASE,
 )
 from acestep.gradio_ui.i18n import t
-from acestep.inference import understand_music, create_sample
+from acestep.inference import understand_music, create_sample, format_sample
 
 
 def load_metadata(file_obj):
@@ -86,6 +86,7 @@ def load_metadata(file_obj):
         track_name = metadata.get('track_name')
         complete_track_classes = metadata.get('complete_track_classes', [])
         shift = metadata.get('shift', 3.0)  # Default 3.0 for base models
+        infer_method = metadata.get('infer_method', 'ode')  # Default 'ode' for diffusion inference
         instrumental = metadata.get('instrumental', False)  # Added: read instrumental
         
         gr.Info(t("messages.params_loaded", filename=os.path.basename(filepath)))
@@ -93,7 +94,7 @@ def load_metadata(file_obj):
         return (
             task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature,
             audio_duration, batch_size, inference_steps, guidance_scale, seed, random_seed,
-            use_adg, cfg_interval_start, cfg_interval_end, shift, audio_format,
+            use_adg, cfg_interval_start, cfg_interval_end, shift, infer_method, audio_format,
             lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
             use_cot_metas, use_cot_caption, use_cot_language, audio_cover_strength,
             think, audio_codes, repainting_start, repainting_end,
@@ -103,10 +104,10 @@ def load_metadata(file_obj):
         
     except json.JSONDecodeError as e:
         gr.Warning(t("messages.invalid_json", error=str(e)))
-        return [None] * 34 + [False]
+        return [None] * 35 + [False]
     except Exception as e:
         gr.Warning(t("messages.load_error", error=str(e)))
-        return [None] * 34 + [False]
+        return [None] * 35 + [False]
 
 
 def load_random_example(task_type: str):
@@ -256,7 +257,7 @@ def sample_example_smart(llm_handler, task_type: str, constrained_decoding_debug
 
 def load_random_simple_description():
     """Load a random description from the simple_mode examples directory.
-    
+
     Returns:
         Tuple of (description, instrumental, vocal_language) for updating UI components
     """
@@ -265,39 +266,39 @@ def load_random_simple_description():
         current_file = os.path.abspath(__file__)
         # This file is in acestep/gradio_ui/events/, need 4 levels up to reach project root
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file))))
-        
+
         # Construct the examples directory path
         examples_dir = os.path.join(project_root, "examples", "simple_mode")
-        
+
         # Check if directory exists
         if not os.path.exists(examples_dir):
             gr.Warning(t("messages.simple_examples_not_found"))
             return gr.update(), gr.update(), gr.update()
-        
+
         # Find all JSON files in the directory
         json_files = glob.glob(os.path.join(examples_dir, "*.json"))
-        
+
         if not json_files:
             gr.Warning(t("messages.simple_examples_empty"))
             return gr.update(), gr.update(), gr.update()
-        
+
         # Randomly select one file
         selected_file = random.choice(json_files)
-        
+
         # Read and parse JSON
         try:
             with open(selected_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            
+
             # Extract fields
             description = data.get('description', '')
             instrumental = data.get('instrumental', False)
-            vocal_language = data.get('vocal_language', ['unknown'])
-            
-            # Ensure vocal_language is a list
-            if isinstance(vocal_language, str):
-                vocal_language = [vocal_language]
-            
+            vocal_language = data.get('vocal_language', 'unknown')
+
+            # Ensure vocal_language is a string
+            if isinstance(vocal_language, list):
+                vocal_language = vocal_language[0] if vocal_language else 'unknown'
+
             gr.Info(t("messages.simple_example_loaded", filename=os.path.basename(selected_file)))
             return description, instrumental, vocal_language
             
@@ -564,7 +565,7 @@ def handle_instrumental_checkbox(instrumental_checked, current_lyrics):
 def handle_simple_instrumental_change(is_instrumental: bool):
     """
     Handle simple mode instrumental checkbox changes.
-    When checked: set vocal_language to ["unknown"] and disable editing.
+    When checked: set vocal_language to "unknown" and disable editing.
     When unchecked: enable vocal_language editing.
     
     Args:
@@ -574,7 +575,7 @@ def handle_simple_instrumental_change(is_instrumental: bool):
         gr.update for simple_vocal_language dropdown
     """
     if is_instrumental:
-        return gr.update(value=["unknown"], interactive=False)
+        return gr.update(value="unknown", interactive=False)
     else:
         return gr.update(interactive=True)
 
@@ -653,7 +654,7 @@ def handle_create_sample(
     llm_handler,
     query: str,
     instrumental: bool,
-    vocal_language: list,
+    vocal_language: str,
     lm_temperature: float,
     lm_top_k: int,
     lm_top_p: float,
@@ -671,7 +672,7 @@ def handle_create_sample(
         llm_handler: LLM handler instance
         query: User's natural language music description
         instrumental: Whether to generate instrumental music
-        vocal_language: List of preferred vocal languages for constrained decoding
+        vocal_language: Preferred vocal language for constrained decoding
         lm_temperature: LLM temperature for generation
         lm_top_k: LLM top-k sampling
         lm_top_p: LLM top-p sampling
@@ -695,27 +696,6 @@ def handle_create_sample(
         - is_format_caption_state (True)
         - status_output
     """
-    # Validate query
-    if not query or not query.strip():
-        gr.Warning(t("messages.empty_query"))
-        return (
-            gr.update(),  # captions - no change
-            gr.update(),  # lyrics - no change
-            gr.update(),  # bpm - no change
-            gr.update(),  # audio_duration - no change
-            gr.update(),  # key_scale - no change
-            gr.update(),  # vocal_language - no change
-            gr.update(),  # time_signature - no change
-            gr.update(),  # instrumental_checkbox - no change
-            gr.update(),  # caption_accordion - no change
-            gr.update(),  # lyrics_accordion - no change
-            gr.update(interactive=False),  # generate_btn - keep disabled
-            False,  # simple_sample_created - still False
-            gr.update(),  # think_checkbox - no change
-            gr.update(),  # is_format_caption_state - no change
-            t("messages.empty_query"),  # status_output
-        )
-    
     # Check if LLM is initialized
     if not llm_handler.llm_initialized:
         gr.Warning(t("messages.lm_not_initialized"))
@@ -765,6 +745,7 @@ def handle_create_sample(
             gr.update(),  # audio_duration - no change
             gr.update(),  # key_scale - no change
             gr.update(),  # vocal_language - no change
+            gr.update(),  # simple vocal_language - no change
             gr.update(),  # time_signature - no change
             gr.update(),  # instrumental_checkbox - no change
             gr.update(),  # caption_accordion - no change
@@ -786,6 +767,7 @@ def handle_create_sample(
         result.duration if result.duration and result.duration > 0 else -1,  # audio_duration
         result.keyscale,  # key_scale
         result.language,  # vocal_language
+        result.language,  # simple vocal_language
         result.timesignature,  # time_signature
         result.instrumental,  # instrumental_checkbox
         gr.update(open=True),  # caption_accordion - expand
@@ -797,4 +779,126 @@ def handle_create_sample(
         result.status_message,  # status_output
     )
 
+
+def handle_format_sample(
+    llm_handler,
+    caption: str,
+    lyrics: str,
+    bpm,
+    audio_duration,
+    key_scale: str,
+    time_signature: str,
+    lm_temperature: float,
+    lm_top_k: int,
+    lm_top_p: float,
+    constrained_decoding_debug: bool = False,
+):
+    """
+    Handle the Format button click to format caption and lyrics.
+    
+    Takes user-provided caption and lyrics, and uses the LLM to generate
+    structured music metadata and an enhanced description.
+    
+    Note: cfg_scale and negative_prompt are not supported in format mode.
+    
+    Args:
+        llm_handler: LLM handler instance
+        caption: User's caption/description
+        lyrics: User's lyrics
+        bpm: User-provided BPM (optional, for constrained decoding)
+        audio_duration: User-provided duration (optional, for constrained decoding)
+        key_scale: User-provided key scale (optional, for constrained decoding)
+        time_signature: User-provided time signature (optional, for constrained decoding)
+        lm_temperature: LLM temperature for generation
+        lm_top_k: LLM top-k sampling
+        lm_top_p: LLM top-p sampling
+        constrained_decoding_debug: Whether to enable debug logging
+        
+    Returns:
+        Tuple of updates for:
+        - captions
+        - lyrics
+        - bpm
+        - audio_duration
+        - key_scale
+        - vocal_language
+        - time_signature
+        - is_format_caption_state
+        - status_output
+    """
+    # Check if LLM is initialized
+    if not llm_handler.llm_initialized:
+        gr.Warning(t("messages.lm_not_initialized"))
+        return (
+            gr.update(),  # captions - no change
+            gr.update(),  # lyrics - no change
+            gr.update(),  # bpm - no change
+            gr.update(),  # audio_duration - no change
+            gr.update(),  # key_scale - no change
+            gr.update(),  # vocal_language - no change
+            gr.update(),  # time_signature - no change
+            gr.update(),  # is_format_caption_state - no change
+            t("messages.lm_not_initialized"),  # status_output
+        )
+    
+    # Build user_metadata from provided values for constrained decoding
+    user_metadata = {}
+    if bpm is not None and bpm > 0:
+        user_metadata['bpm'] = int(bpm)
+    if audio_duration is not None and audio_duration > 0:
+        user_metadata['duration'] = int(audio_duration)
+    if key_scale and key_scale.strip():
+        user_metadata['keyscale'] = key_scale.strip()
+    if time_signature and time_signature.strip():
+        user_metadata['timesignature'] = time_signature.strip()
+    
+    # Only pass user_metadata if we have at least one field
+    user_metadata_to_pass = user_metadata if user_metadata else None
+    
+    # Convert LM parameters
+    top_k_value = None if not lm_top_k or lm_top_k == 0 else int(lm_top_k)
+    top_p_value = None if not lm_top_p or lm_top_p >= 1.0 else lm_top_p
+    
+    # Call format_sample API
+    result = format_sample(
+        llm_handler=llm_handler,
+        caption=caption,
+        lyrics=lyrics,
+        user_metadata=user_metadata_to_pass,
+        temperature=lm_temperature,
+        top_k=top_k_value,
+        top_p=top_p_value,
+        use_constrained_decoding=True,
+        constrained_decoding_debug=constrained_decoding_debug,
+    )
+    
+    # Handle error
+    if not result.success:
+        gr.Warning(result.status_message or t("messages.format_failed"))
+        return (
+            gr.update(),  # captions - no change
+            gr.update(),  # lyrics - no change
+            gr.update(),  # bpm - no change
+            gr.update(),  # audio_duration - no change
+            gr.update(),  # key_scale - no change
+            gr.update(),  # vocal_language - no change
+            gr.update(),  # time_signature - no change
+            gr.update(),  # is_format_caption_state - no change
+            result.status_message or t("messages.format_failed"),  # status_output
+        )
+    
+    # Success - populate fields
+    gr.Info(t("messages.format_success"))
+    
+    return (
+        result.caption,  # captions
+        result.lyrics,  # lyrics
+        result.bpm,  # bpm
+        result.duration if result.duration and result.duration > 0 else -1,  # audio_duration
+        result.keyscale,  # key_scale
+        result.language,  # vocal_language
+        result.timesignature,  # time_signature
+        True,  # is_format_caption_state - True (LM-formatted)
+        result.status_message,  # status_output
+    )
 

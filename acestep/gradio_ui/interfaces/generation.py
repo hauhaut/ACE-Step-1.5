@@ -314,15 +314,15 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                             placeholder=t("generation.caption_placeholder"),
                             lines=3,
                             info=t("generation.caption_info"),
-                            scale=9,
+                            scale=12,
                         )
-                        sample_btn = gr.Button(
-                            "🎲",
-                            variant="secondary",
-                            size="sm",
-                            scale=1,
-                        )
-                
+                        with gr.Column(scale=1, min_width=100):
+                            sample_btn = gr.Button(
+                                "🎲",
+                                variant="secondary",
+                                size="sm",
+                                scale=2,
+                            )
                 # Lyrics - wrapped in accordion that can be collapsed in Simple mode
                 with gr.Accordion(t("generation.lyrics_title"), open=False) as lyrics_accordion:
                     lyrics = gr.Textbox(
@@ -331,22 +331,40 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                         lines=8,
                         info=t("generation.lyrics_info")
                     )
-                    instrumental_checkbox = gr.Checkbox(
-                        label=t("generation.instrumental_label"),
-                        value=False,
-                        scale=1,
-                    )
-                
-                # Optional Parameters
-                with gr.Accordion(t("generation.optional_params"), open=False) as optional_params_accordion:
-                    with gr.Row():
+                    
+                    with gr.Row(variant="compact", equal_height=True):
+                        instrumental_checkbox = gr.Checkbox(
+                            label=t("generation.instrumental_label"),
+                            value=False,
+                            scale=1,
+                            min_width=120,
+                            container=True,
+                        )
+                        
+                        # 中间：语言选择 (Dropdown)
+                        # 移除 gr.HTML hack，直接使用 label 参数，Gradio 会自动处理对齐
                         vocal_language = gr.Dropdown(
                             choices=VALID_LANGUAGES,
                             value="unknown",
                             label=t("generation.vocal_language_label"),
+                            show_label=False, 
+                            container=True, 
                             allow_custom_value=True,
-                            info=t("generation.vocal_language_info")
+                            scale=3,
                         )
+                        
+                        # 右侧：格式化按钮 (Button)
+                        # 放在同一行最右侧，操作更顺手
+                        format_btn = gr.Button(
+                            t("generation.format_btn"),
+                            variant="secondary",
+                            scale=1,
+                            min_width=80,
+                        )
+                
+                # Optional Parameters
+                with gr.Accordion(t("generation.optional_params"), open=False) as optional_params_accordion:
+                    with gr.Row():
                         bpm = gr.Number(
                             label=t("generation.bpm_label"),
                             value=None,
@@ -436,6 +454,12 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     label=t("generation.shift_label"),
                     info=t("generation.shift_info"),
                     visible=False
+                )
+                infer_method = gr.Dropdown(
+                    choices=["ode", "sde"],
+                    value="ode",
+                    label=t("generation.infer_method_label"),
+                    info=t("generation.infer_method_info"),
                 )
             
             with gr.Row():
@@ -673,12 +697,14 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         "cfg_interval_start": cfg_interval_start,
         "cfg_interval_end": cfg_interval_end,
         "shift": shift,
+        "infer_method": infer_method,
         "audio_format": audio_format,
         "output_alignment_preference": output_alignment_preference,
         "think_checkbox": think_checkbox,
         "autogen_checkbox": autogen_checkbox,
         "generate_btn": generate_btn,
         "instrumental_checkbox": instrumental_checkbox,
+        "format_btn": format_btn,
         "constrained_decoding_debug": constrained_decoding_debug,
         "score_scale": score_scale,
         "allow_lm_batch": allow_lm_batch,

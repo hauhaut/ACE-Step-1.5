@@ -221,3 +221,4 @@ feishu_bot/
 tmp*
 torchinductor_root/
 scripts/
+checkpoints_legacy/

@@ -96,6 +96,7 @@ class GenerationParams:
     cfg_interval_start: float = 0.0
     cfg_interval_end: float = 1.0
     shift: float = 1.0
+    infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
 
     repainting_start: float = 0.0
     repainting_end: float = -1
@@ -532,6 +533,7 @@ def generate_music(
             cfg_interval_start=params.cfg_interval_start,
             cfg_interval_end=params.cfg_interval_end,
             shift=params.shift,
+            infer_method=params.infer_method,
             progress=progress,
         )
 
@@ -671,8 +673,6 @@ def understand_music(
     llm_handler,
     audio_codes: str,
     temperature: float = 0.85,
-    cfg_scale: float = 1.0,
-    negative_prompt: str = "NO USER INPUT",
     top_k: Optional[int] = None,
     top_p: Optional[float] = None,
     repetition_penalty: float = 1.0,
@@ -687,13 +687,13 @@ def understand_music(
     If audio_codes is empty or "NO USER INPUT", the LM will generate a sample example
     instead of analyzing existing codes.
     
+    Note: cfg_scale and negative_prompt are not supported in understand mode.
+    
     Args:
         llm_handler: Initialized LLM handler (LLMHandler instance)
         audio_codes: String of audio code tokens (e.g., "<|audio_code_123|><|audio_code_456|>...")
                      Use empty string or "NO USER INPUT" to generate a sample example.
         temperature: Sampling temperature for generation (0.0-2.0). Higher = more creative.
-        cfg_scale: Classifier-Free Guidance scale (1.0 = no CFG, >1.0 = use CFG)
-        negative_prompt: Negative prompt for CFG guidance
         top_k: Top-K sampling (None or 0 = disabled)
         top_p: Top-P (nucleus) sampling (None or 1.0 = disabled)
         repetition_penalty: Repetition penalty (1.0 = no penalty)
@@ -727,8 +727,6 @@ def understand_music(
         metadata, status = llm_handler.understand_audio_from_codes(
             audio_codes=audio_codes,
             temperature=temperature,
-            cfg_scale=cfg_scale,
-            negative_prompt=negative_prompt,
             top_k=top_k,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
@@ -847,7 +845,7 @@ def create_sample(
     llm_handler,
     query: str,
     instrumental: bool = False,
-    vocal_language: Optional[List[str]] = None,
+    vocal_language: Optional[str] = None,
     temperature: float = 0.85,
     top_k: Optional[int] = None,
     top_p: Optional[float] = None,
@@ -869,9 +867,9 @@ def create_sample(
         llm_handler: Initialized LLM handler (LLMHandler instance)
         query: User's natural language music description (e.g., "a soft Bengali love song")
         instrumental: Whether to generate instrumental music (no vocals)
-        vocal_language: List of allowed vocal languages for constrained decoding (e.g., ["en", "zh"]).
-                       If provided, the model will be constrained to generate lyrics in these languages.
-                       If None or ["unknown"], no language constraint is applied.
+        vocal_language: Allowed vocal language for constrained decoding (e.g., "en", "zh").
+                       If provided, the model will be constrained to generate lyrics in this language.
+                       If None or "unknown", no language constraint is applied.
         temperature: Sampling temperature for generation (0.0-2.0). Higher = more creative.
         top_k: Top-K sampling (None or 0 = disabled)
         top_p: Top-P (nucleus) sampling (None or 1.0 = disabled)
@@ -883,7 +881,7 @@ def create_sample(
         CreateSampleResult with generated sample fields and status
         
     Example:
-        >>> result = create_sample(llm_handler, "a soft Bengali love song for a quiet evening", vocal_language=["bn"])
+        >>> result = create_sample(llm_handler, "a soft Bengali love song for a quiet evening", vocal_language="bn")
         >>> if result.success:
         ...     print(f"Caption: {result.caption}")
         ...     print(f"Lyrics: {result.lyrics}")
@@ -895,14 +893,6 @@ def create_sample(
             status_message="5Hz LM not initialized. Please initialize it first.",
             success=False,
             error="LLM not initialized",
-        )
-    
-    # Validate query
-    if not query or not query.strip():
-        return CreateSampleResult(
-            status_message="No query provided. Please enter a music description.",
-            success=False,
-            error="Empty query",
         )
     
     try:
@@ -978,6 +968,178 @@ def create_sample(
     except Exception as e:
         logger.exception("Sample creation failed")
         return CreateSampleResult(
+            status_message=f"Error: {str(e)}",
+            success=False,
+            error=str(e),
+        )
+
+
+@dataclass
+class FormatSampleResult:
+    """Result of formatting user-provided caption and lyrics.
+    
+    This is used by the "Format" feature where users provide caption and lyrics,
+    and the LLM formats them into structured music metadata and an enhanced description.
+    
+    Attributes:
+        # Metadata Fields
+        caption: Enhanced/formatted music description/caption
+        lyrics: Formatted lyrics (may be same as input or reformatted)
+        bpm: Beats per minute (None if not detected)
+        duration: Duration in seconds (None if not detected)
+        keyscale: Musical key (e.g., "C Major")
+        language: Vocal language code (e.g., "en", "zh")
+        timesignature: Time signature (e.g., "4")
+        
+        # Status
+        status_message: Status message from formatting
+        success: Whether formatting completed successfully
+        error: Error message if formatting failed
+    """
+    # Metadata Fields
+    caption: str = ""
+    lyrics: str = ""
+    bpm: Optional[int] = None
+    duration: Optional[float] = None
+    keyscale: str = ""
+    language: str = ""
+    timesignature: str = ""
+    
+    # Status
+    status_message: str = ""
+    success: bool = True
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert result to dictionary for JSON serialization."""
+        return asdict(self)
+
+
+def format_sample(
+    llm_handler,
+    caption: str,
+    lyrics: str,
+    user_metadata: Optional[Dict[str, Any]] = None,
+    temperature: float = 0.85,
+    top_k: Optional[int] = None,
+    top_p: Optional[float] = None,
+    repetition_penalty: float = 1.0,
+    use_constrained_decoding: bool = True,
+    constrained_decoding_debug: bool = False,
+) -> FormatSampleResult:
+    """Format user-provided caption and lyrics using the 5Hz Language Model.
+    
+    This function takes user input (caption and lyrics) and generates structured
+    music metadata including an enhanced caption, BPM, duration, key, language,
+    and time signature.
+    
+    If user_metadata is provided, those values will be used to constrain the
+    decoding, ensuring the output matches user-specified values.
+    
+    Note: cfg_scale and negative_prompt are not supported in format mode.
+    
+    Args:
+        llm_handler: Initialized LLM handler (LLMHandler instance)
+        caption: User's caption/description (e.g., "Latin pop, reggaeton")
+        lyrics: User's lyrics with structure tags
+        user_metadata: Optional dict with user-provided metadata to constrain decoding.
+                      Supported keys: bpm, duration, keyscale, timesignature, language
+        temperature: Sampling temperature for generation (0.0-2.0). Higher = more creative.
+        top_k: Top-K sampling (None or 0 = disabled)
+        top_p: Top-P (nucleus) sampling (None or 1.0 = disabled)
+        repetition_penalty: Repetition penalty (1.0 = no penalty)
+        use_constrained_decoding: Whether to use FSM-based constrained decoding for metadata
+        constrained_decoding_debug: Whether to enable debug logging for constrained decoding
+        
+    Returns:
+        FormatSampleResult with formatted metadata fields and status
+        
+    Example:
+        >>> result = format_sample(llm_handler, "Latin pop, reggaeton", "[Verse 1]\\nHola mundo...")
+        >>> if result.success:
+        ...     print(f"Caption: {result.caption}")
+        ...     print(f"BPM: {result.bpm}")
+        ...     print(f"Lyrics: {result.lyrics}")
+    """
+    # Check if LLM is initialized
+    if not llm_handler.llm_initialized:
+        return FormatSampleResult(
+            status_message="5Hz LM not initialized. Please initialize it first.",
+            success=False,
+            error="LLM not initialized",
+        )
+    
+    try:
+        # Call LLM formatting
+        metadata, status = llm_handler.format_sample_from_input(
+            caption=caption,
+            lyrics=lyrics,
+            user_metadata=user_metadata,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            use_constrained_decoding=use_constrained_decoding,
+            constrained_decoding_debug=constrained_decoding_debug,
+        )
+        
+        # Check if LLM returned empty metadata (error case)
+        if not metadata:
+            return FormatSampleResult(
+                status_message=status or "Failed to format input",
+                success=False,
+                error=status or "Empty metadata returned",
+            )
+        
+        # Extract and convert fields
+        result_caption = metadata.get('caption', '')
+        result_lyrics = metadata.get('lyrics', lyrics)  # Fall back to input lyrics
+        keyscale = metadata.get('keyscale', '')
+        language = metadata.get('language', metadata.get('vocal_language', ''))
+        timesignature = metadata.get('timesignature', '')
+        
+        # Convert BPM to int
+        bpm = None
+        bpm_value = metadata.get('bpm')
+        if bpm_value is not None and bpm_value != 'N/A' and bpm_value != '':
+            try:
+                bpm = int(bpm_value)
+            except (ValueError, TypeError):
+                pass
+        
+        # Convert duration to float
+        duration = None
+        duration_value = metadata.get('duration')
+        if duration_value is not None and duration_value != 'N/A' and duration_value != '':
+            try:
+                duration = float(duration_value)
+            except (ValueError, TypeError):
+                pass
+        
+        # Clean up N/A values
+        if keyscale == 'N/A':
+            keyscale = ''
+        if language == 'N/A':
+            language = ''
+        if timesignature == 'N/A':
+            timesignature = ''
+        
+        return FormatSampleResult(
+            caption=result_caption,
+            lyrics=result_lyrics,
+            bpm=bpm,
+            duration=duration,
+            keyscale=keyscale,
+            language=language,
+            timesignature=timesignature,
+            status_message=status,
+            success=True,
+            error=None,
+        )
+        
+    except Exception as e:
+        logger.exception("Format sample failed")
+        return FormatSampleResult(
             status_message=f"Error: {str(e)}",
             success=False,
             error=str(e),

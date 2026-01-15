@@ -84,7 +84,7 @@
     "mode_simple": "シンプル",
     "mode_custom": "カスタム",
     "simple_query_label": "曲の説明",
-    "simple_query_placeholder": "作成したい音楽を説明してください。例：'静かな夜のための優しいベンガルのラブソング'",
+    "simple_query_placeholder": "作成したい音楽を説明してください。例：'静かな夜のための優しいベンガルのラブソング'。空欄の場合はランダムなサンプルが生成されます。",
     "simple_query_info": "生成したい音楽の自然言語の説明を入力",
     "simple_vocal_language_label": "ボーカル言語(オプション)",
     "simple_vocal_language_info": "歌詞の希望言語を選択。任意の言語の場合は'unknown'を使用。",
@@ -98,6 +98,7 @@
     "lyrics_placeholder": "[バース1]\\n星空の下で\\nとても生きていると感じる...",
     "lyrics_info": "構造を持つ曲の歌詞",
     "instrumental_label": "インストゥルメンタル",
+    "format_btn": "フォーマット",
     "optional_params": "⚙️ オプションパラメータ",
     "vocal_language_label": "ボーカル言語(オプション)",
     "vocal_language_info": "インストには`unknown`を使用",
@@ -127,6 +128,8 @@
     "use_adg_info": "角度ドメインガイダンスを有効化",
     "shift_label": "シフト",
     "shift_info": "baseモデル用タイムステップシフト係数 (範囲 1.0~5.0、デフォルト 3.0)。turboモデルには無効。",
+    "infer_method_label": "推論方法",
+    "infer_method_info": "拡散推論方法。ODE (オイラー) は高速、SDE (確率的) は異なる結果を生成する可能性があります。",
     "cfg_interval_start": "CFG 間隔開始",
     "cfg_interval_end": "CFG 間隔終了",
     "lm_params_title": "🤖 LM 生成パラメータ",
@@ -227,6 +230,9 @@
     "sample_created": "✅ サンプルが作成されました！キャプションと歌詞を確認して、音楽を生成をクリックしてください。",
     "simple_examples_not_found": "⚠️ シンプルモードサンプルディレクトリが見つかりません。",
     "simple_examples_empty": "⚠️ シンプルモードサンプルにファイルがありません。",
-    "simple_example_loaded": "🎲 {filename} からランダムサンプルを読み込みました"
+    "simple_example_loaded": "🎲 {filename} からランダムサンプルを読み込みました",
+    "format_success": "✅ キャプションと歌詞のフォーマットに成功しました",
+    "format_failed": "❌ フォーマットに失敗しました: {error}",
+    "skipping_metas_cot": "⚡ Phase 1 メタデータ COT をスキップ（サンプルは既にフォーマット済み）"
   }
 }
