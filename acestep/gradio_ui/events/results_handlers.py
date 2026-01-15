@@ -596,7 +596,7 @@ def generate_with_progress(
     # Clear lrc_display with empty string - this triggers .change() to clear subtitles
     clear_lrcs = [gr.update(value="", visible=True) for _ in range(8)]
     clear_accordions = [gr.skip() for _ in range(8)]  # Don't change accordion visibility
-    dump_audio = [gr.update(value="", subtitles="") for _ in range(8)]
+    dump_audio = [gr.update(value=None, subtitles=None) for _ in range(8)]
     yield (
         # Audio outputs - just skip, value will be updated in loop
         # Subtitles will be cleared via lrc_display.change()
@@ -1311,7 +1311,7 @@ def capture_current_params(
     reference_audio, audio_duration, batch_size_input, src_audio,
     text2music_audio_code_string, repainting_start, repainting_end,
     instruction_display_gen, audio_cover_strength, task_type,
-    use_adg, cfg_interval_start, cfg_interval_end, shift, audio_format, lm_temperature,
+    use_adg, cfg_interval_start, cfg_interval_end, shift, infer_method, audio_format, lm_temperature,
     think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
     use_cot_metas, use_cot_caption, use_cot_language,
     constrained_decoding_debug, allow_lm_batch, auto_score, auto_lrc, score_scale, lm_batch_chunk_size,
@@ -1348,6 +1348,7 @@ def capture_current_params(
         "cfg_interval_start": cfg_interval_start,
         "cfg_interval_end": cfg_interval_end,
         "shift": shift,
+        "infer_method": infer_method,
         "audio_format": audio_format,
         "lm_temperature": lm_temperature,
         "think_checkbox": think_checkbox,
@@ -1376,7 +1377,7 @@ def generate_with_batch_management(
     reference_audio, audio_duration, batch_size_input, src_audio,
     text2music_audio_code_string, repainting_start, repainting_end,
     instruction_display_gen, audio_cover_strength, task_type,
-    use_adg, cfg_interval_start, cfg_interval_end, shift, audio_format, lm_temperature,
+    use_adg, cfg_interval_start, cfg_interval_end, shift, infer_method, audio_format, lm_temperature,
     think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
     use_cot_metas, use_cot_caption, use_cot_language, is_format_caption,
     constrained_decoding_debug,
@@ -1405,7 +1406,7 @@ def generate_with_batch_management(
         reference_audio, audio_duration, batch_size_input, src_audio,
         text2music_audio_code_string, repainting_start, repainting_end,
         instruction_display_gen, audio_cover_strength, task_type,
-        use_adg, cfg_interval_start, cfg_interval_end, shift, audio_format, lm_temperature,
+        use_adg, cfg_interval_start, cfg_interval_end, shift, infer_method, audio_format, lm_temperature,
         think_checkbox, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
         use_cot_metas, use_cot_caption, use_cot_language, is_format_caption,
         constrained_decoding_debug,
@@ -1485,6 +1486,7 @@ def generate_with_batch_management(
         "cfg_interval_start": cfg_interval_start,
         "cfg_interval_end": cfg_interval_end,
         "shift": shift,
+        "infer_method": infer_method,
         "audio_format": audio_format,
         "lm_temperature": lm_temperature,
         "think_checkbox": think_checkbox,
@@ -1670,6 +1672,7 @@ def generate_next_batch_background(
         params.setdefault("cfg_interval_start", 0.0)
         params.setdefault("cfg_interval_end", 1.0)
         params.setdefault("shift", 1.0)
+        params.setdefault("infer_method", "ode")
         params.setdefault("audio_format", "mp3")
         params.setdefault("lm_temperature", 0.85)
         params.setdefault("think_checkbox", True)
@@ -1720,6 +1723,7 @@ def generate_next_batch_background(
             cfg_interval_start=params.get("cfg_interval_start"),
             cfg_interval_end=params.get("cfg_interval_end"),
             shift=params.get("shift"),
+            infer_method=params.get("infer_method"),
             audio_format=params.get("audio_format"),
             lm_temperature=params.get("lm_temperature"),
             think_checkbox=params.get("think_checkbox"),
