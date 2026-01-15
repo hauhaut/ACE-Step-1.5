@@ -1554,7 +1554,7 @@ class LLMHandler:
         if vocal_language and vocal_language.strip() and vocal_language.strip().lower() != "unknown":
             # Use the specified language for constrained decoding
             user_metadata = {"language": vocal_language.strip()}
-            skip_language = True  # Skip language generation since we're injecting it
+            # skip_language = True  # Skip language generation since we're injecting it
             logger.info(f"Using user-specified language: {vocal_language.strip()}")
         
         # Generate using constrained decoding (inspiration phase)
@@ -1570,7 +1570,7 @@ class LLMHandler:
                 "target_duration": None,  # No duration constraint
                 "user_metadata": user_metadata,  # Inject language if specified
                 "skip_caption": False,  # Generate caption
-                "skip_language": skip_language,  # Skip if we're injecting language
+                "skip_language": False,
                 "skip_genres": False,  # Generate genres
                 "generation_phase": "understand",  # Use understand phase for metadata + free-form lyrics
                 "caption": "",
@@ -1598,12 +1598,12 @@ class LLMHandler:
         # Echo back the instrumental flag
         metadata['instrumental'] = instrumental
         
-        logger.info(f"Sample created successfully. Generated {len(metadata)} fields")
+        logger.info(f"Sample created successfully. Generated {metadata} fields")
         if constrained_decoding_debug:
             logger.debug(f"Generated metadata: {list(metadata.keys())}")
             logger.debug(f"Output text preview: {output_text[:300]}...")
         
-        status_msg = f"✅ Sample created successfully\nGenerated fields: {', '.join(metadata.keys())}"
+        status_msg = f"✅ Sample created successfully\nGenerated fields: {metadata}"
         return metadata, status_msg
     
     def build_formatted_prompt_for_format(
