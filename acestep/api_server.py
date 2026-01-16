@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sys
 import time
 import traceback
@@ -48,6 +47,8 @@ from acestep.inference import (
     GenerationParams,
     GenerationConfig,
     generate_music,
+    create_sample,
+    format_sample,
 )
 from acestep.gradio_ui.events.results_handlers import _build_generation_info
 
@@ -66,6 +67,12 @@ class GenerateMusicRequest(BaseModel):
     thinking: bool = False
     # Sample-mode requests auto-generate caption/lyrics/metas via LM (no user prompt).
     sample_mode: bool = False
+    # Description for sample mode: auto-generate caption/lyrics from description query
+    sample_query: str = Field(default="", description="Query/description for sample mode (use create_sample)")
+    # Whether to use format_sample() to enhance input caption/lyrics
+    use_format: bool = Field(default=False, description="Use format_sample() to enhance input (default: False)")
+    # Model name for multi-model support (select which DiT model to use)
+    model: Optional[str] = Field(default=None, description="Model name to use (e.g., 'acestep-v15-turbo')")
 
     bpm: Optional[int] = None
     # Accept common client keys via manual parsing (see _build_req_from_mapping).
@@ -233,6 +240,22 @@ def _get_project_root() -> str:
     return os.path.dirname(os.path.dirname(current_file))
 
 
+def _get_model_name(config_path: str) -> str:
+    """
+    Extract model name from config_path.
+    
+    Args:
+        config_path: Path like "acestep-v15-turbo" or "/path/to/acestep-v15-turbo"
+        
+    Returns:
+        Model name (last directory name from config_path)
+    """
+    if not config_path:
+        return ""
+    normalized = config_path.rstrip("/\\")
+    return os.path.basename(normalized)
+
+
 def _load_project_env() -> None:
     if load_dotenv is None:
         return
@@ -377,6 +400,25 @@ def create_app() -> FastAPI:
         app.state._llm_init_error = None
         app.state._llm_init_lock = Lock()
 
+        # Multi-model support: secondary DiT handlers
+        handler2 = None
+        handler3 = None
+        config_path2 = os.getenv("ACESTEP_CONFIG_PATH2", "").strip()
+        config_path3 = os.getenv("ACESTEP_CONFIG_PATH3", "").strip()
+        
+        if config_path2:
+            handler2 = AceStepHandler()
+        if config_path3:
+            handler3 = AceStepHandler()
+        
+        app.state.handler2 = handler2
+        app.state.handler3 = handler3
+        app.state._initialized2 = False
+        app.state._initialized3 = False
+        app.state._config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo-rl")
+        app.state._config_path2 = config_path2
+        app.state._config_path3 = config_path3
+
         max_workers = int(os.getenv("ACESTEP_API_WORKERS", "1"))
         executor = ThreadPoolExecutor(max_workers=max_workers)
 
@@ -425,6 +467,7 @@ def create_app() -> FastAPI:
                 offload_to_cpu = _env_bool("ACESTEP_OFFLOAD_TO_CPU", False)
                 offload_dit_to_cpu = _env_bool("ACESTEP_OFFLOAD_DIT_TO_CPU", False)
 
+                # Initialize primary model
                 status_msg, ok = h.initialize_service(
                     project_root=project_root,
                     config_path=config_path,
@@ -438,6 +481,48 @@ def create_app() -> FastAPI:
                     app.state._init_error = status_msg
                     raise RuntimeError(status_msg)
                 app.state._initialized = True
+                
+                # Initialize secondary model if configured
+                if app.state.handler2 and app.state._config_path2:
+                    try:
+                        status_msg2, ok2 = app.state.handler2.initialize_service(
+                            project_root=project_root,
+                            config_path=app.state._config_path2,
+                            device=device,
+                            use_flash_attention=use_flash_attention,
+                            compile_model=False,
+                            offload_to_cpu=offload_to_cpu,
+                            offload_dit_to_cpu=offload_dit_to_cpu,
+                        )
+                        app.state._initialized2 = ok2
+                        if ok2:
+                            print(f"[API Server] Secondary model loaded: {_get_model_name(app.state._config_path2)}")
+                        else:
+                            print(f"[API Server] Warning: Secondary model failed to load: {status_msg2}")
+                    except Exception as e:
+                        print(f"[API Server] Warning: Failed to initialize secondary model: {e}")
+                        app.state._initialized2 = False
+                
+                # Initialize third model if configured
+                if app.state.handler3 and app.state._config_path3:
+                    try:
+                        status_msg3, ok3 = app.state.handler3.initialize_service(
+                            project_root=project_root,
+                            config_path=app.state._config_path3,
+                            device=device,
+                            use_flash_attention=use_flash_attention,
+                            compile_model=False,
+                            offload_to_cpu=offload_to_cpu,
+                            offload_dit_to_cpu=offload_dit_to_cpu,
+                        )
+                        app.state._initialized3 = ok3
+                        if ok3:
+                            print(f"[API Server] Third model loaded: {_get_model_name(app.state._config_path3)}")
+                        else:
+                            print(f"[API Server] Warning: Third model failed to load: {status_msg3}")
+                    except Exception as e:
+                        print(f"[API Server] Warning: Failed to initialize third model: {e}")
+                        app.state._initialized3 = False
 
         async def _cleanup_job_temp_files(job_id: str) -> None:
             async with app.state.job_temp_files_lock:
@@ -450,12 +535,48 @@ def create_app() -> FastAPI:
 
         async def _run_one_job(job_id: str, req: GenerateMusicRequest) -> None:
             job_store: _JobStore = app.state.job_store
-            h: AceStepHandler = app.state.handler
             llm: LLMHandler = app.state.llm_handler
             executor: ThreadPoolExecutor = app.state.executor
 
             await _ensure_initialized()
             job_store.mark_running(job_id)
+            
+            # Select DiT handler based on user's model choice
+            # Default: use primary handler
+            selected_handler: AceStepHandler = app.state.handler
+            selected_model_name = _get_model_name(app.state._config_path)
+            
+            if req.model:
+                model_matched = False
+                
+                # Check if it matches the second model
+                if app.state.handler2 and getattr(app.state, "_initialized2", False):
+                    model2_name = _get_model_name(app.state._config_path2)
+                    if req.model == model2_name:
+                        selected_handler = app.state.handler2
+                        selected_model_name = model2_name
+                        model_matched = True
+                        print(f"[API Server] Job {job_id}: Using second model: {model2_name}")
+                
+                # Check if it matches the third model
+                if not model_matched and app.state.handler3 and getattr(app.state, "_initialized3", False):
+                    model3_name = _get_model_name(app.state._config_path3)
+                    if req.model == model3_name:
+                        selected_handler = app.state.handler3
+                        selected_model_name = model3_name
+                        model_matched = True
+                        print(f"[API Server] Job {job_id}: Using third model: {model3_name}")
+                
+                if not model_matched:
+                    available_models = [_get_model_name(app.state._config_path)]
+                    if app.state.handler2 and getattr(app.state, "_initialized2", False):
+                        available_models.append(_get_model_name(app.state._config_path2))
+                    if app.state.handler3 and getattr(app.state, "_initialized3", False):
+                        available_models.append(_get_model_name(app.state._config_path3))
+                    print(f"[API Server] Job {job_id}: Model '{req.model}' not found in {available_models}, using primary: {selected_model_name}")
+            
+            # Use selected handler for generation
+            h: AceStepHandler = selected_handler
 
             def _blocking_generate() -> Dict[str, Any]:
                 """Generate music using unified inference logic from acestep.inference"""
@@ -526,7 +647,7 @@ def create_app() -> FastAPI:
                     if getattr(app.state, "_llm_init_error", None):
                         raise RuntimeError(f"5Hz LM init failed: {app.state._llm_init_error}")
 
-                # Handle sample mode: generate random caption/lyrics first
+                # Handle sample mode or description: generate caption/lyrics/metas via LM
                 caption = req.caption
                 lyrics = req.lyrics
                 bpm = req.bpm
@@ -534,31 +655,85 @@ def create_app() -> FastAPI:
                 time_signature = req.time_signature
                 audio_duration = req.audio_duration
                 
-                if sample_mode:
-                    print("[api_server] Sample mode: generating random caption/lyrics via LM")
-                    # Note: understand_audio_from_codes does not support cfg_scale or negative_prompt
-                    sample_metadata, sample_status = llm.understand_audio_from_codes(
-                        audio_codes="NO USER INPUT",
+                # Check if sample_query (description) is provided for create_sample
+                has_sample_query = bool(req.sample_query and req.sample_query.strip())
+                
+                if sample_mode or has_sample_query:
+                    if has_sample_query:
+                        # Use create_sample() with description query
+                        print(f"[api_server] Description mode: generating sample from query: {req.sample_query[:100]}")
+                        sample_result = create_sample(
+                            llm_handler=llm,
+                            query=req.sample_query,
+                            instrumental=False,  # Could be extracted from description
+                            vocal_language=req.vocal_language if req.vocal_language != "en" else None,
+                            temperature=req.lm_temperature,
+                            top_k=lm_top_k if lm_top_k > 0 else None,
+                            top_p=lm_top_p if lm_top_p < 1.0 else None,
+                            use_constrained_decoding=req.constrained_decoding,
+                        )
+                        
+                        if not sample_result.success:
+                            raise RuntimeError(f"create_sample failed: {sample_result.error or sample_result.status_message}")
+                        
+                        # Use generated sample data
+                        caption = sample_result.caption
+                        lyrics = sample_result.lyrics
+                        bpm = sample_result.bpm
+                        key_scale = sample_result.keyscale
+                        time_signature = sample_result.timesignature
+                        audio_duration = sample_result.duration
+                        
+                        print(f"[api_server] Sample from description generated: caption_len={len(caption)}, lyrics_len={len(lyrics)}, bpm={bpm}")
+                    else:
+                        # Original sample_mode behavior: random generation
+                        print("[api_server] Sample mode: generating random caption/lyrics via LM")
+                        sample_metadata, sample_status = llm.understand_audio_from_codes(
+                            audio_codes="NO USER INPUT",
+                            temperature=req.lm_temperature,
+                            top_k=lm_top_k if lm_top_k > 0 else None,
+                            top_p=lm_top_p if lm_top_p < 1.0 else None,
+                            repetition_penalty=req.lm_repetition_penalty,
+                            use_constrained_decoding=req.constrained_decoding,
+                            constrained_decoding_debug=req.constrained_decoding_debug,
+                        )
+
+                        if not sample_metadata or str(sample_status).startswith("❌"):
+                            raise RuntimeError(f"Sample generation failed: {sample_status}")
+
+                        # Use generated values with fallback defaults
+                        caption = sample_metadata.get("caption", "")
+                        lyrics = sample_metadata.get("lyrics", "")
+                        bpm = _to_int(sample_metadata.get("bpm"), None) or _to_int(os.getenv("ACESTEP_SAMPLE_DEFAULT_BPM", "120"), 120)
+                        key_scale = sample_metadata.get("keyscale", "") or os.getenv("ACESTEP_SAMPLE_DEFAULT_KEY", "C Major")
+                        time_signature = sample_metadata.get("timesignature", "") or os.getenv("ACESTEP_SAMPLE_DEFAULT_TIMESIGNATURE", "4/4")
+                        audio_duration = _to_float(sample_metadata.get("duration"), None) or _to_float(os.getenv("ACESTEP_SAMPLE_DEFAULT_DURATION_SECONDS", "120"), 120.0)
+                        
+                        print(f"[api_server] Sample generated: caption_len={len(caption)}, lyrics_len={len(lyrics)}, bpm={bpm}, duration={audio_duration}")
+                
+                # Apply format_sample() if use_format is True and caption/lyrics are provided
+                if req.use_format and (caption or lyrics):
+                    print(f"[api_server] Applying format_sample to enhance input...")
+                    _ensure_llm_ready()
+                    if getattr(app.state, "_llm_init_error", None):
+                        raise RuntimeError(f"5Hz LM init failed (needed for format): {app.state._llm_init_error}")
+                    
+                    format_result = format_sample(
+                        llm_handler=llm,
+                        caption=caption,
+                        lyrics=lyrics,
                         temperature=req.lm_temperature,
                         top_k=lm_top_k if lm_top_k > 0 else None,
                         top_p=lm_top_p if lm_top_p < 1.0 else None,
-                        repetition_penalty=req.lm_repetition_penalty,
                         use_constrained_decoding=req.constrained_decoding,
-                        constrained_decoding_debug=req.constrained_decoding_debug,
                     )
-
-                    if not sample_metadata or str(sample_status).startswith("❌"):
-                        raise RuntimeError(f"Sample generation failed: {sample_status}")
-
-                    # Use generated values with fallback defaults
-                    caption = sample_metadata.get("caption", "")
-                    lyrics = sample_metadata.get("lyrics", "")
-                    bpm = _to_int(sample_metadata.get("bpm"), None) or _to_int(os.getenv("ACESTEP_SAMPLE_DEFAULT_BPM", "120"), 120)
-                    key_scale = sample_metadata.get("keyscale", "") or os.getenv("ACESTEP_SAMPLE_DEFAULT_KEY", "C Major")
-                    time_signature = sample_metadata.get("timesignature", "") or os.getenv("ACESTEP_SAMPLE_DEFAULT_TIMESIGNATURE", "4/4")
-                    audio_duration = _to_float(sample_metadata.get("duration"), None) or _to_float(os.getenv("ACESTEP_SAMPLE_DEFAULT_DURATION_SECONDS", "120"), 120.0)
                     
-                    print(f"[api_server] Sample generated: caption_len={len(caption)}, lyrics_len={len(lyrics)}, bpm={bpm}, duration={audio_duration}")
+                    if format_result.success:
+                        caption = format_result.caption
+                        lyrics = format_result.lyrics
+                        print(f"[api_server] Format applied: new caption_len={len(caption)}, lyrics_len={len(lyrics)}")
+                    else:
+                        print(f"[api_server] Warning: format_sample failed: {format_result.error}, using original input")
                 
                 print(f"[api_server] Before GenerationParams: thinking={thinking}, sample_mode={sample_mode}")
                 print(f"[api_server] Caption/Lyrics to use: caption_len={len(caption)}, lyrics_len={len(lyrics)}")
@@ -701,9 +876,10 @@ def create_app() -> FastAPI:
                         return None
                     return s
 
-                # Get model information from environment variables
+                # Get model information
                 lm_model_name = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B-v3")
-                dit_model_name = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo-rl")
+                # Use selected_model_name (set at the beginning of _run_one_job)
+                dit_model_name = selected_model_name
                 
                 return {
                     "first_audio_path": _path_to_audio_url(first_audio) if first_audio else None,
@@ -835,6 +1011,9 @@ def create_app() -> FastAPI:
                 lyrics=str(get("lyrics", "") or ""),
                 thinking=_to_bool(get("thinking"), False),
                 sample_mode=_to_bool(_get_any("sample_mode", "sampleMode"), False),
+                sample_query=str(_get_any("sample_query", "sampleQuery", "description", "desc", default="") or ""),
+                use_format=_to_bool(_get_any("use_format", "useFormat", "format"), False),
+                model=str(_get_any("model", "dit_model", "ditModel", default="") or "").strip() or None,
                 bpm=normalized_bpm,
                 key_scale=normalized_keyscale,
                 time_signature=normalized_timesig,
