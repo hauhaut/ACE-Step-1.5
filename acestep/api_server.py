@@ -1284,6 +1284,43 @@ def create_app() -> FastAPI:
             "version": "1.0",
         }
 
+    @app.get("/v1/models")
+    async def list_models():
+        """List available DiT models."""
+        models = []
+        
+        # Primary model (always available if initialized)
+        if getattr(app.state, "_initialized", False):
+            primary_model = _get_model_name(app.state._config_path)
+            if primary_model:
+                models.append({
+                    "name": primary_model,
+                    "is_default": True,
+                })
+        
+        # Secondary model
+        if getattr(app.state, "_initialized2", False) and app.state._config_path2:
+            secondary_model = _get_model_name(app.state._config_path2)
+            if secondary_model:
+                models.append({
+                    "name": secondary_model,
+                    "is_default": False,
+                })
+        
+        # Third model
+        if getattr(app.state, "_initialized3", False) and app.state._config_path3:
+            third_model = _get_model_name(app.state._config_path3)
+            if third_model:
+                models.append({
+                    "name": third_model,
+                    "is_default": False,
+                })
+        
+        return {
+            "models": models,
+            "default_model": models[0]["name"] if models else None,
+        }
+
     @app.get("/v1/audio")
     async def get_audio(path: str):
         """Serve audio file by path."""
