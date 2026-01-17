@@ -636,10 +636,21 @@ def create_app() -> FastAPI:
                 # Determine if LLM is needed
                 thinking = bool(req.thinking)
                 sample_mode = bool(req.sample_mode)
-                need_llm = thinking or sample_mode
+                has_sample_query = bool(req.sample_query and req.sample_query.strip())
+                use_format = bool(req.use_format)
+                use_cot_caption = bool(req.use_cot_caption)
+                use_cot_language = bool(req.use_cot_language)
                 
-                print(f"[api_server] Request params: req.thinking={req.thinking}, req.sample_mode={req.sample_mode}")
-                print(f"[api_server] Determined: thinking={thinking}, sample_mode={sample_mode}, need_llm={need_llm}")
+                # LLM is needed for:
+                # - thinking mode (LM generates audio codes)
+                # - sample_mode (LM generates random caption/lyrics/metas)
+                # - sample_query/description (LM generates from description)
+                # - use_format (LM enhances caption/lyrics)
+                # - use_cot_caption or use_cot_language (LM enhances metadata)
+                need_llm = thinking or sample_mode or has_sample_query or use_format or use_cot_caption or use_cot_language
+                
+                print(f"[api_server] Request params: req.thinking={req.thinking}, req.sample_mode={req.sample_mode}, req.use_cot_caption={req.use_cot_caption}, req.use_cot_language={req.use_cot_language}, req.use_format={req.use_format}")
+                print(f"[api_server] Determined: thinking={thinking}, sample_mode={sample_mode}, use_cot_caption={use_cot_caption}, use_cot_language={use_cot_language}, use_format={use_format}, need_llm={need_llm}")
                 
                 # Ensure LLM is ready if needed
                 if need_llm:
@@ -654,9 +665,6 @@ def create_app() -> FastAPI:
                 key_scale = req.key_scale
                 time_signature = req.time_signature
                 audio_duration = req.audio_duration
-                
-                # Check if sample_query (description) is provided for create_sample
-                has_sample_query = bool(req.sample_query and req.sample_query.strip())
                 
                 if sample_mode or has_sample_query:
                     if has_sample_query:
