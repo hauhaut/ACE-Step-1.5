@@ -102,9 +102,13 @@ class GenerateMusicRequest(BaseModel):
     cfg_interval_start: float = 0.0
     cfg_interval_end: float = 1.0
     infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
+    shift: float = Field(
+        default=3.0,
+        description="Timestep shift factor (range 1.0~5.0, default 3.0). Only effective for base models, not turbo models."
+    )
     timesteps: Optional[str] = Field(
         default=None,
-        description="Custom timesteps (comma-separated, e.g., '0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0')"
+        description="Custom timesteps (comma-separated, e.g., '0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0'). Overrides inference_steps and shift."
     )
 
     audio_format: str = "mp3"
@@ -748,6 +752,15 @@ def create_app() -> FastAPI:
                         print(f"[api_server] Warning: format_sample failed: {format_result.error}, using original input")
                 
                 print(f"[api_server] Before GenerationParams: thinking={thinking}, sample_mode={sample_mode}")
+                # Parse timesteps string to list of floats if provided
+                parsed_timesteps = None
+                if req.timesteps and req.timesteps.strip():
+                    try:
+                        parsed_timesteps = [float(t.strip()) for t in req.timesteps.split(",") if t.strip()]
+                    except ValueError:
+                        print(f"[api_server] Warning: Failed to parse timesteps '{req.timesteps}', using default")
+                        parsed_timesteps = None
+
                 print(f"[api_server] Caption/Lyrics to use: caption_len={len(caption)}, lyrics_len={len(lyrics)}")
 
                 # Parse timesteps if provided
@@ -779,12 +792,13 @@ def create_app() -> FastAPI:
                     keyscale=key_scale,
                     timesignature=time_signature,
                     duration=audio_duration if audio_duration else -1.0,
-                    inference_steps=actual_inference_steps,
+                    inference_steps=req.inference_steps,
                     seed=req.seed,
                     guidance_scale=req.guidance_scale,
                     use_adg=req.use_adg,
                     cfg_interval_start=req.cfg_interval_start,
                     cfg_interval_end=req.cfg_interval_end,
+                    shift=req.shift,
                     infer_method=req.infer_method,
                     timesteps=parsed_timesteps,
                     repainting_start=req.repainting_start,
@@ -1069,6 +1083,7 @@ def create_app() -> FastAPI:
                 cfg_interval_start=_to_float(get("cfg_interval_start"), 0.0) or 0.0,
                 cfg_interval_end=_to_float(get("cfg_interval_end"), 1.0) or 1.0,
                 infer_method=str(_get_any("infer_method", "inferMethod", default="ode") or "ode"),
+                shift=_to_float(_get_any("shift"), 3.0) or 3.0,
                 audio_format=str(get("audio_format", "mp3") or "mp3"),
                 use_tiled_decode=_to_bool(_get_any("use_tiled_decode", "useTiledDecode"), True),
                 lm_model_path=str(get("lm_model_path") or "").strip() or None,
@@ -1320,13 +1335,6 @@ def main() -> None:
         reload=False,
         workers=1,
     )
-
-
-if __name__ == "__main__":
-    main()
-,
-    )
-
 
 if __name__ == "__main__":
     main()
