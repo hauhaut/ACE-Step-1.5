@@ -402,6 +402,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                         )
         
         # Advanced Settings
+        # Default UI settings use turbo mode (max 8 steps, hide CFG/ADG/shift)
+        # These will be updated after model initialization based on handler.is_turbo_model()
         with gr.Accordion(t("generation.advanced_settings"), open=False):
             with gr.Row():
                 inference_steps = gr.Slider(
@@ -460,6 +462,14 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     value="ode",
                     label=t("generation.infer_method_label"),
                     info=t("generation.infer_method_info"),
+                )
+            
+            with gr.Row():
+                custom_timesteps = gr.Textbox(
+                    label=t("generation.custom_timesteps_label"),
+                    placeholder="0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0",
+                    value="",
+                    info=t("generation.custom_timesteps_info"),
                 )
             
             with gr.Row():
@@ -698,6 +708,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         "cfg_interval_end": cfg_interval_end,
         "shift": shift,
         "infer_method": infer_method,
+        "custom_timesteps": custom_timesteps,
         "audio_format": audio_format,
         "output_alignment_preference": output_alignment_preference,
         "think_checkbox": think_checkbox,

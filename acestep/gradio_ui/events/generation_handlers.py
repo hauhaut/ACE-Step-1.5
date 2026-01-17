@@ -7,13 +7,63 @@ import json
 import random
 import glob
 import gradio as gr
-from typing import Optional
+from typing import Optional, List, Tuple
 from acestep.constants import (
     TASK_TYPES_TURBO,
     TASK_TYPES_BASE,
 )
 from acestep.gradio_ui.i18n import t
 from acestep.inference import understand_music, create_sample, format_sample
+
+
+def parse_and_validate_timesteps(
+    timesteps_str: str,
+    inference_steps: int
+) -> Tuple[Optional[List[float]], bool, str]:
+    """
+    Parse timesteps string and validate.
+    
+    Args:
+        timesteps_str: Comma-separated timesteps string (e.g., "0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0")
+        inference_steps: Expected number of inference steps
+        
+    Returns:
+        Tuple of (parsed_timesteps, has_warning, warning_message)
+        - parsed_timesteps: List of float timesteps, or None if invalid/empty
+        - has_warning: Whether a warning was shown
+        - warning_message: Description of the warning
+    """
+    if not timesteps_str or not timesteps_str.strip():
+        return None, False, ""
+    
+    # Parse comma-separated values
+    values = [v.strip() for v in timesteps_str.split(",") if v.strip()]
+    
+    if not values:
+        return None, False, ""
+    
+    # Handle optional trailing 0
+    if values[-1] != "0":
+        values.append("0")
+    
+    try:
+        timesteps = [float(v) for v in values]
+    except ValueError:
+        gr.Warning(t("messages.invalid_timesteps_format"))
+        return None, True, "Invalid format"
+    
+    # Validate range [0, 1]
+    if any(ts < 0 or ts > 1 for ts in timesteps):
+        gr.Warning(t("messages.timesteps_out_of_range"))
+        return None, True, "Out of range"
+    
+    # Check if count matches inference_steps
+    actual_steps = len(timesteps) - 1
+    if actual_steps != inference_steps:
+        gr.Warning(t("messages.timesteps_count_mismatch", actual=actual_steps, expected=inference_steps))
+        return timesteps, True, f"Using {actual_steps} steps from timesteps"
+    
+    return timesteps, False, ""
 
 
 def load_metadata(file_obj):
@@ -321,50 +371,31 @@ def refresh_checkpoints(dit_handler):
 
 
 def update_model_type_settings(config_path):
-    """Update UI settings based on model type"""
+    """Update UI settings based on model type (fallback when handler not initialized yet)
+    
+    Note: This is used as a fallback when the user changes config_path dropdown 
+    before initializing the model. The actual settings are determined by the 
+    handler's is_turbo_model() method after initialization.
+    """
     if config_path is None:
         config_path = ""
     config_path_lower = config_path.lower()
     
+    # Determine is_turbo based on config_path string
+    # This is a heuristic fallback - actual model type is determined after loading
     if "turbo" in config_path_lower:
-        # Turbo model: max 8 steps, hide CFG/ADG/shift, only show text2music/repaint/cover
-        # Shift is not effective for turbo models, default to 1.0
-        return (
-            gr.update(value=8, maximum=8, minimum=1),  # inference_steps
-            gr.update(visible=False),  # guidance_scale
-            gr.update(visible=False),  # use_adg
-            gr.update(value=1.0, visible=False),  # shift (not effective for turbo)
-            gr.update(visible=False),  # cfg_interval_start
-            gr.update(visible=False),  # cfg_interval_end
-            gr.update(choices=TASK_TYPES_TURBO),  # task_type
-        )
+        is_turbo = True
     elif "base" in config_path_lower:
-        # Base model: max 100 steps, show CFG/ADG/shift, show all task types
-        # Shift range 1.0~5.0, default 3.0 for base models
-        return (
-            gr.update(value=32, maximum=100, minimum=1),  # inference_steps
-            gr.update(visible=True),  # guidance_scale
-            gr.update(visible=True),  # use_adg
-            gr.update(value=3.0, visible=True),  # shift (effective for base, default 3.0)
-            gr.update(visible=True),  # cfg_interval_start
-            gr.update(visible=True),  # cfg_interval_end
-            gr.update(choices=TASK_TYPES_BASE),  # task_type
-        )
+        is_turbo = False
     else:
-        # Default to turbo settings
-        return (
-            gr.update(value=8, maximum=8, minimum=1),
-            gr.update(visible=False),
-            gr.update(visible=False),
-            gr.update(value=1.0, visible=False),  # shift default 1.0
-            gr.update(visible=False),
-            gr.update(visible=False),
-            gr.update(choices=TASK_TYPES_TURBO),  # task_type
-        )
+        # Default to turbo settings for unknown model types
+        is_turbo = True
+    
+    return get_model_type_ui_settings(is_turbo)
 
 
 def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, device, init_llm, lm_model_path, backend, use_flash_attention, offload_to_cpu, offload_dit_to_cpu):
-    """Wrapper for service initialization, returns status, button state, and accordion state"""
+    """Wrapper for service initialization, returns status, button state, accordion state, and model type settings"""
     # Initialize DiT handler
     status, enable = dit_handler.initialize_service(
         checkpoint, config_path, device,
@@ -400,7 +431,42 @@ def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, devi
     is_model_initialized = dit_handler.model is not None
     accordion_state = gr.update(open=not is_model_initialized)
     
-    return status, gr.update(interactive=enable), accordion_state
+    # Get model type settings based on actual loaded model
+    is_turbo = dit_handler.is_turbo_model()
+    model_type_settings = get_model_type_ui_settings(is_turbo)
+    
+    return (
+        status, 
+        gr.update(interactive=enable), 
+        accordion_state,
+        *model_type_settings
+    )
+
+
+def get_model_type_ui_settings(is_turbo: bool):
+    """Get UI settings based on whether the model is turbo or base"""
+    if is_turbo:
+        # Turbo model: max 8 steps, hide CFG/ADG/shift, only show text2music/repaint/cover
+        return (
+            gr.update(value=8, maximum=8, minimum=1),  # inference_steps
+            gr.update(visible=False),  # guidance_scale
+            gr.update(visible=False),  # use_adg
+            gr.update(value=1.0, visible=False),  # shift (not effective for turbo)
+            gr.update(visible=False),  # cfg_interval_start
+            gr.update(visible=False),  # cfg_interval_end
+            gr.update(choices=TASK_TYPES_TURBO),  # task_type
+        )
+    else:
+        # Base model: max 200 steps, default 32, show CFG/ADG/shift, show all task types
+        return (
+            gr.update(value=32, maximum=200, minimum=1),  # inference_steps
+            gr.update(visible=True),  # guidance_scale
+            gr.update(visible=True),  # use_adg
+            gr.update(value=3.0, visible=True),  # shift (effective for base, default 3.0)
+            gr.update(visible=True),  # cfg_interval_start
+            gr.update(visible=True),  # cfg_interval_end
+            gr.update(choices=TASK_TYPES_BASE),  # task_type
+        )
 
 
 def update_negative_prompt_visibility(init_llm_checked):

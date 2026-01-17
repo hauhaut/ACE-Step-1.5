@@ -115,7 +115,7 @@
     "batch_size_info": "要生成的音频数量(最多8个)",
     "advanced_settings": "🔧 高级设置",
     "inference_steps_label": "DiT 推理步数",
-    "inference_steps_info": "Turbo: 最多8, Base: 最多100",
+    "inference_steps_info": "Turbo: 最多8, Base: 最多200",
     "guidance_scale_label": "DiT 引导比例(仅支持base模型)",
     "guidance_scale_info": "更高的值更紧密地遵循文本",
     "seed_label": "种子",
@@ -130,6 +130,8 @@
     "shift_info": "时间步偏移因子，仅对 base 模型生效 (范围 1.0~5.0，默认 3.0)。对 turbo 模型无效。",
     "infer_method_label": "推理方法",
     "infer_method_info": "扩散推理方法。ODE (欧拉) 更快，SDE (随机) 可能产生不同结果。",
+    "custom_timesteps_label": "自定义时间步",
+    "custom_timesteps_info": "可选：从 1.0 到 0.0 的逗号分隔值（例如 '0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0'）。会覆盖推理步数和 shift 设置。",
     "cfg_interval_start": "CFG 间隔开始",
     "cfg_interval_end": "CFG 间隔结束",
     "lm_params_title": "🤖 LM 生成参数",
@@ -233,6 +235,9 @@
     "simple_example_loaded": "🎲 已从 {filename} 加载随机示例",
     "format_success": "✅ 描述和歌词格式化成功",
     "format_failed": "❌ 格式化失败: {error}",
-    "skipping_metas_cot": "⚡ 跳过 Phase 1 元数据 COT（样本已格式化）"
+    "skipping_metas_cot": "⚡ 跳过 Phase 1 元数据 COT（样本已格式化）",
+    "invalid_timesteps_format": "⚠️ 时间步格式无效，使用默认调度。",
+    "timesteps_out_of_range": "⚠️ 时间步必须在 [0, 1] 范围内，使用默认调度。",
+    "timesteps_count_mismatch": "⚠️ 时间步数量 ({actual}) 与推理步数 ({expected}) 不匹配，将使用时间步数量。"
   }
 }

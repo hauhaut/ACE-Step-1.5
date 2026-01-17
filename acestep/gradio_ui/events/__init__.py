@@ -54,7 +54,19 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["offload_to_cpu_checkbox"],
             generation_section["offload_dit_to_cpu_checkbox"],
         ],
-        outputs=[generation_section["init_status"], generation_section["generate_btn"], generation_section["service_config_accordion"]]
+        outputs=[
+            generation_section["init_status"], 
+            generation_section["generate_btn"], 
+            generation_section["service_config_accordion"],
+            # Model type settings (updated based on actual loaded model)
+            generation_section["inference_steps"],
+            generation_section["guidance_scale"],
+            generation_section["use_adg"],
+            generation_section["shift"],
+            generation_section["cfg_interval_start"],
+            generation_section["cfg_interval_end"],
+            generation_section["task_type"],
+        ]
     )
     
     # ========== UI Visibility Updates ==========
@@ -312,6 +324,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["cfg_interval_end"],
             generation_section["shift"],
             generation_section["infer_method"],
+            generation_section["custom_timesteps"],
             generation_section["audio_format"],
             generation_section["lm_temperature"],
             generation_section["lm_cfg_scale"],
@@ -510,6 +523,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["cfg_interval_end"],
             generation_section["shift"],
             generation_section["infer_method"],
+            generation_section["custom_timesteps"],
             generation_section["audio_format"],
             generation_section["lm_temperature"],
             generation_section["think_checkbox"],
@@ -697,6 +711,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["cfg_interval_end"],
             generation_section["shift"],
             generation_section["infer_method"],
+            generation_section["custom_timesteps"],
             generation_section["audio_format"],
             generation_section["lm_temperature"],
             generation_section["think_checkbox"],
