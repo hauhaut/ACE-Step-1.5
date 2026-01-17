@@ -750,6 +750,19 @@ def create_app() -> FastAPI:
                 print(f"[api_server] Before GenerationParams: thinking={thinking}, sample_mode={sample_mode}")
                 print(f"[api_server] Caption/Lyrics to use: caption_len={len(caption)}, lyrics_len={len(lyrics)}")
 
+                # Parse timesteps if provided
+                parsed_timesteps = None
+                if req.timesteps:
+                    try:
+                        parsed_timesteps = [float(t.strip()) for t in req.timesteps.split(",") if t.strip()]
+                        print(f"[api_server] Using custom timesteps: {parsed_timesteps}")
+                    except Exception as e:
+                        print(f"[api_server] Warning: Failed to parse timesteps '{req.timesteps}': {e}")
+                        parsed_timesteps = None
+                
+                # Determine actual inference steps (timesteps override inference_steps)
+                actual_inference_steps = len(parsed_timesteps) if parsed_timesteps else req.inference_steps
+
                 # Build GenerationParams using unified interface
                 # Note: thinking controls LM code generation, sample_mode only affects CoT metas
                 params = GenerationParams(
@@ -806,9 +819,16 @@ def create_app() -> FastAPI:
                 
                 print(f"[api_server] Generating music with unified interface:")
                 print(f"  - thinking={params.thinking}")
+                print(f"  - use_cot_caption={params.use_cot_caption}")
+                print(f"  - use_cot_language={params.use_cot_language}")
+                print(f"  - use_cot_metas={params.use_cot_metas}")
                 print(f"  - batch_size={batch_size}")
                 print(f"  - llm_initialized={llm_is_initialized}")
                 print(f"  - llm_handler={'Available' if llm_to_pass else 'None'}")
+                if llm_to_pass:
+                    print(f"  - LLM will be used for: CoT caption={params.use_cot_caption}, CoT language={params.use_cot_language}, CoT metas={params.use_cot_metas}, thinking={params.thinking}")
+                else:
+                    print(f"  - WARNING: LLM features requested but LLM not initialized!")
 
                 # Generate music using unified interface
                 result = generate_music(

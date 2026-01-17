@@ -342,11 +342,25 @@ def generate_music(
         # Skip LM for cover/repaint tasks - these tasks use reference/src audio directly
         # and don't need LM to generate audio codes
         skip_lm_tasks = {"cover", "repaint"}
-        use_lm = params.thinking and llm_handler.llm_initialized and params.task_type not in skip_lm_tasks
+        
+        # Determine if we should use LLM
+        # LLM is needed for:
+        # 1. thinking=True: generate audio codes via LM
+        # 2. use_cot_caption=True: enhance/generate caption via CoT
+        # 3. use_cot_language=True: detect vocal language via CoT
+        # 4. use_cot_metas=True: fill missing metadata via CoT
+        need_lm_for_cot = params.use_cot_caption or params.use_cot_language or params.use_cot_metas
+        use_lm = (params.thinking or need_lm_for_cot) and llm_handler.llm_initialized and params.task_type not in skip_lm_tasks
         lm_status = []
         
         if params.task_type in skip_lm_tasks:
             logger.info(f"Skipping LM for task_type='{params.task_type}' - using DiT directly")
+        
+        logger.info(f"[generate_music] LLM usage decision: thinking={params.thinking}, "
+                   f"use_cot_caption={params.use_cot_caption}, use_cot_language={params.use_cot_language}, "
+                   f"use_cot_metas={params.use_cot_metas}, need_lm_for_cot={need_lm_for_cot}, "
+                   f"llm_initialized={llm_handler.llm_initialized if llm_handler else False}, use_lm={use_lm}")
+        
         if use_lm:
             # Convert sampling parameters - handle None values safely
             top_k_value = None if not params.lm_top_k or params.lm_top_k == 0 else int(params.lm_top_k)
