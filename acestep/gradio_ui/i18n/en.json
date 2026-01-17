@@ -115,7 +115,7 @@
     "batch_size_info": "Number of audio to generate (max 8)",
     "advanced_settings": "🔧 Advanced Settings",
     "inference_steps_label": "DiT Inference Steps",
-    "inference_steps_info": "Turbo: max 8, Base: max 100",
+    "inference_steps_info": "Turbo: max 8, Base: max 200",
     "guidance_scale_label": "DiT Guidance Scale (Only support for base model)",
     "guidance_scale_info": "Higher values follow text more closely",
     "seed_label": "Seed",
@@ -130,6 +130,8 @@
     "shift_info": "Timestep shift factor for base models (range 1.0~5.0, default 3.0). Not effective for turbo models.",
     "infer_method_label": "Inference Method",
     "infer_method_info": "Diffusion inference method. ODE (Euler) is faster, SDE (stochastic) may produce different results.",
+    "custom_timesteps_label": "Custom Timesteps",
+    "custom_timesteps_info": "Optional: comma-separated values from 1.0 to 0.0 (e.g., '0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0'). Overrides inference steps and shift.",
     "cfg_interval_start": "CFG Interval Start",
     "cfg_interval_end": "CFG Interval End",
     "lm_params_title": "🤖 LM Generation Parameters",
@@ -233,6 +235,9 @@
     "simple_example_loaded": "🎲 Loaded random example from {filename}",
     "format_success": "✅ Caption and lyrics formatted successfully",
     "format_failed": "❌ Format failed: {error}",
-    "skipping_metas_cot": "⚡ Skipping Phase 1 metas COT (sample already formatted)"
+    "skipping_metas_cot": "⚡ Skipping Phase 1 metas COT (sample already formatted)",
+    "invalid_timesteps_format": "⚠️ Invalid timesteps format. Using default schedule.",
+    "timesteps_out_of_range": "⚠️ Timesteps must be in range [0, 1]. Using default schedule.",
+    "timesteps_count_mismatch": "⚠️ Timesteps count ({actual}) differs from inference_steps ({expected}). Using timesteps count."
   }
 }

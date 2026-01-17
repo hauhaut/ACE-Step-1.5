@@ -97,6 +97,9 @@ class GenerationParams:
     cfg_interval_end: float = 1.0
     shift: float = 1.0
     infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
+    # Custom timesteps (parsed from string like "0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0")
+    # If provided, overrides inference_steps and shift
+    timesteps: Optional[List[float]] = None
 
     repainting_start: float = 0.0
     repainting_end: float = -1
@@ -534,6 +537,7 @@ def generate_music(
             cfg_interval_end=params.cfg_interval_end,
             shift=params.shift,
             infer_method=params.infer_method,
+            timesteps=params.timesteps,
             progress=progress,
         )
 

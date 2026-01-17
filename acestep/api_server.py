@@ -102,6 +102,10 @@ class GenerateMusicRequest(BaseModel):
     cfg_interval_start: float = 0.0
     cfg_interval_end: float = 1.0
     infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
+    timesteps: Optional[str] = Field(
+        default=None,
+        description="Custom timesteps (comma-separated, e.g., '0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0')"
+    )
 
     audio_format: str = "mp3"
     use_tiled_decode: bool = True
@@ -754,13 +758,14 @@ def create_app() -> FastAPI:
                     keyscale=key_scale,
                     timesignature=time_signature,
                     duration=audio_duration if audio_duration else -1.0,
-                    inference_steps=req.inference_steps,
+                    inference_steps=actual_inference_steps,
                     seed=req.seed,
                     guidance_scale=req.guidance_scale,
                     use_adg=req.use_adg,
                     cfg_interval_start=req.cfg_interval_start,
                     cfg_interval_end=req.cfg_interval_end,
                     infer_method=req.infer_method,
+                    timesteps=parsed_timesteps,
                     repainting_start=req.repainting_start,
                     repainting_end=req.repainting_end if req.repainting_end else -1,
                     audio_cover_strength=req.audio_cover_strength,
@@ -1286,6 +1291,12 @@ def main() -> None:
         port=int(args.port),
         reload=False,
         workers=1,
+    )
+
+
+if __name__ == "__main__":
+    main()
+,
     )
 
 

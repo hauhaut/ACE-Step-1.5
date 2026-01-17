@@ -108,6 +108,12 @@ class AceStepHandler:
         except ImportError:
             return False
     
+    def is_turbo_model(self) -> bool:
+        """Check if the currently loaded model is a turbo model"""
+        if self.config is None:
+            return False
+        return getattr(self.config, 'is_turbo', False)
+    
     def initialize_service(
         self, 
         project_root: str,
@@ -1786,6 +1792,7 @@ class AceStepHandler:
         shift: float = 1.0,
         audio_code_hints: Optional[Union[str, List[str]]] = None,
         infer_method: str = "ode",
+        timesteps: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
 
         """
@@ -1949,6 +1956,9 @@ class AceStepHandler:
             "cfg_interval_end": cfg_interval_end,
             "shift": shift,
         }
+        # Add custom timesteps if provided (convert to tensor)
+        if timesteps is not None:
+            generate_kwargs["timesteps"] = torch.tensor(timesteps, dtype=torch.float32)
         logger.info("[service_generate] Generating audio...")
         with self._load_model_context("model"):
             # Prepare condition tensors first (for LRC timestamp generation)
@@ -2081,6 +2091,7 @@ class AceStepHandler:
         shift: float = 1.0,
         infer_method: str = "ode",
         use_tiled_decode: bool = True,
+        timesteps: Optional[List[float]] = None,
         progress=None
     ) -> Dict[str, Any]:
         """
@@ -2230,7 +2241,8 @@ class AceStepHandler:
                 shift=shift,  # Pass shift parameter
                 infer_method=infer_method,  # Pass infer method (ode or sde)
                 audio_code_hints=audio_code_hints_batch,  # Pass audio code hints as list
-                return_intermediate=should_return_intermediate
+                return_intermediate=should_return_intermediate,
+                timesteps=timesteps,  # Pass custom timesteps if provided
             )
             
             logger.info("[generate_music] Model generation completed. Decoding latents...")
