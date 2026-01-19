@@ -241,11 +241,9 @@ class AceStepHandler:
                 silence_latent_path = os.path.join(acestep_v15_checkpoint_path, "silence_latent.pt")
                 if os.path.exists(silence_latent_path):
                     self.silence_latent = torch.load(silence_latent_path).transpose(1, 2)
-                    # If DiT is on GPU, silence_latent should also be on GPU
-                    if not self.offload_to_cpu or not self.offload_dit_to_cpu:
-                        self.silence_latent = self.silence_latent.to(device).to(self.dtype)
-                    else:
-                        self.silence_latent = self.silence_latent.to("cpu").to(self.dtype)
+                    # Always keep silence_latent on GPU - it's used in many places outside model context
+                    # and is small enough that it won't significantly impact VRAM
+                    self.silence_latent = self.silence_latent.to(device).to(self.dtype)
                 else:
                     raise FileNotFoundError(f"Silence latent not found at {silence_latent_path}")
             else:
@@ -301,6 +299,113 @@ class AceStepHandler:
             logger.exception("[initialize_service] Error initializing model")
             return error_msg, False
     
+    def _is_on_target_device(self, tensor, target_device):
+        """Check if tensor is on the target device (handles cuda vs cuda:0 comparison)."""
+        if tensor is None:
+            return True
+        target_type = "cpu" if target_device == "cpu" else "cuda"
+        return tensor.device.type == target_type
+    
+    def _ensure_silence_latent_on_device(self):
+        """Ensure silence_latent is on the correct device (self.device)."""
+        if hasattr(self, "silence_latent") and self.silence_latent is not None:
+            if not self._is_on_target_device(self.silence_latent, self.device):
+                self.silence_latent = self.silence_latent.to(self.device).to(self.dtype)
+    
+    def _move_module_recursive(self, module, target_device, dtype=None, visited=None):
+        """
+        Recursively move a module and all its submodules to the target device.
+        This handles modules that may not be properly registered.
+        """
+        if visited is None:
+            visited = set()
+        
+        module_id = id(module)
+        if module_id in visited:
+            return
+        visited.add(module_id)
+        
+        # Move the module itself
+        module.to(target_device)
+        if dtype is not None:
+            module.to(dtype)
+        
+        # Move all direct parameters
+        for param_name, param in module._parameters.items():
+            if param is not None and not self._is_on_target_device(param, target_device):
+                module._parameters[param_name] = param.to(target_device)
+                if dtype is not None:
+                    module._parameters[param_name] = module._parameters[param_name].to(dtype)
+        
+        # Move all direct buffers
+        for buf_name, buf in module._buffers.items():
+            if buf is not None and not self._is_on_target_device(buf, target_device):
+                module._buffers[buf_name] = buf.to(target_device)
+        
+        # Recursively process all submodules (registered and unregistered)
+        for name, child in module._modules.items():
+            if child is not None:
+                self._move_module_recursive(child, target_device, dtype, visited)
+        
+        # Also check for any nn.Module attributes that might not be in _modules
+        for attr_name in dir(module):
+            if attr_name.startswith('_'):
+                continue
+            try:
+                attr = getattr(module, attr_name, None)
+                if isinstance(attr, torch.nn.Module) and id(attr) not in visited:
+                    self._move_module_recursive(attr, target_device, dtype, visited)
+            except Exception:
+                pass
+    
+    def _recursive_to_device(self, model, device, dtype=None):
+        """
+        Recursively move all parameters and buffers of a model to the specified device.
+        This is more thorough than model.to() for some custom HuggingFace models.
+        """
+        target_device = torch.device(device) if isinstance(device, str) else device
+        
+        # Method 1: Standard .to() call
+        model.to(target_device)
+        if dtype is not None:
+            model.to(dtype)
+        
+        # Method 2: Use our thorough recursive moving for any missed modules
+        self._move_module_recursive(model, target_device, dtype)
+        
+        # Method 3: Force move via state_dict if there are still parameters on wrong device
+        wrong_device_params = []
+        for name, param in model.named_parameters():
+            if not self._is_on_target_device(param, device):
+                wrong_device_params.append(name)
+        
+        if wrong_device_params and device != "cpu":
+            logger.warning(f"[_recursive_to_device] {len(wrong_device_params)} parameters on wrong device, using state_dict method")
+            # Get current state dict and move all tensors
+            state_dict = model.state_dict()
+            moved_state_dict = {}
+            for key, value in state_dict.items():
+                if isinstance(value, torch.Tensor):
+                    moved_state_dict[key] = value.to(target_device)
+                    if dtype is not None and moved_state_dict[key].is_floating_point():
+                        moved_state_dict[key] = moved_state_dict[key].to(dtype)
+                else:
+                    moved_state_dict[key] = value
+            model.load_state_dict(moved_state_dict)
+        
+        # Synchronize CUDA to ensure all transfers are complete
+        if device != "cpu" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        
+        # Final verification
+        if device != "cpu":
+            still_wrong = []
+            for name, param in model.named_parameters():
+                if not self._is_on_target_device(param, device):
+                    still_wrong.append(f"{name} on {param.device}")
+            if still_wrong:
+                logger.error(f"[_recursive_to_device] CRITICAL: {len(still_wrong)} parameters still on wrong device: {still_wrong[:10]}")
+    
     @contextmanager
     def _load_model_context(self, model_name: str):
         """
@@ -324,7 +429,7 @@ class AceStepHandler:
                     param = next(model.parameters())
                     if param.device.type == "cpu":
                         logger.info(f"[_load_model_context] Moving {model_name} to {self.device} (persistent)")
-                        model.to(self.device).to(self.dtype)
+                        self._recursive_to_device(model, self.device, self.dtype)
                         if hasattr(self, "silence_latent"):
                             self.silence_latent = self.silence_latent.to(self.device).to(self.dtype)
                 except StopIteration:
@@ -342,9 +447,9 @@ class AceStepHandler:
         start_time = time.time()
         if model_name == "vae":
             vae_dtype = self._get_vae_dtype()
-            model.to(self.device).to(vae_dtype)
+            self._recursive_to_device(model, self.device, vae_dtype)
         else:
-            model.to(self.device).to(self.dtype)
+            self._recursive_to_device(model, self.device, self.dtype)
         
         if model_name == "model" and hasattr(self, "silence_latent"):
              self.silence_latent = self.silence_latent.to(self.device).to(self.dtype)
@@ -359,10 +464,11 @@ class AceStepHandler:
             # Offload to CPU
             logger.info(f"[_load_model_context] Offloading {model_name} to CPU")
             start_time = time.time()
-            model.to("cpu")
+            self._recursive_to_device(model, "cpu")
             
-            if model_name == "model" and hasattr(self, "silence_latent"):
-                 self.silence_latent = self.silence_latent.to("cpu")
+            # NOTE: Do NOT offload silence_latent to CPU here!
+            # silence_latent is used in many places outside of model context,
+            # so it should stay on GPU to avoid device mismatch errors.
             
             torch.cuda.empty_cache()
             offload_time = time.time() - start_time
@@ -1269,6 +1375,9 @@ class AceStepHandler:
             Batch dictionary ready for model input
         """
         batch_size = len(captions)
+        
+        # Ensure silence_latent is on the correct device for batch preparation
+        self._ensure_silence_latent_on_device()
 
         # Normalize audio_code_hints to batch list
         audio_code_hints = self._normalize_audio_code_hints(audio_code_hints, batch_size)
@@ -1638,6 +1747,9 @@ class AceStepHandler:
     def infer_refer_latent(self, refer_audioss):
         refer_audio_order_mask = []
         refer_audio_latents = []
+        
+        # Ensure silence_latent is on the correct device
+        self._ensure_silence_latent_on_device()
 
         def _normalize_audio_2d(a: torch.Tensor) -> torch.Tensor:
             """Normalize audio tensor to [2, T] on current device."""
@@ -1932,6 +2044,9 @@ class AceStepHandler:
         else:
             seed_param = random.randint(0, 2**32 - 1)
         
+        # Ensure silence_latent is on the correct device before creating generate_kwargs
+        self._ensure_silence_latent_on_device()
+        
         generate_kwargs = {
             "text_hidden_states": text_hidden_states,
             "text_attention_mask": text_attention_mask,
@@ -1995,7 +2110,7 @@ class AceStepHandler:
         
         return outputs
 
-    def tiled_decode(self, latents, chunk_size=512, overlap=64, offload_wav_to_cpu=False):
+    def tiled_decode(self, latents, chunk_size=512, overlap=64, offload_wav_to_cpu=True):
         """
         Decode latents using tiling to reduce VRAM usage.
         Uses overlap-discard strategy to avoid boundary artifacts.
