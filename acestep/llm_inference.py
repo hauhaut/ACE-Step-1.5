@@ -375,9 +375,9 @@ class LLMHandler:
                 max_ratio=0.9
             )
             if low_gpu_memory_mode:
-                self.max_model_len = 4096
+                self.max_model_len = 2048
             else:
-                self.max_model_len = 8192
+                self.max_model_len = 4096
             
             logger.info(f"Initializing 5Hz LM with model: {model_path}, enforce_eager: False, tensor_parallel_size: 1, max_model_len: {self.max_model_len}, gpu_memory_utilization: {gpu_memory_utilization}")
             start_time = time.time()
