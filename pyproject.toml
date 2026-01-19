@@ -7,9 +7,9 @@ requires-python = ">=3.11, <3.12"
 license = {text = "Apache-2.0"}
 dependencies = [
     # PyTorch for Linux/Windows with CUDA
-    "torch>=2.9.1; sys_platform != 'darwin'",
+    "torch==2.7.1; sys_platform != 'darwin'",
     "torchvision; sys_platform != 'darwin'",
-    "torchaudio>=2.9.1; sys_platform != 'darwin'",
+    "torchaudio==2.7.1; sys_platform != 'darwin'",
     # PyTorch for macOS (CPU / MPS)
     "torch>=2.9.1; sys_platform == 'darwin'",
     "torchvision; sys_platform == 'darwin'",
@@ -57,10 +57,3 @@ dev = []
 
 [tool.hatch.build.targets.wheel]
 packages = ["acestep"]
-
-[tool.uv.extra-build-dependencies]
-flash-attn = [
-  "packaging",
-  "wheel",
-  { requirement = "torch", match-runtime = true },
-]

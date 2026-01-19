@@ -58,7 +58,7 @@ class ModelRunner:
         print(f"[debug]dist_port: {dist_port}")
         # Use gloo backend on Windows, nccl on Linux/other platforms
         backend = "gloo" if sys.platform == "win32" else "nccl"
-        dist.init_process_group(backend, f"tcp://localhost:{dist_port}", world_size=self.world_size, rank=rank)
+        dist.init_process_group(backend, f"tcp://127.0.0.1:{dist_port}", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         # Use dtype instead of deprecated torch_dtype
