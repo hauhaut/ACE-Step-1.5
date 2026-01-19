@@ -125,7 +125,7 @@ class GenerateMusicRequest(BaseModel):
     is_format_caption: bool = False
 
     lm_temperature: float = 0.85
-    lm_cfg_scale: float = 2.0
+    lm_cfg_scale: float = 2.5
     lm_top_k: Optional[int] = None
     lm_top_p: Optional[float] = 0.9
     lm_repetition_penalty: float = 1.0
@@ -137,7 +137,7 @@ class GenerateMusicRequest(BaseModel):
 
 
 _LM_DEFAULT_TEMPERATURE = 0.85
-_LM_DEFAULT_CFG_SCALE = 2.0
+_LM_DEFAULT_CFG_SCALE = 2.5
 _LM_DEFAULT_TOP_P = 0.9
 _DEFAULT_DIT_INSTRUCTION = DEFAULT_DIT_INSTRUCTION
 _DEFAULT_LM_INSTRUCTION = DEFAULT_LM_INSTRUCTION
@@ -728,16 +728,33 @@ def create_app() -> FastAPI:
                         print(f"[api_server] Sample generated: caption_len={len(caption)}, lyrics_len={len(lyrics)}, bpm={bpm}, duration={audio_duration}")
                 
                 # Apply format_sample() if use_format is True and caption/lyrics are provided
+                # Track whether format_sample generated duration (to decide if Phase 1 is needed)
+                format_has_duration = False
+                
                 if req.use_format and (caption or lyrics):
                     print(f"[api_server] Applying format_sample to enhance input...")
                     _ensure_llm_ready()
                     if getattr(app.state, "_llm_init_error", None):
                         raise RuntimeError(f"5Hz LM init failed (needed for format): {app.state._llm_init_error}")
                     
+                    # Build user_metadata from request params (matching bot.py behavior)
+                    user_metadata_for_format = {}
+                    if bpm is not None:
+                        user_metadata_for_format['bpm'] = bpm
+                    if audio_duration is not None and audio_duration > 0:
+                        user_metadata_for_format['duration'] = int(audio_duration)
+                    if key_scale:
+                        user_metadata_for_format['keyscale'] = key_scale
+                    if time_signature:
+                        user_metadata_for_format['timesignature'] = time_signature
+                    if req.vocal_language and req.vocal_language != "unknown":
+                        user_metadata_for_format['language'] = req.vocal_language
+                    
                     format_result = format_sample(
                         llm_handler=llm,
                         caption=caption,
                         lyrics=lyrics,
+                        user_metadata=user_metadata_for_format if user_metadata_for_format else None,
                         temperature=req.lm_temperature,
                         top_k=lm_top_k if lm_top_k > 0 else None,
                         top_p=lm_top_p if lm_top_p < 1.0 else None,
@@ -745,9 +762,20 @@ def create_app() -> FastAPI:
                     )
                     
                     if format_result.success:
-                        caption = format_result.caption
-                        lyrics = format_result.lyrics
-                        print(f"[api_server] Format applied: new caption_len={len(caption)}, lyrics_len={len(lyrics)}")
+                        # Extract all formatted data (matching bot.py behavior)
+                        caption = format_result.caption or caption
+                        lyrics = format_result.lyrics or lyrics
+                        if format_result.duration:
+                            audio_duration = format_result.duration
+                            format_has_duration = True
+                        if format_result.bpm:
+                            bpm = format_result.bpm
+                        if format_result.keyscale:
+                            key_scale = format_result.keyscale
+                        if format_result.timesignature:
+                            time_signature = format_result.timesignature
+                        
+                        print(f"[api_server] Format applied: new caption_len={len(caption)}, lyrics_len={len(lyrics)}, bpm={bpm}, duration={audio_duration}, has_duration={format_has_duration}")
                     else:
                         print(f"[api_server] Warning: format_sample failed: {format_result.error}, using original input")
                 
@@ -811,7 +839,12 @@ def create_app() -> FastAPI:
                     lm_top_k=lm_top_k,
                     lm_top_p=lm_top_p,
                     lm_negative_prompt=req.lm_negative_prompt,
-                    use_cot_metas=not sample_mode,  # Sample mode already generated metas, don't regenerate
+                    # use_cot_metas logic:
+                    # - sample_mode: metas already generated, skip Phase 1
+                    # - format with duration: metas already generated, skip Phase 1  
+                    # - format without duration: need Phase 1 to generate duration
+                    # - no format: need Phase 1 to generate all metas
+                    use_cot_metas=not sample_mode and not format_has_duration,
                     use_cot_caption=req.use_cot_caption,
                     use_cot_language=req.use_cot_language,
                     use_constrained_decoding=req.constrained_decoding,

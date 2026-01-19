@@ -402,13 +402,13 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                         )
         
         # Advanced Settings
-        # Default UI settings use turbo mode (max 8 steps, hide CFG/ADG/shift)
+        # Default UI settings use turbo mode (max 20 steps, default 8, show shift with default 3)
         # These will be updated after model initialization based on handler.is_turbo_model()
         with gr.Accordion(t("generation.advanced_settings"), open=False):
             with gr.Row():
                 inference_steps = gr.Slider(
                     minimum=1,
-                    maximum=8,
+                    maximum=20,
                     value=8,
                     step=1,
                     label=t("generation.inference_steps_label"),
@@ -455,7 +455,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     step=0.1,
                     label=t("generation.shift_label"),
                     info=t("generation.shift_info"),
-                    visible=False
+                    visible=True
                 )
                 infer_method = gr.Dropdown(
                     choices=["ode", "sde"],

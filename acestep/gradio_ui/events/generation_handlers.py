@@ -70,7 +70,7 @@ def load_metadata(file_obj):
     """Load generation parameters from a JSON file"""
     if file_obj is None:
         gr.Warning(t("messages.no_file_selected"))
-        return [None] * 34 + [False]  # Return None for all fields, False for is_format_caption
+        return [None] * 36 + [False]  # Return None for all fields, False for is_format_caption
     
     try:
         # Read the uploaded file
@@ -115,7 +115,7 @@ def load_metadata(file_obj):
         inference_steps = metadata.get('inference_steps', 8)
         guidance_scale = metadata.get('guidance_scale', 7.0)
         seed = metadata.get('seed', '-1')
-        random_seed = metadata.get('random_seed', True)
+        random_seed = False  # Always set to False when loading to enable reproducibility with saved seed
         use_adg = metadata.get('use_adg', False)
         cfg_interval_start = metadata.get('cfg_interval_start', 0.0)
         cfg_interval_end = metadata.get('cfg_interval_end', 1.0)
@@ -137,6 +137,9 @@ def load_metadata(file_obj):
         complete_track_classes = metadata.get('complete_track_classes', [])
         shift = metadata.get('shift', 3.0)  # Default 3.0 for base models
         infer_method = metadata.get('infer_method', 'ode')  # Default 'ode' for diffusion inference
+        custom_timesteps = metadata.get('timesteps', '')  # Custom timesteps (stored as 'timesteps' in JSON)
+        if custom_timesteps is None:
+            custom_timesteps = ''
         instrumental = metadata.get('instrumental', False)  # Added: read instrumental
         
         gr.Info(t("messages.params_loaded", filename=os.path.basename(filepath)))
@@ -144,8 +147,9 @@ def load_metadata(file_obj):
         return (
             task_type, captions, lyrics, vocal_language, bpm, key_scale, time_signature,
             audio_duration, batch_size, inference_steps, guidance_scale, seed, random_seed,
-            use_adg, cfg_interval_start, cfg_interval_end, shift, infer_method, audio_format,
-            lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
+            use_adg, cfg_interval_start, cfg_interval_end, shift, infer_method,
+            custom_timesteps,  # Added: custom_timesteps (between infer_method and audio_format)
+            audio_format, lm_temperature, lm_cfg_scale, lm_top_k, lm_top_p, lm_negative_prompt,
             use_cot_metas, use_cot_caption, use_cot_language, audio_cover_strength,
             think, audio_codes, repainting_start, repainting_end,
             track_name, complete_track_classes, instrumental,
@@ -154,10 +158,10 @@ def load_metadata(file_obj):
         
     except json.JSONDecodeError as e:
         gr.Warning(t("messages.invalid_json", error=str(e)))
-        return [None] * 35 + [False]
+        return [None] * 36 + [False]
     except Exception as e:
         gr.Warning(t("messages.load_error", error=str(e)))
-        return [None] * 35 + [False]
+        return [None] * 36 + [False]
 
 
 def load_random_example(task_type: str):
@@ -429,7 +433,7 @@ def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, devi
     
     # Check if model is initialized - if so, collapse the accordion
     is_model_initialized = dit_handler.model is not None
-    accordion_state = gr.update(open=not is_model_initialized)
+    accordion_state = gr.Accordion(open=not is_model_initialized)
     
     # Get model type settings based on actual loaded model
     is_turbo = dit_handler.is_turbo_model()
@@ -446,12 +450,12 @@ def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, devi
 def get_model_type_ui_settings(is_turbo: bool):
     """Get UI settings based on whether the model is turbo or base"""
     if is_turbo:
-        # Turbo model: max 8 steps, hide CFG/ADG/shift, only show text2music/repaint/cover
+        # Turbo model: max 20 steps, default 8, show shift with default 3.0, only show text2music/repaint/cover
         return (
-            gr.update(value=8, maximum=8, minimum=1),  # inference_steps
+            gr.update(value=8, maximum=20, minimum=1),  # inference_steps
             gr.update(visible=False),  # guidance_scale
             gr.update(visible=False),  # use_adg
-            gr.update(value=1.0, visible=False),  # shift (not effective for turbo)
+            gr.update(value=3.0, visible=True),  # shift (show with default 3.0)
             gr.update(visible=False),  # cfg_interval_start
             gr.update(visible=False),  # cfg_interval_end
             gr.update(choices=TASK_TYPES_TURBO),  # task_type
@@ -603,7 +607,7 @@ def reset_format_caption_flag():
 def update_audio_uploads_accordion(reference_audio, src_audio):
     """Update Audio Uploads accordion open state based on whether audio files are present"""
     has_audio = (reference_audio is not None) or (src_audio is not None)
-    return gr.update(open=has_audio)
+    return gr.Accordion(open=has_audio)
 
 
 def handle_instrumental_checkbox(instrumental_checked, current_lyrics):
@@ -708,11 +712,11 @@ def handle_generation_mode_change(mode: str):
     
     return (
         gr.update(visible=is_simple),  # simple_mode_group
-        gr.update(open=not is_simple),  # caption_accordion - collapsed in simple, open in custom
-        gr.update(open=not is_simple),  # lyrics_accordion - collapsed in simple, open in custom
+        gr.Accordion(open=not is_simple),  # caption_accordion - collapsed in simple, open in custom
+        gr.Accordion(open=not is_simple),  # lyrics_accordion - collapsed in simple, open in custom
         gr.update(interactive=not is_simple),  # generate_btn - disabled in simple until sample created
         False,  # simple_sample_created - reset to False on mode change
-        gr.update(open=not is_simple),  # optional_params_accordion - hidden in simple mode
+        gr.Accordion(open=not is_simple),  # optional_params_accordion - hidden in simple mode
     )
 
 
@@ -836,8 +840,8 @@ def handle_create_sample(
         result.language,  # simple vocal_language
         result.timesignature,  # time_signature
         result.instrumental,  # instrumental_checkbox
-        gr.update(open=True),  # caption_accordion - expand
-        gr.update(open=True),  # lyrics_accordion - expand
+        gr.Accordion(open=True),  # caption_accordion - expand
+        gr.Accordion(open=True),  # lyrics_accordion - expand
         gr.update(interactive=True),  # generate_btn - enable
         True,  # simple_sample_created - True
         True,  # think_checkbox - enable thinking
