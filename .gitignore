@@ -222,3 +222,5 @@ tmp*
 torchinductor_root/
 scripts/
 checkpoints_legacy/
+lora_output/
+datasets/

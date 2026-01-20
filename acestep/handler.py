@@ -3,6 +3,10 @@ Business Logic Handler
 Encapsulates all data processing and business logic as a bridge between model and UI
 """
 import os
+
+# Disable tokenizers parallelism to avoid fork warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import math
 from copy import deepcopy
 import tempfile
@@ -70,6 +74,11 @@ class AceStepHandler:
         self.offload_to_cpu = False
         self.offload_dit_to_cpu = False
         self.current_offload_cost = 0.0
+        
+        # LoRA state
+        self.lora_loaded = False
+        self.use_lora = False
+        self._base_decoder = None  # Backup of original decoder
     
     def get_available_checkpoints(self) -> str:
         """Return project root directory path"""
@@ -113,6 +122,137 @@ class AceStepHandler:
         if self.config is None:
             return False
         return getattr(self.config, 'is_turbo', False)
+    
+    def load_lora(self, lora_path: str) -> str:
+        """Load LoRA adapter into the decoder.
+        
+        Args:
+            lora_path: Path to the LoRA adapter directory (containing adapter_config.json)
+            
+        Returns:
+            Status message
+        """
+        if self.model is None:
+            return "❌ Model not initialized. Please initialize service first."
+        
+        if not lora_path or not lora_path.strip():
+            return "❌ Please provide a LoRA path."
+        
+        lora_path = lora_path.strip()
+        
+        # Check if path exists
+        if not os.path.exists(lora_path):
+            return f"❌ LoRA path not found: {lora_path}"
+        
+        # Check if it's a valid PEFT adapter directory
+        config_file = os.path.join(lora_path, "adapter_config.json")
+        if not os.path.exists(config_file):
+            return f"❌ Invalid LoRA adapter: adapter_config.json not found in {lora_path}"
+        
+        try:
+            from peft import PeftModel, PeftConfig
+        except ImportError:
+            return "❌ PEFT library not installed. Please install with: pip install peft"
+        
+        try:
+            # Backup base decoder if not already backed up
+            if self._base_decoder is None:
+                import copy
+                self._base_decoder = copy.deepcopy(self.model.decoder)
+                logger.info("Base decoder backed up")
+            else:
+                # Restore base decoder before loading new LoRA
+                self.model.decoder = copy.deepcopy(self._base_decoder)
+                logger.info("Restored base decoder before loading new LoRA")
+            
+            # Load PEFT adapter
+            logger.info(f"Loading LoRA adapter from {lora_path}")
+            self.model.decoder = PeftModel.from_pretrained(
+                self.model.decoder,
+                lora_path,
+                is_trainable=False,
+            )
+            self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+            self.model.decoder.eval()
+            
+            self.lora_loaded = True
+            self.use_lora = True  # Enable LoRA by default after loading
+            
+            logger.info(f"LoRA adapter loaded successfully from {lora_path}")
+            return f"✅ LoRA loaded from {lora_path}"
+            
+        except Exception as e:
+            logger.exception("Failed to load LoRA adapter")
+            return f"❌ Failed to load LoRA: {str(e)}"
+    
+    def unload_lora(self) -> str:
+        """Unload LoRA adapter and restore base decoder.
+        
+        Returns:
+            Status message
+        """
+        if not self.lora_loaded:
+            return "⚠️ No LoRA adapter loaded."
+        
+        if self._base_decoder is None:
+            return "❌ Base decoder backup not found. Cannot restore."
+        
+        try:
+            import copy
+            # Restore base decoder
+            self.model.decoder = copy.deepcopy(self._base_decoder)
+            self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
+            self.model.decoder.eval()
+            
+            self.lora_loaded = False
+            self.use_lora = False
+            
+            logger.info("LoRA unloaded, base decoder restored")
+            return "✅ LoRA unloaded, using base model"
+            
+        except Exception as e:
+            logger.exception("Failed to unload LoRA")
+            return f"❌ Failed to unload LoRA: {str(e)}"
+    
+    def set_use_lora(self, use_lora: bool) -> str:
+        """Toggle LoRA usage for inference.
+        
+        Args:
+            use_lora: Whether to use LoRA adapter
+            
+        Returns:
+            Status message
+        """
+        if use_lora and not self.lora_loaded:
+            return "❌ No LoRA adapter loaded. Please load a LoRA first."
+        
+        self.use_lora = use_lora
+        
+        # Use PEFT's enable/disable methods if available
+        if self.lora_loaded and hasattr(self.model.decoder, 'disable_adapter_layers'):
+            try:
+                if use_lora:
+                    self.model.decoder.enable_adapter_layers()
+                    logger.info("LoRA adapter enabled")
+                else:
+                    self.model.decoder.disable_adapter_layers()
+                    logger.info("LoRA adapter disabled")
+            except Exception as e:
+                logger.warning(f"Could not toggle adapter layers: {e}")
+        
+        status = "enabled" if use_lora else "disabled"
+        return f"✅ LoRA {status}"
+    
+    def get_lora_status(self) -> Dict[str, Any]:
+        """Get current LoRA status.
+        
+        Returns:
+            Dictionary with LoRA status info
+        """
+        return {
+            "loaded": self.lora_loaded,
+            "active": self.use_lora,
+        }
     
     def initialize_service(
         self, 
