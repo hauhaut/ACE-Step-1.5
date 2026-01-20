@@ -8,6 +8,7 @@ from typing import Optional
 # Import handler modules
 from . import generation_handlers as gen_h
 from . import results_handlers as res_h
+from . import training_handlers as train_h
 from acestep.gradio_ui.i18n import t
 
 
@@ -67,6 +68,32 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["cfg_interval_end"],
             generation_section["task_type"],
         ]
+    )
+    
+    # ========== LoRA Handlers ==========
+    generation_section["load_lora_btn"].click(
+        fn=dit_handler.load_lora,
+        inputs=[generation_section["lora_path"]],
+        outputs=[generation_section["lora_status"]]
+    ).then(
+        # Update checkbox to enabled state after loading
+        fn=lambda: gr.update(value=True),
+        outputs=[generation_section["use_lora_checkbox"]]
+    )
+    
+    generation_section["unload_lora_btn"].click(
+        fn=dit_handler.unload_lora,
+        outputs=[generation_section["lora_status"]]
+    ).then(
+        # Update checkbox to disabled state after unloading
+        fn=lambda: gr.update(value=False),
+        outputs=[generation_section["use_lora_checkbox"]]
+    )
+    
+    generation_section["use_lora_checkbox"].change(
+        fn=dit_handler.set_use_lora,
+        inputs=[generation_section["use_lora_checkbox"]],
+        outputs=[generation_section["lora_status"]]
     )
     
     # ========== UI Visibility Updates ==========
@@ -859,3 +886,244 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 results_section[f"generated_audio_{lrc_idx}"],  # Only updates subtitles, not value
             ]
         )
+
+
+def setup_training_event_handlers(demo, dit_handler, llm_handler, training_section):
+    """Setup event handlers for the training tab (dataset builder and LoRA training)"""
+    
+    # ========== Load Existing Dataset (Top Section) ==========
+    
+    # Load existing dataset JSON at the top of Dataset Builder
+    training_section["load_json_btn"].click(
+        fn=train_h.load_existing_dataset_for_preprocess,
+        inputs=[
+            training_section["load_json_path"],
+            training_section["dataset_builder_state"],
+        ],
+        outputs=[
+            training_section["load_json_status"],
+            training_section["audio_files_table"],
+            training_section["sample_selector"],
+            training_section["dataset_builder_state"],
+            # Also update preview fields with first sample
+            training_section["preview_audio"],
+            training_section["preview_filename"],
+            training_section["edit_caption"],
+            training_section["edit_lyrics"],
+            training_section["edit_bpm"],
+            training_section["edit_keyscale"],
+            training_section["edit_timesig"],
+            training_section["edit_duration"],
+            training_section["edit_language"],
+            training_section["edit_instrumental"],
+        ]
+    )
+    
+    # ========== Dataset Builder Handlers ==========
+    
+    # Scan directory for audio files
+    training_section["scan_btn"].click(
+        fn=lambda dir, name, tag, pos, instr, state: train_h.scan_directory(
+            dir, name, tag, pos, instr, state
+        ),
+        inputs=[
+            training_section["audio_directory"],
+            training_section["dataset_name"],
+            training_section["custom_tag"],
+            training_section["tag_position"],
+            training_section["all_instrumental"],
+            training_section["dataset_builder_state"],
+        ],
+        outputs=[
+            training_section["audio_files_table"],
+            training_section["scan_status"],
+            training_section["sample_selector"],
+            training_section["dataset_builder_state"],
+        ]
+    )
+    
+    # Auto-label all samples
+    training_section["auto_label_btn"].click(
+        fn=lambda state, skip: train_h.auto_label_all(dit_handler, llm_handler, state, skip),
+        inputs=[
+            training_section["dataset_builder_state"],
+            training_section["skip_metas"],
+        ],
+        outputs=[
+            training_section["audio_files_table"],
+            training_section["label_progress"],
+            training_section["dataset_builder_state"],
+        ]
+    )
+    
+    # Sample selector change - update preview
+    training_section["sample_selector"].change(
+        fn=train_h.get_sample_preview,
+        inputs=[
+            training_section["sample_selector"],
+            training_section["dataset_builder_state"],
+        ],
+        outputs=[
+            training_section["preview_audio"],
+            training_section["preview_filename"],
+            training_section["edit_caption"],
+            training_section["edit_lyrics"],
+            training_section["edit_bpm"],
+            training_section["edit_keyscale"],
+            training_section["edit_timesig"],
+            training_section["edit_duration"],
+            training_section["edit_language"],
+            training_section["edit_instrumental"],
+        ]
+    )
+    
+    # Save sample edit
+    training_section["save_edit_btn"].click(
+        fn=train_h.save_sample_edit,
+        inputs=[
+            training_section["sample_selector"],
+            training_section["edit_caption"],
+            training_section["edit_lyrics"],
+            training_section["edit_bpm"],
+            training_section["edit_keyscale"],
+            training_section["edit_timesig"],
+            training_section["edit_language"],
+            training_section["edit_instrumental"],
+            training_section["dataset_builder_state"],
+        ],
+        outputs=[
+            training_section["audio_files_table"],
+            training_section["edit_status"],
+            training_section["dataset_builder_state"],
+        ]
+    )
+    
+    # Update settings when changed
+    for trigger in [training_section["custom_tag"], training_section["tag_position"], training_section["all_instrumental"]]:
+        trigger.change(
+            fn=train_h.update_settings,
+            inputs=[
+                training_section["custom_tag"],
+                training_section["tag_position"],
+                training_section["all_instrumental"],
+                training_section["dataset_builder_state"],
+            ],
+            outputs=[training_section["dataset_builder_state"]]
+        )
+    
+    # Save dataset
+    training_section["save_dataset_btn"].click(
+        fn=train_h.save_dataset,
+        inputs=[
+            training_section["save_path"],
+            training_section["dataset_name"],
+            training_section["dataset_builder_state"],
+        ],
+        outputs=[training_section["save_status"]]
+    )
+    
+    # ========== Preprocess Handlers ==========
+    
+    # Load existing dataset JSON for preprocessing
+    # This also updates the preview section so users can view/edit samples
+    training_section["load_existing_dataset_btn"].click(
+        fn=train_h.load_existing_dataset_for_preprocess,
+        inputs=[
+            training_section["load_existing_dataset_path"],
+            training_section["dataset_builder_state"],
+        ],
+        outputs=[
+            training_section["load_existing_status"],
+            training_section["audio_files_table"],
+            training_section["sample_selector"],
+            training_section["dataset_builder_state"],
+            # Also update preview fields with first sample
+            training_section["preview_audio"],
+            training_section["preview_filename"],
+            training_section["edit_caption"],
+            training_section["edit_lyrics"],
+            training_section["edit_bpm"],
+            training_section["edit_keyscale"],
+            training_section["edit_timesig"],
+            training_section["edit_duration"],
+            training_section["edit_language"],
+            training_section["edit_instrumental"],
+        ]
+    )
+    
+    # Preprocess dataset to tensor files
+    training_section["preprocess_btn"].click(
+        fn=lambda output_dir, state: train_h.preprocess_dataset(
+            output_dir, dit_handler, state
+        ),
+        inputs=[
+            training_section["preprocess_output_dir"],
+            training_section["dataset_builder_state"],
+        ],
+        outputs=[training_section["preprocess_progress"]]
+    )
+    
+    # ========== Training Tab Handlers ==========
+    
+    # Load preprocessed tensor dataset
+    training_section["load_dataset_btn"].click(
+        fn=train_h.load_training_dataset,
+        inputs=[training_section["training_tensor_dir"]],
+        outputs=[training_section["training_dataset_info"]]
+    )
+    
+    # Start training from preprocessed tensors
+    def training_wrapper(tensor_dir, r, a, d, lr, ep, bs, ga, se, sh, sd, od, ts):
+        try:
+            for progress, log, plot, state in train_h.start_training(
+                tensor_dir, dit_handler, r, a, d, lr, ep, bs, ga, se, sh, sd, od, ts
+            ):
+                yield progress, log, plot, state
+        except Exception as e:
+            logger.exception("Training wrapper error")
+            yield f"❌ Error: {str(e)}", str(e), None, ts
+    
+    training_section["start_training_btn"].click(
+        fn=training_wrapper,
+        inputs=[
+            training_section["training_tensor_dir"],
+            training_section["lora_rank"],
+            training_section["lora_alpha"],
+            training_section["lora_dropout"],
+            training_section["learning_rate"],
+            training_section["train_epochs"],
+            training_section["train_batch_size"],
+            training_section["gradient_accumulation"],
+            training_section["save_every_n_epochs"],
+            training_section["training_shift"],
+            training_section["training_seed"],
+            training_section["lora_output_dir"],
+            training_section["training_state"],
+        ],
+        outputs=[
+            training_section["training_progress"],
+            training_section["training_log"],
+            training_section["training_loss_plot"],
+            training_section["training_state"],
+        ]
+    )
+    
+    # Stop training
+    training_section["stop_training_btn"].click(
+        fn=train_h.stop_training,
+        inputs=[training_section["training_state"]],
+        outputs=[
+            training_section["training_progress"],
+            training_section["training_state"],
+        ]
+    )
+    
+    # Export LoRA
+    training_section["export_lora_btn"].click(
+        fn=train_h.export_lora,
+        inputs=[
+            training_section["export_path"],
+            training_section["lora_output_dir"],
+        ],
+        outputs=[training_section["export_status"]]
+    )

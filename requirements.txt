@@ -24,6 +24,10 @@ numba>=0.63.1
 vector-quantize-pytorch>=1.27.15
 torchcodec>=0.9.1
 
+# LoRA Training dependencies (optional)
+peft>=0.7.0
+lightning>=2.0.0
+
 # nano-vllm dependencies
 triton-windows>=3.0.0,<3.4; sys_platform == 'win32'
 triton>=3.0.0; sys_platform != 'win32'
