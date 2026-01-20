@@ -53,6 +53,77 @@ from acestep.inference import (
 from acestep.gradio_ui.events.results_handlers import _build_generation_info
 
 
+def _parse_description_hints(description: str) -> tuple[Optional[str], bool]:
+    """
+    Parse a description string to extract language code and instrumental flag.
+    
+    This function analyzes user descriptions like "Pop rock. English" or "piano solo"
+    to detect:
+    - Language: Maps language names to ISO codes (e.g., "English" -> "en")
+    - Instrumental: Detects patterns indicating instrumental/no-vocal music
+    
+    Args:
+        description: User's natural language music description
+        
+    Returns:
+        (language_code, is_instrumental) tuple:
+        - language_code: ISO language code (e.g., "en", "zh") or None if not detected
+        - is_instrumental: True if description indicates instrumental music
+    """
+    import re
+    
+    if not description:
+        return None, False
+    
+    description_lower = description.lower().strip()
+    
+    # Language mapping: input patterns -> ISO code
+    language_mapping = {
+        'english': 'en', 'en': 'en',
+        'chinese': 'zh', '中文': 'zh', 'zh': 'zh', 'mandarin': 'zh',
+        'japanese': 'ja', '日本語': 'ja', 'ja': 'ja',
+        'korean': 'ko', '한국어': 'ko', 'ko': 'ko',
+        'spanish': 'es', 'español': 'es', 'es': 'es',
+        'french': 'fr', 'français': 'fr', 'fr': 'fr',
+        'german': 'de', 'deutsch': 'de', 'de': 'de',
+        'italian': 'it', 'italiano': 'it', 'it': 'it',
+        'portuguese': 'pt', 'português': 'pt', 'pt': 'pt',
+        'russian': 'ru', 'русский': 'ru', 'ru': 'ru',
+        'bengali': 'bn', 'bn': 'bn',
+        'hindi': 'hi', 'hi': 'hi',
+        'arabic': 'ar', 'ar': 'ar',
+        'thai': 'th', 'th': 'th',
+        'vietnamese': 'vi', 'vi': 'vi',
+        'indonesian': 'id', 'id': 'id',
+        'turkish': 'tr', 'tr': 'tr',
+        'dutch': 'nl', 'nl': 'nl',
+        'polish': 'pl', 'pl': 'pl',
+    }
+    
+    # Detect language
+    detected_language = None
+    for lang_name, lang_code in language_mapping.items():
+        if len(lang_name) <= 2:
+            pattern = r'(?:^|\s|[.,;:!?])' + re.escape(lang_name) + r'(?:$|\s|[.,;:!?])'
+        else:
+            pattern = r'\b' + re.escape(lang_name) + r'\b'
+        
+        if re.search(pattern, description_lower):
+            detected_language = lang_code
+            break
+    
+    # Detect instrumental
+    is_instrumental = False
+    if 'instrumental' in description_lower:
+        is_instrumental = True
+    elif 'pure music' in description_lower or 'pure instrument' in description_lower:
+        is_instrumental = True
+    elif description_lower.endswith(' solo') or description_lower == 'solo':
+        is_instrumental = True
+    
+    return detected_language, is_instrumental
+
+
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
 
 
@@ -678,11 +749,30 @@ def create_app() -> FastAPI:
                     if has_sample_query:
                         # Use create_sample() with description query
                         print(f"[api_server] Description mode: generating sample from query: {req.sample_query[:100]}")
+                        
+                        # Parse description for language and instrumental hints (aligned with feishu_bot)
+                        parsed_language, parsed_instrumental = _parse_description_hints(req.sample_query)
+                        print(f"[api_server] Parsed from description: language={parsed_language}, instrumental={parsed_instrumental}")
+                        
+                        # Determine vocal_language with priority:
+                        # 1. User-specified vocal_language (if not default "en") - highest priority
+                        # 2. Language parsed from description
+                        # 3. None (no constraint)
+                        if req.vocal_language and req.vocal_language not in ("en", "unknown", ""):
+                            # User explicitly specified a non-default language, use it
+                            sample_language = req.vocal_language
+                            print(f"[api_server] Using user-specified vocal_language: {sample_language}")
+                        else:
+                            # Fall back to language parsed from description
+                            sample_language = parsed_language
+                            if sample_language:
+                                print(f"[api_server] Using language from description: {sample_language}")
+                        
                         sample_result = create_sample(
                             llm_handler=llm,
                             query=req.sample_query,
-                            instrumental=False,  # Could be extracted from description
-                            vocal_language=req.vocal_language if req.vocal_language != "en" else None,
+                            instrumental=parsed_instrumental,
+                            vocal_language=sample_language,
                             temperature=req.lm_temperature,
                             top_k=lm_top_k if lm_top_k > 0 else None,
                             top_p=lm_top_p if lm_top_p < 1.0 else None,
