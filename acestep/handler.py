@@ -2110,7 +2110,7 @@ class AceStepHandler:
         
         return outputs
 
-    def tiled_decode(self, latents, chunk_size=512, overlap=64, offload_wav_to_cpu=True):
+    def tiled_decode(self, latents, chunk_size=512, overlap=64, offload_wav_to_cpu=False):
         """
         Decode latents using tiling to reduce VRAM usage.
         Uses overlap-discard strategy to avoid boundary artifacts.
