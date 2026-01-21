@@ -42,6 +42,7 @@ from acestep.llm_inference import LLMHandler
 from acestep.constants import (
     DEFAULT_DIT_INSTRUCTION,
     DEFAULT_LM_INSTRUCTION,
+    TASK_INSTRUCTIONS,
 )
 from acestep.inference import (
     GenerationParams,
@@ -894,11 +895,17 @@ def create_app() -> FastAPI:
                 # Determine actual inference steps (timesteps override inference_steps)
                 actual_inference_steps = len(parsed_timesteps) if parsed_timesteps else req.inference_steps
 
+                # Auto-select instruction based on task_type if user didn't provide custom instruction
+                # This matches gradio behavior which uses TASK_INSTRUCTIONS for each task type
+                instruction_to_use = req.instruction
+                if instruction_to_use == DEFAULT_DIT_INSTRUCTION and req.task_type in TASK_INSTRUCTIONS:
+                    instruction_to_use = TASK_INSTRUCTIONS[req.task_type]
+
                 # Build GenerationParams using unified interface
                 # Note: thinking controls LM code generation, sample_mode only affects CoT metas
                 params = GenerationParams(
                     task_type=req.task_type,
-                    instruction=req.instruction,
+                    instruction=instruction_to_use,
                     reference_audio=req.reference_audio_path,
                     src_audio=req.src_audio_path,
                     audio_codes=req.audio_code_string,
