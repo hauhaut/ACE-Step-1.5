@@ -36,6 +36,34 @@ project_root = os.path.abspath(os.path.dirname(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+
+def load_env_config():
+    """从 .env 文件加载配置"""
+    env_config = {
+        'ACESTEP_CONFIG_PATH': 'acestep-v15-turbo-rl',
+        'ACESTEP_LM_MODEL_PATH': 'acestep-5Hz-lm-0.6B-v3',
+        'ACESTEP_DEVICE': 'auto',
+        'ACESTEP_LM_BACKEND': 'vllm',
+    }
+    
+    env_file = os.path.join(project_root, '.env')
+    if os.path.exists(env_file):
+        with open(env_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                # 跳过空行和注释
+                if not line or line.startswith('#'):
+                    continue
+                # 解析键值对
+                if '=' in line:
+                    key, value = line.split('=', 1)
+                    key = key.strip()
+                    value = value.strip()
+                    if key in env_config and value:
+                        env_config[key] = value
+    
+    return env_config
+
 import torch
 from acestep.inference import generate_music, GenerationParams, GenerationConfig
 from acestep.handler import AceStepHandler
@@ -522,14 +550,21 @@ def load_example_config(example_file: str) -> Tuple[GenerationParams, Generation
 def main():
     global timer, llm_debugger
     
+    # 从 .env 文件加载默认配置
+    env_config = load_env_config()
+    
     parser = argparse.ArgumentParser(
         description="Profile ACE-Step inference with LLM debugging"
     )
     parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints")
-    parser.add_argument("--config-path", type=str, default="acestep-v15-turbo-rl")
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--lm-model", type=str, default="acestep-5Hz-lm-0.6B-v3")
-    parser.add_argument("--lm-backend", type=str, default="vllm")
+    parser.add_argument("--config-path", type=str, default=env_config['ACESTEP_CONFIG_PATH'],
+                       help=f"模型配置路径 (默认从 .env: {env_config['ACESTEP_CONFIG_PATH']})")
+    parser.add_argument("--device", type=str, default=env_config['ACESTEP_DEVICE'],
+                       help=f"设备 (默认从 .env: {env_config['ACESTEP_DEVICE']})")
+    parser.add_argument("--lm-model", type=str, default=env_config['ACESTEP_LM_MODEL_PATH'],
+                       help=f"LLM 模型路径 (默认从 .env: {env_config['ACESTEP_LM_MODEL_PATH']})")
+    parser.add_argument("--lm-backend", type=str, default=env_config['ACESTEP_LM_BACKEND'],
+                       help=f"LLM 后端 (默认从 .env: {env_config['ACESTEP_LM_BACKEND']})")
     parser.add_argument("--no-warmup", action="store_true")
     parser.add_argument("--detailed", action="store_true")
     parser.add_argument("--llm-debug", action="store_true",
@@ -553,7 +588,10 @@ def main():
     print("=" * 100)
     print("🎵 ACE-Step Inference Profiler (LLM Performance Analysis)")
     print("=" * 100)
-    print(f"\nConfiguration:")
+    print(f"\n模型配置 (从 .env 加载):")
+    print(f"  DiT 模型: {args.config_path}")
+    print(f"  LLM 模型: {args.lm_model}")
+    print(f"\n运行配置:")
     print(f"  Device: {args.device}")
     print(f"  LLM Backend: {args.lm_backend}")
     print(f"  LLM Debug: {'Enabled' if args.llm_debug else 'Disabled'}")

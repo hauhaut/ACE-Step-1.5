@@ -224,3 +224,4 @@ scripts/
 checkpoints_legacy/
 lora_output/
 datasets/
+python_embeded/
