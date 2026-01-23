@@ -399,7 +399,7 @@ def generate_music(
             # Determine infer_type based on whether we need audio codes
             # - "llm_dit": generates both metas and audio codes (two-phase internally)
             # - "dit": generates only metas (single phase)
-            infer_type = "llm_dit" if need_audio_codes else "dit"
+            infer_type = "llm_dit" if need_audio_codes and params.thinking else "dit"
 
             # Use chunk size from config, or default to batch_size if not set
             max_inference_batch_size = int(config.lm_batch_chunk_size) if config.lm_batch_chunk_size > 0 else actual_batch_size

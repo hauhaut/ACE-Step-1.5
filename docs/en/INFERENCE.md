@@ -1,5 +1,9 @@
 # ACE-Step Inference API Documentation
 
+**Language / 语言 / 言語:** [English](INFERENCE.md) | [中文](../zh/INFERENCE.md) | [日本語](../ja/INFERENCE.md)
+
+---
+
 This document provides comprehensive documentation for the ACE-Step inference API, including parameter specifications for all supported task types.
 
 ## Table of Contents
@@ -9,6 +13,7 @@ This document provides comprehensive documentation for the ACE-Step inference AP
 - [GenerationParams Parameters](#generationparams-parameters)
 - [GenerationConfig Parameters](#generationconfig-parameters)
 - [Task Types](#task-types)
+- [Helper Functions](#helper-functions)
 - [Complete Examples](#complete-examples)
 - [Best Practices](#best-practices)
 
@@ -71,7 +76,9 @@ else:
 
 ## API Overview
 
-### Main Function
+### Main Functions
+
+#### generate_music
 
 ```python
 def generate_music(
@@ -83,6 +90,63 @@ def generate_music(
     progress=None,
 ) -> GenerationResult
 ```
+
+Main function for generating music using the ACE-Step model.
+
+#### understand_music
+
+```python
+def understand_music(
+    llm_handler,
+    audio_codes: str,
+    temperature: float = 0.85,
+    top_k: Optional[int] = None,
+    top_p: Optional[float] = None,
+    repetition_penalty: float = 1.0,
+    use_constrained_decoding: bool = True,
+    constrained_decoding_debug: bool = False,
+) -> UnderstandResult
+```
+
+Analyze audio semantic codes and extract metadata (caption, lyrics, BPM, key, etc.).
+
+#### create_sample
+
+```python
+def create_sample(
+    llm_handler,
+    query: str,
+    instrumental: bool = False,
+    vocal_language: Optional[str] = None,
+    temperature: float = 0.85,
+    top_k: Optional[int] = None,
+    top_p: Optional[float] = None,
+    repetition_penalty: float = 1.0,
+    use_constrained_decoding: bool = True,
+    constrained_decoding_debug: bool = False,
+) -> CreateSampleResult
+```
+
+Generate a complete music sample (caption, lyrics, metadata) from a natural language description.
+
+#### format_sample
+
+```python
+def format_sample(
+    llm_handler,
+    caption: str,
+    lyrics: str,
+    user_metadata: Optional[Dict[str, Any]] = None,
+    temperature: float = 0.85,
+    top_k: Optional[int] = None,
+    top_p: Optional[float] = None,
+    repetition_penalty: float = 1.0,
+    use_constrained_decoding: bool = True,
+    constrained_decoding_debug: bool = False,
+) -> FormatSampleResult
+```
+
+Format and enhance user-provided caption and lyrics, generating structured metadata.
 
 ### Configuration Objects
 
@@ -123,6 +187,9 @@ class GenerationParams:
     use_adg: bool = False
     cfg_interval_start: float = 0.0
     cfg_interval_end: float = 1.0
+    shift: float = 1.0                    # NEW: Timestep shift factor
+    infer_method: str = "ode"             # NEW: Diffusion inference method
+    timesteps: Optional[List[float]] = None  # NEW: Custom timesteps
     
     repainting_start: float = 0.0
     repainting_end: float = -1
@@ -165,7 +232,9 @@ class GenerationConfig:
     audio_format: str = "flac"
 ```
 
-### Result Object
+### Result Objects
+
+**GenerationResult** - Result of music generation:
 
 ```python
 @dataclass
@@ -196,6 +265,67 @@ Each item in `audios` list contains:
 }
 ```
 
+**UnderstandResult** - Result of music understanding:
+
+```python
+@dataclass
+class UnderstandResult:
+    # Metadata Fields
+    caption: str = ""
+    lyrics: str = ""
+    bpm: Optional[int] = None
+    duration: Optional[float] = None
+    keyscale: str = ""
+    language: str = ""
+    timesignature: str = ""
+    
+    # Status
+    status_message: str = ""
+    success: bool = True
+    error: Optional[str] = None
+```
+
+**CreateSampleResult** - Result of sample creation:
+
+```python
+@dataclass
+class CreateSampleResult:
+    # Metadata Fields
+    caption: str = ""
+    lyrics: str = ""
+    bpm: Optional[int] = None
+    duration: Optional[float] = None
+    keyscale: str = ""
+    language: str = ""
+    timesignature: str = ""
+    instrumental: bool = False
+    
+    # Status
+    status_message: str = ""
+    success: bool = True
+    error: Optional[str] = None
+```
+
+**FormatSampleResult** - Result of sample formatting:
+
+```python
+@dataclass
+class FormatSampleResult:
+    # Metadata Fields
+    caption: str = ""
+    lyrics: str = ""
+    bpm: Optional[int] = None
+    duration: Optional[float] = None
+    keyscale: str = ""
+    language: str = ""
+    timesignature: str = ""
+    
+    # Status
+    status_message: str = ""
+    success: bool = True
+    error: Optional[str] = None
+```
+
 ---
 
 ## GenerationParams Parameters
@@ -222,7 +352,7 @@ Each item in `audios` list contains:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `inference_steps` | `int` | `8` | Number of denoising steps. Turbo model: 1-8 (recommended 8). Base model: 1-100 (recommended 32-64). Higher = better quality but slower. |
+| `inference_steps` | `int` | `8` | Number of denoising steps. Turbo model: 1-20 (recommended 8). Base model: 1-200 (recommended 32-64). Higher = better quality but slower. |
 | `guidance_scale` | `float` | `7.0` | Classifier-free guidance scale (1.0-15.0). Higher values increase adherence to text prompt. Only supported for non-turbo model. Typical range: 5.0-9.0. |
 | `seed` | `int` | `-1` | Random seed for reproducibility. Use `-1` for random seed, or any positive integer for fixed seed. |
 
@@ -233,6 +363,9 @@ Each item in `audios` list contains:
 | `use_adg` | `bool` | `False` | Use Adaptive Dual Guidance (base model only). Improves quality at the cost of speed. |
 | `cfg_interval_start` | `float` | `0.0` | CFG application start ratio (0.0-1.0). Controls when to start applying classifier-free guidance. |
 | `cfg_interval_end` | `float` | `1.0` | CFG application end ratio (0.0-1.0). Controls when to stop applying classifier-free guidance. |
+| `shift` | `float` | `1.0` | Timestep shift factor (range 1.0-5.0, default 1.0). When != 1.0, applies `t = shift * t / (1 + (shift - 1) * t)` to timesteps. Recommended 3.0 for turbo models. |
+| `infer_method` | `str` | `"ode"` | Diffusion inference method. `"ode"` (Euler) is faster and deterministic. `"sde"` (stochastic) may produce different results with variance. |
+| `timesteps` | `Optional[List[float]]` | `None` | Custom timesteps as a list of floats from 1.0 to 0.0 (e.g., `[0.97, 0.76, 0.615, 0.5, 0.395, 0.28, 0.18, 0.085, 0]`). If provided, overrides `inference_steps` and `shift`. |
 
 ### Task-Specific Parameters
 
@@ -475,6 +608,132 @@ params = GenerationParams(
 
 ---
 
+## Helper Functions
+
+### understand_music
+
+Analyze audio codes to extract metadata about the music.
+
+```python
+from acestep.inference import understand_music
+
+result = understand_music(
+    llm_handler=llm_handler,
+    audio_codes="<|audio_code_123|><|audio_code_456|>...",
+    temperature=0.85,
+    use_constrained_decoding=True,
+)
+
+if result.success:
+    print(f"Caption: {result.caption}")
+    print(f"Lyrics: {result.lyrics}")
+    print(f"BPM: {result.bpm}")
+    print(f"Key: {result.keyscale}")
+    print(f"Duration: {result.duration}s")
+    print(f"Language: {result.language}")
+else:
+    print(f"Error: {result.error}")
+```
+
+**Use Cases**:
+- Analyze existing music
+- Extract metadata from audio codes
+- Reverse-engineer generation parameters
+
+---
+
+### create_sample
+
+Generate a complete music sample from a natural language description. This is the "Simple Mode" / "Inspiration Mode" feature.
+
+```python
+from acestep.inference import create_sample
+
+result = create_sample(
+    llm_handler=llm_handler,
+    query="a soft Bengali love song for a quiet evening",
+    instrumental=False,
+    vocal_language="bn",  # Optional: constrain to Bengali
+    temperature=0.85,
+)
+
+if result.success:
+    print(f"Caption: {result.caption}")
+    print(f"Lyrics: {result.lyrics}")
+    print(f"BPM: {result.bpm}")
+    print(f"Duration: {result.duration}s")
+    print(f"Key: {result.keyscale}")
+    print(f"Is Instrumental: {result.instrumental}")
+    
+    # Use with generate_music
+    params = GenerationParams(
+        caption=result.caption,
+        lyrics=result.lyrics,
+        bpm=result.bpm,
+        duration=result.duration,
+        keyscale=result.keyscale,
+        vocal_language=result.language,
+    )
+else:
+    print(f"Error: {result.error}")
+```
+
+**Parameters**:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | `str` | required | Natural language description of desired music |
+| `instrumental` | `bool` | `False` | Whether to generate instrumental music |
+| `vocal_language` | `Optional[str]` | `None` | Constrain lyrics to specific language (e.g., "en", "zh", "bn") |
+| `temperature` | `float` | `0.85` | Sampling temperature |
+| `top_k` | `Optional[int]` | `None` | Top-k sampling (None disables) |
+| `top_p` | `Optional[float]` | `None` | Top-p sampling (None disables) |
+| `repetition_penalty` | `float` | `1.0` | Repetition penalty |
+| `use_constrained_decoding` | `bool` | `True` | Use FSM-based constrained decoding |
+
+---
+
+### format_sample
+
+Format and enhance user-provided caption and lyrics, generating structured metadata.
+
+```python
+from acestep.inference import format_sample
+
+result = format_sample(
+    llm_handler=llm_handler,
+    caption="Latin pop, reggaeton",
+    lyrics="[Verse 1]\nBailando en la noche...",
+    user_metadata={"bpm": 95},  # Optional: constrain specific values
+    temperature=0.85,
+)
+
+if result.success:
+    print(f"Enhanced Caption: {result.caption}")
+    print(f"Formatted Lyrics: {result.lyrics}")
+    print(f"BPM: {result.bpm}")
+    print(f"Duration: {result.duration}s")
+    print(f"Key: {result.keyscale}")
+    print(f"Detected Language: {result.language}")
+else:
+    print(f"Error: {result.error}")
+```
+
+**Parameters**:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `caption` | `str` | required | User's caption/description |
+| `lyrics` | `str` | required | User's lyrics with structure tags |
+| `user_metadata` | `Optional[Dict]` | `None` | Constrain specific metadata values (bpm, duration, keyscale, timesignature, language) |
+| `temperature` | `float` | `0.85` | Sampling temperature |
+| `top_k` | `Optional[int]` | `None` | Top-k sampling (None disables) |
+| `top_p` | `Optional[float]` | `None` | Top-p sampling (None disables) |
+| `repetition_penalty` | `float` | `1.0` | Repetition penalty |
+| `use_constrained_decoding` | `bool` | `True` | Use FSM-based constrained decoding |
+
+---
+
 ## Complete Examples
 
 ### Example 1: Simple Text-to-Music Generation
@@ -528,7 +787,95 @@ config = GenerationConfig(batch_size=1)
 result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 ```
 
-### Example 3: Style Cover with LM Reasoning
+### Example 3: Using Custom Timesteps
+
+```python
+params = GenerationParams(
+    task_type="text2music",
+    caption="jazz fusion with complex harmonies",
+    # Custom 9-step schedule
+    timesteps=[0.97, 0.76, 0.615, 0.5, 0.395, 0.28, 0.18, 0.085, 0],
+    thinking=True,
+)
+
+config = GenerationConfig(batch_size=1)
+
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
+```
+
+### Example 4: Using Shift Parameter (Turbo Model)
+
+```python
+params = GenerationParams(
+    task_type="text2music",
+    caption="upbeat electronic dance music",
+    inference_steps=8,
+    shift=3.0,  # Recommended for turbo models
+    infer_method="ode",
+)
+
+config = GenerationConfig(batch_size=2)
+
+result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
+```
+
+### Example 5: Simple Mode with create_sample
+
+```python
+from acestep.inference import create_sample, GenerationParams, GenerationConfig, generate_music
+
+# Step 1: Create sample from description
+sample = create_sample(
+    llm_handler=llm_handler,
+    query="energetic K-pop dance track with catchy hooks",
+    vocal_language="ko",
+)
+
+if sample.success:
+    # Step 2: Generate music using the sample
+    params = GenerationParams(
+        caption=sample.caption,
+        lyrics=sample.lyrics,
+        bpm=sample.bpm,
+        duration=sample.duration,
+        keyscale=sample.keyscale,
+        vocal_language=sample.language,
+        thinking=True,
+    )
+    
+    config = GenerationConfig(batch_size=2)
+    result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
+```
+
+### Example 6: Format and Enhance User Input
+
+```python
+from acestep.inference import format_sample, GenerationParams, GenerationConfig, generate_music
+
+# Step 1: Format user input
+formatted = format_sample(
+    llm_handler=llm_handler,
+    caption="rock ballad",
+    lyrics="[Verse]\nIn the darkness I find my way...",
+)
+
+if formatted.success:
+    # Step 2: Generate with enhanced input
+    params = GenerationParams(
+        caption=formatted.caption,
+        lyrics=formatted.lyrics,
+        bpm=formatted.bpm,
+        duration=formatted.duration,
+        keyscale=formatted.keyscale,
+        thinking=True,
+        use_cot_metas=False,  # Already formatted, skip metas CoT
+    )
+    
+    config = GenerationConfig(batch_size=2)
+    result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
+```
+
+### Example 7: Style Cover with LM Reasoning
 
 ```python
 params = GenerationParams(
@@ -551,24 +898,7 @@ if result.extra_outputs.get("lm_metadata"):
     print(f"LM detected Key: {lm_meta.get('keyscale')}")
 ```
 
-### Example 4: Repaint Section of Audio
-
-```python
-params = GenerationParams(
-    task_type="repaint",
-    src_audio="generated_track.mp3",
-    repainting_start=15.0,  # Start at 15 seconds
-    repainting_end=25.0,    # End at 25 seconds
-    caption="dramatic orchestral buildup",
-    inference_steps=32,  # Higher quality for base model
-)
-
-config = GenerationConfig(batch_size=1)
-
-result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
-```
-
-### Example 5: Batch Generation with Specific Seeds
+### Example 8: Batch Generation with Specific Seeds
 
 ```python
 params = GenerationParams(
@@ -591,7 +921,7 @@ if result.success:
         print(f"  Seed {audio['params']['seed']}: {audio['path']}")
 ```
 
-### Example 6: High-Quality Generation (Base Model)
+### Example 9: High-Quality Generation (Base Model)
 
 ```python
 params = GenerationParams(
@@ -602,6 +932,7 @@ params = GenerationParams(
     use_adg=True,           # Adaptive Dual Guidance
     cfg_interval_start=0.0,
     cfg_interval_end=1.0,
+    shift=3.0,              # Timestep shift
     seed=42,                # Reproducible results
 )
 
@@ -614,54 +945,25 @@ config = GenerationConfig(
 result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 ```
 
-### Example 7: Extract Vocals from Mix
+### Example 10: Understand Audio from Codes
 
 ```python
-params = GenerationParams(
-    task_type="extract",
-    src_audio="full_song_mix.mp3",
-    instruction="Extract the vocals track from the audio:",
+from acestep.inference import understand_music
+
+# Analyze audio codes (e.g., from a previous generation)
+result = understand_music(
+    llm_handler=llm_handler,
+    audio_codes="<|audio_code_10695|><|audio_code_54246|>...",
+    temperature=0.85,
 )
-
-config = GenerationConfig(batch_size=1)
-
-result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
 
 if result.success:
-    print(f"Extracted vocals: {result.audios[0]['path']}")
-```
-
-### Example 8: Add Guitar Track (Lego)
-
-```python
-params = GenerationParams(
-    task_type="lego",
-    src_audio="drums_and_bass.mp3",
-    instruction="Generate the guitar track based on the audio context:",
-    caption="funky rhythm guitar with wah-wah effect",
-    repainting_start=0.0,
-    repainting_end=-1,  # Full duration
-)
-
-config = GenerationConfig(batch_size=1)
-
-result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
-```
-
-### Example 9: Instrumental Generation
-
-```python
-params = GenerationParams(
-    task_type="text2music",
-    caption="upbeat electronic dance music",
-    instrumental=True,  # Force instrumental output
-    duration=120,
-    bpm=128,
-)
-
-config = GenerationConfig(batch_size=2)
-
-result = generate_music(dit_handler, llm_handler, params, config, save_dir="/output")
+    print(f"Detected Caption: {result.caption}")
+    print(f"Detected Lyrics: {result.lyrics}")
+    print(f"Detected BPM: {result.bpm}")
+    print(f"Detected Key: {result.keyscale}")
+    print(f"Detected Duration: {result.duration}s")
+    print(f"Detected Language: {result.language}")
 ```
 
 ---
@@ -697,12 +999,13 @@ caption="fast slow music"  # Conflicting tempos
 - Use base model with `inference_steps=64` or higher
 - Enable `use_adg=True`
 - Set `guidance_scale=7.0-9.0`
+- Set `shift=3.0` for better timestep distribution
 - Use lossless audio format (`audio_format="wav"`)
 
 **For Speed**:
 - Use turbo model with `inference_steps=8`
 - Disable ADG (`use_adg=False`)
-- Lower `guidance_scale=5.0-7.0`
+- Use `infer_method="ode"` (default)
 - Use compressed format (`audio_format="mp3"`) or default FLAC
 
 **For Consistency**:
@@ -808,6 +1111,9 @@ if result.success:
 **Issue**: Seeds not being respected
 - **Solution**: Set `use_random_seed=False` in config and provide `seeds` list or `seed` in params
 
+**Issue**: Custom timesteps not working
+- **Solution**: Ensure timesteps are a list of floats from 1.0 to 0.0, properly ordered
+
 ---
 
 ## API Reference Summary
@@ -852,7 +1158,16 @@ class GenerationResult:
 
 ## Version History
 
-- **v1.5.1**: Current version with refactored inference API
+- **v1.5.2**: Current version
+  - Added `shift` parameter for timestep shifting
+  - Added `infer_method` parameter for ODE/SDE selection
+  - Added `timesteps` parameter for custom timestep schedules
+  - Added `understand_music()` function for audio analysis
+  - Added `create_sample()` function for simple mode generation
+  - Added `format_sample()` function for input enhancement
+  - Added `UnderstandResult`, `CreateSampleResult`, `FormatSampleResult` dataclasses
+
+- **v1.5.1**: Previous version
   - Split `GenerationConfig` into `GenerationParams` and `GenerationConfig`
   - Renamed parameters for consistency (`key_scale` → `keyscale`, `time_signature` → `timesignature`, `audio_duration` → `duration`, `use_llm_thinking` → `thinking`, `audio_code_string` → `audio_codes`)
   - Added `instrumental` parameter
@@ -864,7 +1179,7 @@ class GenerationResult:
   - Simplified `GenerationResult` structure with unified `audios` list
   - Added unified `time_costs` in `extra_outputs`
 
-- **v1.5**: Previous version
+- **v1.5**: Initial version
   - Introduced `GenerationConfig` and `GenerationResult` dataclasses
   - Simplified parameter passing
   - Added comprehensive documentation
@@ -872,6 +1187,7 @@ class GenerationResult:
 ---
 
 For more information, see:
-- Main README: [`README.md`](README.md)
+- Main README: [`../../README.md`](../../README.md)
 - REST API Documentation: [`API.md`](API.md)
+- Gradio Demo Guide: [`GRADIO_GUIDE.md`](GRADIO_GUIDE.md)
 - Project repository: [ACE-Step-1.5](https://github.com/yourusername/ACE-Step-1.5)
