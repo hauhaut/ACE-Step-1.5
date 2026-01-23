@@ -26,6 +26,9 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
     # Check if service is pre-initialized
     service_pre_initialized = init_params is not None and init_params.get('pre_initialized', False)
     
+    # Check if running in service mode (restricted UI)
+    service_mode = init_params is not None and init_params.get('service_mode', False)
+    
     # Get current language from init_params if available
     current_language = init_params.get('language', language) if init_params else language
     
@@ -175,9 +178,11 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
             with gr.Column(scale=2):
                 with gr.Accordion(t("generation.required_inputs"), open=True):
                     # Task type
-                    # Determine initial task_type choices based on default model
-                    default_model_lower = (default_model or "").lower()
-                    if "turbo" in default_model_lower:
+                    # Determine initial task_type choices based on actual model in use
+                    # When service is pre-initialized, use config_path from init_params
+                    actual_model = init_params.get('config_path', default_model) if service_pre_initialized else default_model
+                    actual_model_lower = (actual_model or "").lower()
+                    if "turbo" in actual_model_lower:
                         initial_task_choices = TASK_TYPES_TURBO
                     else:
                         initial_task_choices = TASK_TYPES_BASE
@@ -277,19 +282,20 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                             )
                     
                     # Simple/Custom Mode Toggle
-                    with gr.Row():
+                    # In service mode: only Custom mode, hide the toggle
+                    with gr.Row(visible=not service_mode):
                         generation_mode = gr.Radio(
                             choices=[
                                 (t("generation.mode_simple"), "simple"),
                                 (t("generation.mode_custom"), "custom"),
                             ],
-                            value="simple",
+                            value="custom" if service_mode else "simple",
                             label=t("generation.mode_label"),
                             info=t("generation.mode_info"),
                         )
                     
-                    # Simple Mode Components - visible only in Simple mode
-                    with gr.Group(visible=True) as simple_mode_group:
+                    # Simple Mode Components - hidden in service mode
+                    with gr.Group(visible=not service_mode) as simple_mode_group:
                         with gr.Row(equal_height=True):
                             simple_query_input = gr.Textbox(
                                 label=t("generation.simple_query_label"),
@@ -332,7 +338,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     simple_sample_created = gr.State(value=False)
                 
                 # Music Caption - wrapped in accordion that can be collapsed in Simple mode
-                with gr.Accordion(t("generation.caption_title"), open=False) as caption_accordion:
+                # In service mode: auto-expand
+                with gr.Accordion(t("generation.caption_title"), open=service_mode) as caption_accordion:
                     with gr.Row(equal_height=True):
                         captions = gr.Textbox(
                             label=t("generation.caption_label"),
@@ -349,7 +356,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                                 scale=2,
                             )
                 # Lyrics - wrapped in accordion that can be collapsed in Simple mode
-                with gr.Accordion(t("generation.lyrics_title"), open=False) as lyrics_accordion:
+                # In service mode: auto-expand
+                with gr.Accordion(t("generation.lyrics_title"), open=service_mode) as lyrics_accordion:
                     lyrics = gr.Textbox(
                         label=t("generation.lyrics_label"),
                         placeholder=t("generation.lyrics_placeholder"),
@@ -388,7 +396,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                         )
                 
                 # Optional Parameters
-                with gr.Accordion(t("generation.optional_params"), open=False) as optional_params_accordion:
+                # In service mode: auto-expand
+                with gr.Accordion(t("generation.optional_params"), open=service_mode) as optional_params_accordion:
                     with gr.Row():
                         bpm = gr.Number(
                             label=t("generation.bpm_label"),
@@ -423,7 +432,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                             minimum=1,
                             maximum=8,
                             step=1,
-                            info=t("generation.batch_size_info")
+                            info=t("generation.batch_size_info"),
+                            interactive=not service_mode  # Fixed in service mode
                         )
         
         # Advanced Settings
@@ -463,7 +473,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     choices=["mp3", "flac"],
                     value="mp3",
                     label=t("generation.audio_format_label"),
-                    info=t("generation.audio_format_info")
+                    info=t("generation.audio_format_info"),
+                    interactive=not service_mode  # Fixed in service mode
                 )
             
             with gr.Row():
@@ -583,6 +594,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     value=False,
                     info=t("generation.constrained_debug_info"),
                     scale=1,
+                    interactive=not service_mode  # Fixed in service mode
                 )
             
             with gr.Row():
@@ -591,12 +603,14 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     value=False,
                     info=t("generation.auto_score_info"),
                     scale=1,
+                    interactive=not service_mode  # Fixed in service mode
                 )
                 auto_lrc = gr.Checkbox(
                     label=t("generation.auto_lrc_label"),
                     value=False,
                     info=t("generation.auto_lrc_info"),
                     scale=1,
+                    interactive=not service_mode  # Fixed in service mode
                 )
                 lm_batch_chunk_size = gr.Number(
                     label=t("generation.lm_batch_chunk_label"),
@@ -606,6 +620,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     step=1,
                     info=t("generation.lm_batch_chunk_info"),
                     scale=1,
+                    interactive=not service_mode  # Fixed in service mode
                 )
             
             with gr.Row():
@@ -626,13 +641,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     label=t("generation.score_sensitivity_label"),
                     info=t("generation.score_sensitivity_info"),
                     scale=1,
-                )
-                output_alignment_preference = gr.Checkbox(
-                    label=t("generation.attention_focus_label"),
-                    value=False,
-                    info=t("generation.attention_focus_info"),
-                    interactive=False,
-                    scale=1,
+                    visible=not service_mode  # Hidden in service mode
                 )
         
         # Set generate_btn to interactive if service is pre-initialized
@@ -654,8 +663,9 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
             with gr.Column(scale=1, variant="compact"):
                 autogen_checkbox = gr.Checkbox(
                     label=t("generation.autogen_label"),
-                    value=True,
+                    value=False,  # Default to False for both service and local modes
                     scale=1,
+                    interactive=not service_mode  # Not selectable in service mode
                 )
                 use_cot_caption = gr.Checkbox(
                     label=t("generation.caption_rewrite_label"),
@@ -741,7 +751,6 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         "infer_method": infer_method,
         "custom_timesteps": custom_timesteps,
         "audio_format": audio_format,
-        "output_alignment_preference": output_alignment_preference,
         "think_checkbox": think_checkbox,
         "autogen_checkbox": autogen_checkbox,
         "generate_btn": generate_btn,

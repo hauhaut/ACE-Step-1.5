@@ -266,7 +266,18 @@ def _build_generation_info(
     """
     info_parts = []
     
-    # Part 1: LM-generated metadata (if available)
+    # Part 1: Per-track average time (prominently displayed at the top)
+    # Only count model time (LM + DiT), not post-processing like audio conversion
+    if time_costs and num_audios > 0:
+        lm_total = time_costs.get('lm_total_time', 0.0)
+        dit_total = time_costs.get('dit_total_time_cost', 0.0)
+        model_total = lm_total + dit_total
+        if model_total > 0:
+            avg_time_per_track = model_total / num_audios
+            avg_section = f"**🎯 Average Time per Track: {avg_time_per_track:.2f}s** ({num_audios} track(s))"
+            info_parts.append(avg_section)
+    
+    # Part 2: LM-generated metadata (if available)
     if lm_metadata:
         metadata_lines = []
         if lm_metadata.get('bpm'):
@@ -288,7 +299,7 @@ def _build_generation_info(
             metadata_section = "**🤖 LM-Generated Metadata:**\n" + "\n".join(metadata_lines)
             info_parts.append(metadata_section)
     
-    # Part 2: Time costs (formatted and beautified)
+    # Part 3: Time costs breakdown (formatted and beautified)
     if time_costs:
         time_lines = []
         
@@ -337,16 +348,11 @@ def _build_generation_info(
             if auto_lrc_time > 0:
                 time_lines.append(f"  - Auto LRC: {auto_lrc_time:.2f}s")
         
-        # Pipeline total
-        pipeline_total = time_costs.get('pipeline_total_time', 0.0)
-        if pipeline_total > 0:
-            time_lines.append(f"\n**⏱️ Pipeline Total: {pipeline_total:.2f}s**")
-        
         if time_lines:
             time_section = "\n".join(time_lines)
             info_parts.append(time_section)
     
-    # Part 3: Generation summary
+    # Part 4: Generation summary
     summary_lines = [
         "**🎵 Generation Complete**",
         f"  - **Seeds:** {seed_value}",
@@ -354,6 +360,11 @@ def _build_generation_info(
         f"  - **Audio Count:** {num_audios} audio(s)",
     ]
     info_parts.append("\n".join(summary_lines))
+    
+    # Part 5: Pipeline total time (at the end)
+    pipeline_total = time_costs.get('pipeline_total_time', 0.0) if time_costs else 0.0
+    if pipeline_total > 0:
+        info_parts.append(f"**⏱️ Total Time: {pipeline_total:.2f}s**")
     
     # Combine all parts
     return "\n\n".join(info_parts)

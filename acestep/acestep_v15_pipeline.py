@@ -5,6 +5,27 @@ Handler wrapper connecting model and UI
 import os
 import sys
 
+# Load environment variables from .env file in project root
+# This allows configuration without hardcoding values
+# Falls back to .env.example if .env is not found
+try:
+    from dotenv import load_dotenv
+    # Get project root directory
+    _current_file = os.path.abspath(__file__)
+    _project_root = os.path.dirname(os.path.dirname(_current_file))
+    _env_path = os.path.join(_project_root, '.env')
+    _env_example_path = os.path.join(_project_root, '.env.example')
+    
+    if os.path.exists(_env_path):
+        load_dotenv(_env_path)
+        print(f"Loaded configuration from {_env_path}")
+    elif os.path.exists(_env_example_path):
+        load_dotenv(_env_example_path)
+        print(f"Loaded configuration from {_env_example_path} (fallback)")
+except ImportError:
+    # python-dotenv not installed, skip loading .env
+    pass
+
 # Clear proxy settings that may affect Gradio
 for proxy_var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
     os.environ.pop(proxy_var, None)
@@ -101,6 +122,10 @@ def main():
     parser.add_argument("--server-name", type=str, default="127.0.0.1", help="Server name (default: 127.0.0.1, use 0.0.0.0 for all interfaces)")
     parser.add_argument("--language", type=str, default="en", choices=["en", "zh", "ja"], help="UI language: en (English), zh (中文), ja (日本語)")
     
+    # Service mode argument
+    parser.add_argument("--service_mode", type=lambda x: x.lower() in ['true', '1', 'yes'], default=False, 
+                       help="Enable service mode (default: False). When enabled, uses preset models and restricts UI options.")
+    
     # Service initialization arguments
     parser.add_argument("--init_service", type=lambda x: x.lower() in ['true', '1', 'yes'], default=False, help="Initialize service on startup (default: False)")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file path (optional, for display purposes)")
@@ -114,6 +139,29 @@ def main():
     parser.add_argument("--offload_dit_to_cpu", type=lambda x: x.lower() in ['true', '1', 'yes'], default=False, help="Offload DiT to CPU (default: False)")
     
     args = parser.parse_args()
+    
+    # Service mode defaults (can be configured via .env file)
+    if args.service_mode:
+        print("Service mode enabled - applying preset configurations...")
+        # Force init_service in service mode
+        args.init_service = True
+        # Default DiT model for service mode (from env or fallback)
+        if args.config_path is None:
+            args.config_path = os.environ.get(
+                "SERVICE_MODE_DIT_MODEL",
+                "acestep-v15-turbo-fix-inst-shift-dynamic"
+            )
+        # Default LM model for service mode (from env or fallback)
+        if args.lm_model_path is None:
+            args.lm_model_path = os.environ.get(
+                "SERVICE_MODE_LM_MODEL",
+                "acestep-5Hz-lm-1.7B-v4-fix"
+            )
+        # Backend for service mode (from env or fallback to vllm)
+        args.backend = os.environ.get("SERVICE_MODE_BACKEND", "vllm")
+        print(f"  DiT model: {args.config_path}")
+        print(f"  LM model: {args.lm_model_path}")
+        print(f"  Backend: {args.backend}")
     
     try:
         init_params = None
@@ -198,6 +246,7 @@ def main():
             # Prepare initialization parameters for UI
             init_params = {
                 'pre_initialized': True,
+                'service_mode': args.service_mode,
                 'checkpoint': args.checkpoint,
                 'config_path': args.config_path,
                 'device': args.device,

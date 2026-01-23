@@ -9,18 +9,22 @@ import gradio as gr
 from acestep.gradio_ui.i18n import t
 
 
-def create_training_section(dit_handler, llm_handler) -> dict:
+def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
     """Create the training tab section with dataset builder and training controls.
     
     Args:
         dit_handler: DiT handler instance
         llm_handler: LLM handler instance
+        init_params: Dictionary containing initialization parameters and state.
+                    If None, service will not be pre-initialized.
         
     Returns:
         Dictionary of Gradio components for event handling
     """
+    # Check if running in service mode (hide training tab)
+    service_mode = init_params is not None and init_params.get('service_mode', False)
     
-    with gr.Tab("🎓 LoRA Training"):
+    with gr.Tab("🎓 LoRA Training", visible=not service_mode):
         gr.HTML("""
         <div style="text-align: center; padding: 10px; margin-bottom: 15px;">
             <h2>🎵 LoRA Training for ACE-Step</h2>

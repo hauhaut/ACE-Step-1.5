@@ -78,7 +78,8 @@ def create_gradio_interface(dit_handler, llm_handler, dataset_handler, init_para
         results_section = create_results_section(dit_handler)
         
         # Training Section (LoRA training and dataset builder)
-        training_section = create_training_section(dit_handler, llm_handler)
+        # Pass init_params to support hiding in service mode
+        training_section = create_training_section(dit_handler, llm_handler, init_params=init_params)
         
         # Connect event handlers
         setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, dataset_section, generation_section, results_section)
