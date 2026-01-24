@@ -19,6 +19,8 @@
 - [📦 Installation](#-installation)
 - [🚀 Usage](#-usage)
 - [🔨 Train](#-train)
+- [🏗️ Architecture](#️-architecture)
+- [🦁 Model Zoo](#-model-zoo)
 
 ## 📝 Abstract
 We present ACE-Step v1.5, a highly efficient foundation model that democratizes commercial-grade music production on consumer hardware. Optimized for local deployment (<4GB VRAM), the model accelerates generation by over 100× compared to traditional pure LM architectures, producing superior high-fidelity audio in seconds characterized by coherent semantics and exceptional melodies. At its core lies a novel hybrid architecture where the Language Model (LM) functions as an omni-capable planner: it transforms simple user queries into comprehensive song blueprints—scaling from short loops to 10-minute compositions—while synthesizing metadata, lyrics, and captions via Chain-of-Thought to guide the Diffusion Transformer (DiT). Uniquely, this alignment is achieved through intrinsic reinforcement learning relying solely on the model’s internal mechanisms, thereby eliminating the biases inherent in external reward models or human preferences. Beyond standard synthesis, ACE-Step v1.5 unifies precise stylistic control with versatile editing capabilities—such as cover generation, repainting, and vocal-to-BGM conversion—while maintaining strict adherence to prompts across 50+ languages.
@@ -31,7 +33,7 @@ We present ACE-Step v1.5, a highly efficient foundation model that democratizes 
 </p>
 
 ### ⚡ Performance
-- ✅ **Ultra-Fast Generation** — 0.5s to 10s generation time (depending on think mode & diffusion steps)
+- ✅ **Ultra-Fast Generation** — 0.5s to 10s generation time on A100 (depending on think mode & diffusion steps)
 - ✅ **Flexible Duration** — Supports 10 seconds to 10 minutes (600s) audio generation
 - ✅ **Batch Generation** — Generate up to 8 songs simultaneously
 
@@ -159,7 +161,28 @@ See the **LoRA Training** tab in Gradio UI for one-click training, or check [Gra
     <img src="./assets/ACE-Step_framework.png" width="100%" alt="ACE-Step Framework">
 </p>
 
+## 🦁 Model Zoo
 
+<p align="center">
+    <img src="./assets/model_zoo.png" width="100%" alt="Model Zoo">
+</p>
+
+### DiT Models
+
+| DiT Model | Pre-Training | SFT | RL | CFG | Step | Refer audio | Text2Music | Cover | Repaint | Extract | Lego | Complete | Quality | Diversity | Fine-Tunability | Hugging Face |
+|-----------|:------------:|:---:|:--:|:---:|:----:|:-----------:|:----------:|:-----:|:-------:|:-------:|:----:|:--------:|:-------:|:---------:|:---------------:|--------------|
+| `acestep-v15-base` | ✅ | ❌ | ❌ | ✅ | 50 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Medium | High | Easy | [Link](https://huggingface.co/ACE-Step/acestep-v15-base) |
+| `acestep-v15-sft` | ✅ | ✅ | ❌ | ✅ | 50 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | High | Medium | Easy | [Link](https://huggingface.co/ACE-Step/acestep-v15-sft/tree/main) |
+| `acestep-v15-turbo` | ✅ | ✅ | ❌ | ❌ | 8 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | Very High | Medium | Medium | [Link](https://huggingface.co/ACE-Step/Ace-Step1.5) |
+| `acestep-v15-turbo-rl` | ✅ | ✅ | ✅ | ❌ | 8 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | Very High | Medium | Medium | To be released |
+
+### LM Models
+
+| LM Model | Pretrain from | Pre-Training | SFT | RL | CoT metas | Query rewrite | Audio Understanding | Composition Capability | Copy Melody | Hugging Face |
+|----------|---------------|:------------:|:---:|:--:|:---------:|:-------------:|:-------------------:|:----------------------:|:-----------:|--------------|
+| `acestep-5Hz-lm-0.6B` | Qwen3-0.6B | ✅ | ✅ | ✅ | ✅ | ✅ | Medium | Medium | Weak | ✅ |
+| `acestep-5Hz-lm-1.7B` | Qwen3-1.7B | ✅ | ✅ | ✅ | ✅ | ✅ | Medium | Medium | Medium | ✅ |
+| `acestep-5Hz-lm-4B` | Qwen3-4B | ✅ | ✅ | ✅ | ✅ | ✅ | Strong | Strong | Strong | To be released |
 
 ## 📜 License & Disclaimer
 

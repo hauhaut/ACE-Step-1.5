@@ -40,8 +40,8 @@ if project_root not in sys.path:
 def load_env_config():
     """从 .env 文件加载配置"""
     env_config = {
-        'ACESTEP_CONFIG_PATH': 'acestep-v15-turbo-rl',
-        'ACESTEP_LM_MODEL_PATH': 'acestep-5Hz-lm-0.6B-v3',
+        'ACESTEP_CONFIG_PATH': 'acestep-v15-turbo',
+        'ACESTEP_LM_MODEL_PATH': 'acestep-5Hz-lm-0.6B',
         'ACESTEP_DEVICE': 'auto',
         'ACESTEP_LM_BACKEND': 'vllm',
     }

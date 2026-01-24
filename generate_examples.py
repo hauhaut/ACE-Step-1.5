@@ -39,8 +39,8 @@ def generate_examples(num_examples=50, output_dir="examples/text2music", start_i
         logger.error("No 5Hz LM models found in checkpoints directory")
         return
     
-    # Prefer acestep-5Hz-lm-0.6B-v3 if available
-    lm_model = "acestep-5Hz-lm-0.6B-v3" if "acestep-5Hz-lm-0.6B-v3" in available_models else available_models[0]
+    # Prefer acestep-5Hz-lm-0.6B if available
+    lm_model = "acestep-5Hz-lm-0.6B" if "acestep-5Hz-lm-0.6B" in available_models else available_models[0]
     logger.info(f"Using LM model: {lm_model}")
     
     # Initialize LM
