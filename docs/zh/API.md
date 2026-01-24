@@ -84,7 +84,7 @@ API 支持大多数参数的 **snake_case** 和 **camelCase** 命名。例如：
 
 | 参数名 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `model` | string | null | 选择使用哪个 DiT 模型（例如 `"acestep-v15-turbo"`、`"acestep-v15-turbo-rl"`）。使用 `/v1/models` 列出可用模型。如果未指定，使用默认模型。|
+| `model` | string | null | 选择使用哪个 DiT 模型（例如 `"acestep-v15-turbo"`、`"acestep-v15-turbo-shift3"`）。使用 `/v1/models` 列出可用模型。如果未指定，使用默认模型。|
 
 **thinking 语义（重要）**：
 
@@ -148,7 +148,7 @@ API 支持大多数参数的 **snake_case** 和 **camelCase** 命名。例如：
 
 | 参数名 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `lm_model_path` | string | null | 5Hz LM 检查点目录名（例如 `acestep-5Hz-lm-0.6B-v3`）|
+| `lm_model_path` | string | null | 5Hz LM 检查点目录名（例如 `acestep-5Hz-lm-0.6B`）|
 | `lm_backend` | string | `"vllm"` | `vllm` 或 `pt` |
 | `lm_temperature` | float | `0.85` | 采样温度 |
 | `lm_cfg_scale` | float | `2.5` | CFG 比例（>1 启用 CFG）|
@@ -258,7 +258,7 @@ curl -X POST http://localhost:8001/v1/music/generate \
   -H 'Content-Type: application/json' \
   -d '{
     "caption": "电子舞曲",
-    "model": "acestep-v15-turbo-rl",
+    "model": "acestep-v15-turbo",
     "thinking": true
   }'
 ```
@@ -382,8 +382,8 @@ curl -X POST http://localhost:8001/v1/music/generate \
     "keyscale": "C Major",
     "timesignature": "4",
     "genres": null,
-    "lm_model": "acestep-5Hz-lm-0.6B-v3",
-    "dit_model": "acestep-v15-turbo-rl"
+    "lm_model": "acestep-5Hz-lm-0.6B",
+    "dit_model": "acestep-v15-turbo"
   },
   "error": null
 }
@@ -441,15 +441,15 @@ curl -X POST http://localhost:8001/v1/music/random \
 {
   "models": [
     {
-      "name": "acestep-v15-turbo-rl",
+      "name": "acestep-v15-turbo",
       "is_default": true
     },
     {
-      "name": "acestep-v15-turbo",
+      "name": "acestep-v15-turbo-shift3",
       "is_default": false
     }
   ],
-  "default_model": "acestep-v15-turbo-rl"
+  "default_model": "acestep-v15-turbo"
 }
 ```
 
@@ -514,14 +514,14 @@ API 服务器可以通过环境变量进行配置：
 | :--- | :--- | :--- |
 | `ACESTEP_API_HOST` | `127.0.0.1` | 服务器绑定主机 |
 | `ACESTEP_API_PORT` | `8001` | 服务器绑定端口 |
-| `ACESTEP_CONFIG_PATH` | `acestep-v15-turbo-rl` | 主 DiT 模型路径 |
+| `ACESTEP_CONFIG_PATH` | `acestep-v15-turbo` | 主 DiT 模型路径 |
 | `ACESTEP_CONFIG_PATH2` | （空）| 辅助 DiT 模型路径（可选）|
 | `ACESTEP_CONFIG_PATH3` | （空）| 第三个 DiT 模型路径（可选）|
 | `ACESTEP_DEVICE` | `auto` | 模型加载设备 |
 | `ACESTEP_USE_FLASH_ATTENTION` | `true` | 启用 flash attention |
 | `ACESTEP_OFFLOAD_TO_CPU` | `false` | 空闲时将模型卸载到 CPU |
 | `ACESTEP_OFFLOAD_DIT_TO_CPU` | `false` | 专门将 DiT 卸载到 CPU |
-| `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-0.6B-v3` | 默认 5Hz LM 模型 |
+| `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-0.6B` | 默认 5Hz LM 模型 |
 | `ACESTEP_LM_BACKEND` | `vllm` | LM 后端（vllm 或 pt）|
 | `ACESTEP_LM_DEVICE` | （与 ACESTEP_DEVICE 相同）| LM 设备 |
 | `ACESTEP_LM_OFFLOAD_TO_CPU` | `false` | 将 LM 卸载到 CPU |
