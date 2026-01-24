@@ -608,7 +608,7 @@ def create_app() -> FastAPI:
         app.state.handler3 = handler3
         app.state._initialized2 = False
         app.state._initialized3 = False
-        app.state._config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo-rl")
+        app.state._config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
         app.state._config_path2 = config_path2
         app.state._config_path3 = config_path3
 
@@ -661,7 +661,7 @@ def create_app() -> FastAPI:
                     raise RuntimeError(app.state._init_error)
 
                 project_root = _get_project_root()
-                config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo-rl")
+                config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
                 device = os.getenv("ACESTEP_DEVICE", "auto")
 
                 use_flash_attention = _env_bool("ACESTEP_USE_FLASH_ATTENTION", True)
@@ -868,7 +868,7 @@ def create_app() -> FastAPI:
 
                         project_root = _get_project_root()
                         checkpoint_dir = os.path.join(project_root, "checkpoints")
-                        lm_model_path = (req.lm_model_path or os.getenv("ACESTEP_LM_MODEL_PATH") or "acestep-5Hz-lm-0.6B-v3").strip()
+                        lm_model_path = (req.lm_model_path or os.getenv("ACESTEP_LM_MODEL_PATH") or "acestep-5Hz-lm-0.6B").strip()
                         backend = (req.lm_backend or os.getenv("ACESTEP_LM_BACKEND") or "vllm").strip().lower()
                         if backend not in {"vllm", "pt"}:
                             backend = "vllm"
@@ -1195,7 +1195,7 @@ def create_app() -> FastAPI:
                     return s
 
                 # Get model information
-                lm_model_name = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B-v3")
+                lm_model_name = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B")
                 # Use selected_model_name (set at the beginning of _run_one_job)
                 dit_model_name = selected_model_name
                 
