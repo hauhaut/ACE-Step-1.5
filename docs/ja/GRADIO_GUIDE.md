@@ -29,7 +29,7 @@
 python app.py
 
 # 事前初期化付き
-python app.py --config acestep-v15-turbo-rl --init-llm
+python app.py --config acestep-v15-turbo --init-llm
 
 # 特定のポートで
 python app.py --port 7860
@@ -55,14 +55,14 @@ Gradioインターフェースは以下の主要セクションで構成され�
 | 設定 | 説明 |
 |---------|-------------|
 | **チェックポイントファイル** | トレーニング済みモデルチェックポイントを選択（利用可能な場合）|
-| **メインモデルパス** | DiTモデル設定を選択（例：`acestep-v15-turbo`、`acestep-v15-turbo-rl`）|
+| **メインモデルパス** | DiTモデル設定を選択（例：`acestep-v15-turbo`、`acestep-v15-turbo-shift3`）|
 | **デバイス** | 処理デバイス：`auto`（推奨）、`cuda`、または `cpu` |
 
 ### 5Hz LM設定
 
 | 設定 | 説明 |
 |---------|-------------|
-| **5Hz LMモデルパス** | 言語モデルを選択（例：`acestep-5Hz-lm-0.6B`、`acestep-5Hz-lm-0.6B-v3`）|
+| **5Hz LMモデルパス** | 言語モデルを選択（例：`acestep-5Hz-lm-0.6B`、`acestep-5Hz-lm-1.7B`）|
 | **5Hz LMバックエンド** | `vllm`（より高速、推奨）または `pt`（PyTorch、互換性が高い）|
 | **5Hz LMを初期化** | 初期化時にLMを読み込むためにチェック（thinkingモードに必要）|
 
@@ -477,7 +477,7 @@ LoRAトレーニングタブはカスタムLoRAアダプターを作成するた
 
 ### より高速な生成のために
 
-1. **turboモデルを使用** - `acestep-v15-turbo` または `acestep-v15-turbo-rl` を選択
+1. **turboモデルを使用** - `acestep-v15-turbo` または `acestep-v15-turbo-shift3` を選択
 2. **推論ステップを8に保つ** - turboに最適なデフォルト
 3. **バッチサイズを減らす** - 迅速な結果が必要な場合はバッチサイズを下げる
 4. **AutoGenを無効化** - バッチ生成の手動制御

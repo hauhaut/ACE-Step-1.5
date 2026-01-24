@@ -35,13 +35,13 @@ llm_handler = LLMHandler()
 # サービスの初期化
 dit_handler.initialize_service(
     project_root="/path/to/project",
-    config_path="acestep-v15-turbo-rl",
+    config_path="acestep-v15-turbo",
     device="cuda"
 )
 
 llm_handler.initialize(
     checkpoint_dir="/path/to/checkpoints",
-    lm_model_path="acestep-5Hz-lm-0.6B-v3",
+    lm_model_path="acestep-5Hz-lm-0.6B",
     backend="vllm",
     device="cuda"
 )

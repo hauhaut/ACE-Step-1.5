@@ -84,7 +84,7 @@ APIはほとんどのパラメータで **snake_case** と **camelCase** の両�
 
 | パラメータ名 | 型 | デフォルト | 説明 |
 | :--- | :--- | :--- | :--- |
-| `model` | string | null | 使用するDiTモデルを選択（例：`"acestep-v15-turbo"`、`"acestep-v15-turbo-rl"`）。`/v1/models` で利用可能なモデルを一覧表示。指定しない場合はデフォルトモデルを使用。|
+| `model` | string | null | 使用するDiTモデルを選択（例：`"acestep-v15-turbo"`、`"acestep-v15-turbo-shift3"`）。`/v1/models` で利用可能なモデルを一覧表示。指定しない場合はデフォルトモデルを使用。|
 
 **thinkingのセマンティクス（重要）**：
 
@@ -148,7 +148,7 @@ APIはほとんどのパラメータで **snake_case** と **camelCase** の両�
 
 | パラメータ名 | 型 | デフォルト | 説明 |
 | :--- | :--- | :--- | :--- |
-| `lm_model_path` | string | null | 5Hz LMチェックポイントディレクトリ名（例：`acestep-5Hz-lm-0.6B-v3`）|
+| `lm_model_path` | string | null | 5Hz LMチェックポイントディレクトリ名（例：`acestep-5Hz-lm-0.6B`）|
 | `lm_backend` | string | `"vllm"` | `vllm` または `pt` |
 | `lm_temperature` | float | `0.85` | サンプリング温度 |
 | `lm_cfg_scale` | float | `2.5` | CFGスケール（>1でCFGを有効化）|
@@ -258,7 +258,7 @@ curl -X POST http://localhost:8001/v1/music/generate \
   -H 'Content-Type: application/json' \
   -d '{
     "caption": "エレクトロニックダンスミュージック",
-    "model": "acestep-v15-turbo-rl",
+    "model": "acestep-v15-turbo",
     "thinking": true
   }'
 ```
@@ -382,8 +382,8 @@ curl -X POST http://localhost:8001/v1/music/generate \
     "keyscale": "C Major",
     "timesignature": "4",
     "genres": null,
-    "lm_model": "acestep-5Hz-lm-0.6B-v3",
-    "dit_model": "acestep-v15-turbo-rl"
+    "lm_model": "acestep-5Hz-lm-0.6B",
+    "dit_model": "acestep-v15-turbo"
   },
   "error": null
 }
@@ -441,15 +441,15 @@ curl -X POST http://localhost:8001/v1/music/random \
 {
   "models": [
     {
-      "name": "acestep-v15-turbo-rl",
+      "name": "acestep-v15-turbo",
       "is_default": true
     },
     {
-      "name": "acestep-v15-turbo",
+      "name": "acestep-v15-turbo-shift3",
       "is_default": false
     }
   ],
-  "default_model": "acestep-v15-turbo-rl"
+  "default_model": "acestep-v15-turbo"
 }
 ```
 
@@ -514,14 +514,14 @@ APIサーバーは環境変数で設定できます：
 | :--- | :--- | :--- |
 | `ACESTEP_API_HOST` | `127.0.0.1` | サーバーバインドホスト |
 | `ACESTEP_API_PORT` | `8001` | サーバーバインドポート |
-| `ACESTEP_CONFIG_PATH` | `acestep-v15-turbo-rl` | プライマリDiTモデルパス |
+| `ACESTEP_CONFIG_PATH` | `acestep-v15-turbo` | プライマリDiTモデルパス |
 | `ACESTEP_CONFIG_PATH2` | （空）| セカンダリDiTモデルパス（オプション）|
 | `ACESTEP_CONFIG_PATH3` | （空）| 3番目のDiTモデルパス（オプション）|
 | `ACESTEP_DEVICE` | `auto` | モデルロードデバイス |
 | `ACESTEP_USE_FLASH_ATTENTION` | `true` | flash attentionを有効化 |
 | `ACESTEP_OFFLOAD_TO_CPU` | `false` | アイドル時にモデルをCPUにオフロード |
 | `ACESTEP_OFFLOAD_DIT_TO_CPU` | `false` | DiTを特にCPUにオフロード |
-| `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-0.6B-v3` | デフォルト5Hz LMモデル |
+| `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-0.6B` | デフォルト5Hz LMモデル |
 | `ACESTEP_LM_BACKEND` | `vllm` | LMバックエンド（vllmまたはpt）|
 | `ACESTEP_LM_DEVICE` | （ACESTEP_DEVICEと同じ）| LMデバイス |
 | `ACESTEP_LM_OFFLOAD_TO_CPU` | `false` | LMをCPUにオフロード |

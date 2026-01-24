@@ -29,7 +29,7 @@ This guide provides comprehensive documentation for using the ACE-Step Gradio we
 python app.py
 
 # With pre-initialization
-python app.py --config acestep-v15-turbo-rl --init-llm
+python app.py --config acestep-v15-turbo --init-llm
 
 # With specific port
 python app.py --port 7860
@@ -55,14 +55,14 @@ The Gradio interface consists of several main sections:
 | Setting | Description |
 |---------|-------------|
 | **Checkpoint File** | Select a trained model checkpoint (if available) |
-| **Main Model Path** | Choose the DiT model configuration (e.g., `acestep-v15-turbo`, `acestep-v15-turbo-rl`) |
+| **Main Model Path** | Choose the DiT model configuration (e.g., `acestep-v15-turbo`, `acestep-v15-turbo-shift3`) |
 | **Device** | Processing device: `auto` (recommended), `cuda`, or `cpu` |
 
 ### 5Hz LM Configuration
 
 | Setting | Description |
 |---------|-------------|
-| **5Hz LM Model Path** | Select the language model (e.g., `acestep-5Hz-lm-0.6B`, `acestep-5Hz-lm-0.6B-v3`) |
+| **5Hz LM Model Path** | Select the language model (e.g., `acestep-5Hz-lm-0.6B`, `acestep-5Hz-lm-1.7B`) |
 | **5Hz LM Backend** | `vllm` (faster, recommended) or `pt` (PyTorch, more compatible) |
 | **Initialize 5Hz LM** | Check to load the LM during initialization (required for thinking mode) |
 
@@ -477,7 +477,7 @@ After training, export the final adapter:
 
 ### For Faster Generation
 
-1. **Use turbo model** - Select `acestep-v15-turbo` or `acestep-v15-turbo-rl`
+1. **Use turbo model** - Select `acestep-v15-turbo` or `acestep-v15-turbo-shift3`
 2. **Keep inference steps at 8** - Default is optimal for turbo
 3. **Reduce batch size** - Lower batch size if you need quick results
 4. **Disable AutoGen** - Manual control over batch generation

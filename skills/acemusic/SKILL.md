@@ -250,7 +250,7 @@ project_root/
     "bpm": 120,
     "keyscale": "C Major",
     "duration": 60.0,
-    "dit_model": "acestep-v15-turbo-rl"
+    "dit_model": "acestep-v15-turbo"
   }
 }
 ```

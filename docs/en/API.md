@@ -84,7 +84,7 @@ Suitable for passing only text parameters, or referencing audio file paths that 
 
 | Parameter Name | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `model` | string | null | Select which DiT model to use (e.g., `"acestep-v15-turbo"`, `"acestep-v15-turbo-rl"`). Use `/v1/models` to list available models. If not specified, uses the default model. |
+| `model` | string | null | Select which DiT model to use (e.g., `"acestep-v15-turbo"`, `"acestep-v15-turbo-shift3"`). Use `/v1/models` to list available models. If not specified, uses the default model. |
 
 **thinking Semantics (Important)**:
 
@@ -148,7 +148,7 @@ These parameters control 5Hz LM sampling, used for metadata auto-completion and 
 
 | Parameter Name | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `lm_model_path` | string | null | 5Hz LM checkpoint dir name (e.g. `acestep-5Hz-lm-0.6B-v3`) |
+| `lm_model_path` | string | null | 5Hz LM checkpoint dir name (e.g. `acestep-5Hz-lm-0.6B`) |
 | `lm_backend` | string | `"vllm"` | `vllm` or `pt` |
 | `lm_temperature` | float | `0.85` | Sampling temperature |
 | `lm_cfg_scale` | float | `2.5` | CFG scale (>1 enables CFG) |
@@ -258,7 +258,7 @@ curl -X POST http://localhost:8001/v1/music/generate \
   -H 'Content-Type: application/json' \
   -d '{
     "caption": "electronic dance music",
-    "model": "acestep-v15-turbo-rl",
+    "model": "acestep-v15-turbo",
     "thinking": true
   }'
 ```
@@ -382,8 +382,8 @@ The response contains basic task information, queue status, and final results.
     "keyscale": "C Major",
     "timesignature": "4",
     "genres": null,
-    "lm_model": "acestep-5Hz-lm-0.6B-v3",
-    "dit_model": "acestep-v15-turbo-rl"
+    "lm_model": "acestep-5Hz-lm-0.6B",
+    "dit_model": "acestep-v15-turbo"
   },
   "error": null
 }
@@ -441,15 +441,15 @@ Returns a list of available DiT models loaded on the server.
 {
   "models": [
     {
-      "name": "acestep-v15-turbo-rl",
+      "name": "acestep-v15-turbo",
       "is_default": true
     },
     {
-      "name": "acestep-v15-turbo",
+      "name": "acestep-v15-turbo-shift3",
       "is_default": false
     }
   ],
-  "default_model": "acestep-v15-turbo-rl"
+  "default_model": "acestep-v15-turbo"
 }
 ```
 
@@ -514,14 +514,14 @@ The API server can be configured using environment variables:
 | :--- | :--- | :--- |
 | `ACESTEP_API_HOST` | `127.0.0.1` | Server bind host |
 | `ACESTEP_API_PORT` | `8001` | Server bind port |
-| `ACESTEP_CONFIG_PATH` | `acestep-v15-turbo-rl` | Primary DiT model path |
+| `ACESTEP_CONFIG_PATH` | `acestep-v15-turbo` | Primary DiT model path |
 | `ACESTEP_CONFIG_PATH2` | (empty) | Secondary DiT model path (optional) |
 | `ACESTEP_CONFIG_PATH3` | (empty) | Third DiT model path (optional) |
 | `ACESTEP_DEVICE` | `auto` | Device for model loading |
 | `ACESTEP_USE_FLASH_ATTENTION` | `true` | Enable flash attention |
 | `ACESTEP_OFFLOAD_TO_CPU` | `false` | Offload models to CPU when idle |
 | `ACESTEP_OFFLOAD_DIT_TO_CPU` | `false` | Offload DiT specifically to CPU |
-| `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-0.6B-v3` | Default 5Hz LM model |
+| `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-0.6B` | Default 5Hz LM model |
 | `ACESTEP_LM_BACKEND` | `vllm` | LM backend (vllm or pt) |
 | `ACESTEP_LM_DEVICE` | (same as ACESTEP_DEVICE) | Device for LM |
 | `ACESTEP_LM_OFFLOAD_TO_CPU` | `false` | Offload LM to CPU |
