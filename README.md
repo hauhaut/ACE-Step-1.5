@@ -4,7 +4,7 @@
     <a href="https://ace-step-v1.5.github.io">Project</a> |
     <a href="https://huggingface.co/collections/ACE-Step/ace-step-15">Hugging Face</a> |
     <a href="https://modelscope.cn/models/ACE-Step/ACE-Step-v1-5">ModelScope</a> |
-    <a href="https://huggingface.co/spaces/ACE-Step/ACE-Step-1.5">Space Demo</a> |
+    <a href="https://huggingface.co/spaces/ACE-Step/Ace-Step-v1.5">Space Demo</a> |
     <a href="https://discord.gg/PeWDxrkdj7">Discord</a> |
     <a href="https://arxiv.org/abs/2506.00045">Technical Report</a>
 </p>
