@@ -878,10 +878,12 @@ def generate_with_progress(
     # The lrc_display was already updated in the loop yields above.
     # lrc_display.change() event will automatically update the audio subtitles.
     # This decouples audio value updates from subtitle updates, avoiding flickering.
-
+    audio_playback_updates = [gr.update(playback_position=0) for _ in range(8)]
     yield (
         # Audio - just skip, subtitles are updated via lrc_display.change()
-        gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+        # gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+        audio_playback_updates[0], audio_playback_updates[1], audio_playback_updates[2], audio_playback_updates[3],
+        audio_playback_updates[4], audio_playback_updates[5], audio_playback_updates[6], audio_playback_updates[7],
         all_audio_paths,
         generation_info,
         "Generation Complete",
