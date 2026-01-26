@@ -454,6 +454,22 @@ def _parse_timesteps(s: Optional[str]) -> Optional[List[float]]:
         return None
 
 
+def _is_instrumental(lyrics: str) -> bool:
+    """
+    Determine if the music should be instrumental based on lyrics.
+
+    Returns True if:
+    - lyrics is empty or whitespace only
+    - lyrics (lowercased and trimmed) is "[inst]" or "[instrumental]"
+    """
+    if not lyrics:
+        return True
+    lyrics_clean = lyrics.strip().lower()
+    if not lyrics_clean:
+        return True
+    return lyrics_clean in ("[inst]", "[instrumental]")
+
+
 class RequestParser:
     """Parse request parameters from multiple sources with alias support."""
 
@@ -944,62 +960,40 @@ def create_app() -> FastAPI:
                 original_lyrics = req.lyrics or ""
                 
                 if sample_mode or has_sample_query:
-                    if has_sample_query:
-                        # Use create_sample() with description query
-                        parsed_language, parsed_instrumental = _parse_description_hints(req.sample_query)
+                    # Parse description hints from sample_query (if provided)
+                    sample_query = req.sample_query if has_sample_query else "NO USER INPUT"
+                    parsed_language, parsed_instrumental = _parse_description_hints(sample_query)
 
-                        # Determine vocal_language with priority:
-                        # 1. User-specified vocal_language (if not default "en")
-                        # 2. Language parsed from description
-                        # 3. None (no constraint)
-                        if req.vocal_language and req.vocal_language not in ("en", "unknown", ""):
-                            sample_language = req.vocal_language
-                        else:
-                            sample_language = parsed_language
-
-                        sample_result = create_sample(
-                            llm_handler=llm,
-                            query=req.sample_query,
-                            instrumental=parsed_instrumental,
-                            vocal_language=sample_language,
-                            temperature=req.lm_temperature,
-                            top_k=lm_top_k if lm_top_k > 0 else None,
-                            top_p=lm_top_p if lm_top_p < 1.0 else None,
-                            use_constrained_decoding=req.constrained_decoding,
-                        )
-                        
-                        if not sample_result.success:
-                            raise RuntimeError(f"create_sample failed: {sample_result.error or sample_result.status_message}")
-                        
-                        # Use generated sample data
-                        caption = sample_result.caption
-                        lyrics = sample_result.lyrics
-                        bpm = sample_result.bpm
-                        key_scale = sample_result.keyscale
-                        time_signature = sample_result.timesignature
-                        audio_duration = sample_result.duration
+                    # Determine vocal_language with priority:
+                    # 1. User-specified vocal_language (if not default "en")
+                    # 2. Language parsed from description
+                    # 3. None (no constraint)
+                    if req.vocal_language and req.vocal_language not in ("en", "unknown", ""):
+                        sample_language = req.vocal_language
                     else:
-                        # Original sample_mode behavior: random generation
-                        sample_metadata, sample_status = llm.understand_audio_from_codes(
-                            audio_codes="NO USER INPUT",
-                            temperature=req.lm_temperature,
-                            top_k=lm_top_k if lm_top_k > 0 else None,
-                            top_p=lm_top_p if lm_top_p < 1.0 else None,
-                            repetition_penalty=req.lm_repetition_penalty,
-                            use_constrained_decoding=req.constrained_decoding,
-                            constrained_decoding_debug=req.constrained_decoding_debug,
-                        )
+                        sample_language = parsed_language
 
-                        if not sample_metadata or str(sample_status).startswith("❌"):
-                            raise RuntimeError(f"Sample generation failed: {sample_status}")
+                    sample_result = create_sample(
+                        llm_handler=llm,
+                        query=sample_query,
+                        instrumental=parsed_instrumental,
+                        vocal_language=sample_language,
+                        temperature=req.lm_temperature,
+                        top_k=lm_top_k if lm_top_k > 0 else None,
+                        top_p=lm_top_p if lm_top_p < 1.0 else None,
+                        use_constrained_decoding=True,
+                    )
 
-                        # Use generated values with fallback defaults
-                        caption = sample_metadata.get("caption", "")
-                        lyrics = sample_metadata.get("lyrics", "")
-                        bpm = _to_int(sample_metadata.get("bpm"), None) or _to_int(os.getenv("ACESTEP_SAMPLE_DEFAULT_BPM", "120"), 120)
-                        key_scale = sample_metadata.get("keyscale", "") or os.getenv("ACESTEP_SAMPLE_DEFAULT_KEY", "C Major")
-                        time_signature = sample_metadata.get("timesignature", "") or os.getenv("ACESTEP_SAMPLE_DEFAULT_TIMESIGNATURE", "4/4")
-                        audio_duration = _to_float(sample_metadata.get("duration"), None) or _to_float(os.getenv("ACESTEP_SAMPLE_DEFAULT_DURATION_SECONDS", "120"), 120.0)
+                    if not sample_result.success:
+                        raise RuntimeError(f"create_sample failed: {sample_result.error or sample_result.status_message}")
+
+                    # Use generated sample data
+                    caption = sample_result.caption
+                    lyrics = sample_result.lyrics
+                    bpm = sample_result.bpm
+                    key_scale = sample_result.keyscale
+                    time_signature = sample_result.timesignature
+                    audio_duration = sample_result.duration
 
                 # Apply format_sample() if use_format is True and caption/lyrics are provided
                 format_has_duration = False
@@ -1030,7 +1024,7 @@ def create_app() -> FastAPI:
                         temperature=req.lm_temperature,
                         top_k=lm_top_k if lm_top_k > 0 else None,
                         top_p=lm_top_p if lm_top_p < 1.0 else None,
-                        use_constrained_decoding=req.constrained_decoding,
+                        use_constrained_decoding=True,
                     )
                     
                     if format_result.success:
@@ -1069,7 +1063,7 @@ def create_app() -> FastAPI:
                     audio_codes=req.audio_code_string,
                     caption=caption,
                     lyrics=lyrics,
-                    instrumental=False,
+                    instrumental=_is_instrumental(lyrics),
                     vocal_language=req.vocal_language,
                     bpm=bpm,
                     keyscale=key_scale,
@@ -1102,7 +1096,7 @@ def create_app() -> FastAPI:
                     use_cot_metas=not sample_mode and not format_has_duration,
                     use_cot_caption=req.use_cot_caption,
                     use_cot_language=req.use_cot_language,
-                    use_constrained_decoding=req.constrained_decoding,
+                    use_constrained_decoding=True,
                 )
 
                 # Build GenerationConfig - default to 2 audios like gradio_ui
