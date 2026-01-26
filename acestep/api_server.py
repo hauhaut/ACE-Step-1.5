@@ -3,7 +3,6 @@
 Endpoints:
 - POST /release_task     Create music generation task
 - POST /query_result     Batch query task results
-- POST /v1/music/random  Create random sample task
 - GET  /v1/models        List available models
 - GET  /v1/audio         Download audio file
 - GET  /health           Health check
@@ -1437,50 +1436,6 @@ def create_app() -> FastAPI:
         if temp_files:
             async with app.state.job_temp_files_lock:
                 app.state.job_temp_files[rec.job_id] = temp_files
-
-        async with app.state.pending_lock:
-            app.state.pending_ids.append(rec.job_id)
-            position = len(app.state.pending_ids)
-
-        await q.put((rec.job_id, req))
-        return CreateJobResponse(task_id=rec.job_id, status="queued", queue_position=position)
-
-    @app.post("/v1/music/random", response_model=CreateJobResponse)
-    async def create_random_sample_job(request: Request) -> CreateJobResponse:
-        """Create a sample-mode job that auto-generates caption/lyrics via LM."""
-
-        thinking_value: Any = None
-        content_type = (request.headers.get("content-type") or "").lower()
-        body_dict: Dict[str, Any] = {}
-
-        if "json" in content_type:
-            try:
-                payload = await request.json()
-                if isinstance(payload, dict):
-                    body_dict = payload
-            except Exception:
-                body_dict = {}
-
-        if not body_dict and request.query_params:
-            body_dict = dict(request.query_params)
-
-        thinking_value = body_dict.get("thinking")
-        if thinking_value is None:
-            thinking_value = body_dict.get("Thinking")
-
-        thinking_flag = _to_bool(thinking_value, True)
-
-        req = GenerateMusicRequest(
-            caption="",
-            lyrics="",
-            thinking=thinking_flag,
-            sample_mode=True,
-        )
-
-        rec = store.create()
-        q: asyncio.Queue = app.state.job_queue
-        if q.full():
-            raise HTTPException(status_code=429, detail="Server busy: queue is full")
 
         async with app.state.pending_lock:
             app.state.pending_ids.append(rec.job_id)
