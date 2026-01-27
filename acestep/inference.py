@@ -255,7 +255,7 @@ def _update_metadata_from_lm(
         if time_signature_value != "N/A":
             time_signature = time_signature_value
 
-    if audio_duration is None or audio_duration <= 0:
+    if audio_duration is None:
         audio_duration_value = metadata.get('duration', -1)
         if audio_duration_value not in ["N/A", ""]:
             try:
