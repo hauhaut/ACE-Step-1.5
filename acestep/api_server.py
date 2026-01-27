@@ -1007,8 +1007,8 @@ def create_app() -> FastAPI:
                     user_metadata_for_format = {}
                     if bpm is not None:
                         user_metadata_for_format['bpm'] = bpm
-                    if audio_duration is not None and audio_duration > 0:
-                        user_metadata_for_format['duration'] = int(audio_duration)
+                    if audio_duration is not None and float(audio_duration) > 0:
+                        user_metadata_for_format['duration'] = float(audio_duration)
                     if key_scale:
                         user_metadata_for_format['keyscale'] = key_scale
                     if time_signature:

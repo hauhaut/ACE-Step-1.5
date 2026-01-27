@@ -978,9 +978,9 @@ def calculate_score_handler(
         if caption and 'caption' not in metadata:
             metadata['caption'] = caption
         
-        if audio_duration is not None and audio_duration > 0 and 'duration' not in metadata:
+        if audio_duration is not None and float(audio_duration) > 0 and 'duration' not in metadata:
             try:
-                metadata['duration'] = int(audio_duration)
+                metadata['duration'] = float(audio_duration)
             except:
                 pass
         

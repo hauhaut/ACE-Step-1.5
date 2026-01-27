@@ -915,7 +915,7 @@ def handle_format_sample(
     user_metadata = {}
     if bpm is not None and bpm > 0:
         user_metadata['bpm'] = int(bpm)
-    if audio_duration is not None and audio_duration > 0:
+    if audio_duration is not None and float(audio_duration) > 0:
         user_metadata['duration'] = int(audio_duration)
     if key_scale and key_scale.strip():
         user_metadata['keyscale'] = key_scale.strip()

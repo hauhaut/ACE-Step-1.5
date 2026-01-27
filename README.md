@@ -1,7 +1,7 @@
 <h1 align="center">ACE-Step 1.5</h1>
 <h1 align="center">Pushing the Boundaries of Open-Source Music Generation</h1>
 <p align="center">
-    <a href="https://ace-step-v1.5.github.io">Project</a> |
+    <a href="https://ace-step.github.io/ace-step-v1.5.github.io/">Project</a> |
     <a href="https://huggingface.co/collections/ACE-Step/ace-step-15">Hugging Face</a> |
     <a href="https://modelscope.cn/models/ACE-Step/ACE-Step-v1-5">ModelScope</a> |
     <a href="https://huggingface.co/spaces/ACE-Step/Ace-Step-v1.5">Space Demo</a> |

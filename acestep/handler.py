@@ -1295,8 +1295,8 @@ class AceStepHandler:
         calculated_duration = None
         if processed_src_audio is not None:
             calculated_duration = processed_src_audio.shape[-1] / 48000.0
-        elif audio_duration is not None and audio_duration > 0:
-            calculated_duration = audio_duration
+        elif audio_duration is not None and float(audio_duration) > 0:
+            calculated_duration = float(audio_duration)
 
         # Build metadata dict - use "N/A" as default for empty fields
         metadata_dict = self._build_metadata_dict(bpm, key_scale, time_signature, calculated_duration)
@@ -1407,8 +1407,8 @@ class AceStepHandler:
                     'left_padding_duration': 0.0,
                     'right_padding_duration': 0.0
                 })
-                if audio_duration is not None and audio_duration > 0:
-                    batch_target_wavs = self.create_target_wavs(audio_duration)
+                if audio_duration is not None and float(audio_duration) > 0:
+                    batch_target_wavs = self.create_target_wavs(float(audio_duration))
                 else:
                     import random
                     random_duration = random.uniform(10.0, 120.0)
@@ -2488,11 +2488,11 @@ class AceStepHandler:
         actual_seed_list, seed_value_for_ui = self.prepare_seeds(actual_batch_size, seed, use_random_seed)
         
         # Convert special values to None
-        if audio_duration is not None and audio_duration <= 0:
+        if audio_duration is not None and float(audio_duration) <= 0:
             audio_duration = None
         # if seed is not None and seed < 0:
         #     seed = None
-        if repainting_end is not None and repainting_end < 0:
+        if repainting_end is not None and float(repainting_end) < 0:
             repainting_end = None
             
         try:
