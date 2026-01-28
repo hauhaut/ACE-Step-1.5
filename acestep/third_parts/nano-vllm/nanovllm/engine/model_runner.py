@@ -316,6 +316,15 @@ class ModelRunner:
         else:
             bs = input_ids.size(0)
             context = get_context()
+            
+            # Check if block_tables size exceeds pre-allocated buffer size
+            # This can happen when conditional and unconditional sequences have different lengths
+            # in CFG mode, causing block_tables to have more columns than expected
+            max_num_blocks = self.graph_vars["block_tables"].size(1)
+            if context.block_tables.size(1) > max_num_blocks:
+                # Fall back to eager mode when block_tables is too large for CUDA graph
+                return self.model.compute_logits(self.model(input_ids, positions))
+            
             graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
             graph_vars = self.graph_vars
             graph_vars["input_ids"][:bs] = input_ids
@@ -324,6 +333,8 @@ class ModelRunner:
             graph_vars["slot_mapping"][:bs] = context.slot_mapping
             graph_vars["context_lens"].zero_()
             graph_vars["context_lens"][:bs] = context.context_lens
+            # Clear block_tables first to ensure no stale data from previous runs
+            graph_vars["block_tables"][:bs].fill_(-1)
             graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
