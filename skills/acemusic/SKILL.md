@@ -147,7 +147,7 @@ project_root/
 ./scripts/acemusic.sh health
 ```
 
-### Shell 脚本 (Linux/macOS，需要 curl + jq)
+### Shell 脚本 (Linux/macOS/Git Bash，需要 curl + jq)
 
 ```bash
 # 配置管理
@@ -174,16 +174,20 @@ project_root/
 
 | 脚本 | 依赖 | 平台 |
 |------|------|------|
-| `acemusic.sh` | curl | Linux/macOS/Git Bash |
+| `acemusic.sh` | curl, jq | Linux/macOS/Git Bash |
+
+安装 jq：
+- Ubuntu/Debian: `apt install jq`
+- macOS: `brew install jq`
+- Windows (choco): `choco install jq`
 
 ## API 端点
 
 | 端点 | 方法 | 描述 |
 |------|------|------|
 | `/health` | GET | 健康检查 |
-| `/v1/music/generate` | POST | 创建音乐生成任务 |
-| `/v1/music/random` | POST | 创建随机采样任务 |
-| `/v1/jobs/{job_id}` | GET | 查询任务状态和结果 |
+| `/release_task` | POST | 创建音乐生成任务 |
+| `/query_result` | POST | 批量查询任务结果 |
 | `/v1/models` | GET | 列出可用模型 |
 | `/v1/audio?path={path}` | GET | 下载生成的音频文件 |
 
@@ -193,22 +197,37 @@ project_root/
 
 | 参数 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
-| `caption` | string | - | 音乐描述文本（Caption 模式） |
-| `description` | string | - | 简单描述，LM 自动生成 caption/lyrics（Simple 模式） |
+| `prompt` | string | "" | 音乐描述文本（Caption 模式） |
+| `sample_query` | string | "" | 简单描述，LM 自动生成 caption/lyrics（Simple 模式） |
 | `lyrics` | string | "" | 歌词内容 |
-| `thinking` | bool | true | 启用 5Hz LM 模型（高质量） |
-| `use_format` | bool | true | 使用 LM 增强输入 |
-| `model` | string | - | 指定模型名称 |
+| `thinking` | bool | false | 启用 5Hz LM 模型生成音频代码（高质量） |
+| `sample_mode` | bool | false | 随机采样模式（LM 自动生成） |
+| `use_format` | bool | false | 使用 LM 增强 caption/lyrics |
+| `model` | string | - | 指定 DiT 模型名称 |
 
 ### 音乐属性
 
 | 参数 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
 | `bpm` | int | - | 节奏速度 |
-| `key_scale` | string | - | 调性 (如 "C Major") |
-| `time_signature` | string | - | 拍号 (如 "4/4") |
-| `vocal_language` | string | "en" | 演唱语言 (en/zh) |
+| `key_scale` | string | "" | 调性 (如 "C Major") |
+| `time_signature` | string | "" | 拍号 (如 "4/4") |
+| `vocal_language` | string | "en" | 演唱语言 |
 | `audio_duration` | float | - | 音频时长（秒） |
+| `inference_steps` | int | 8 | 推理步数 |
+| `guidance_scale` | float | 7.0 | 引导强度 |
+| `batch_size` | int | 2 | 生成数量 |
+| `audio_format` | string | "mp3" | 输出格式 |
+
+### LM 参数
+
+| 参数 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| `use_cot_caption` | bool | true | 使用 CoT 增强 caption |
+| `use_cot_language` | bool | true | 使用 CoT 增强语言检测 |
+| `lm_temperature` | float | 0.85 | LM 温度参数 |
+| `lm_cfg_scale` | float | 2.5 | LM CFG 强度 |
+| `lm_top_p` | float | 0.9 | LM Top-P 采样 |
 
 ### 任务类型
 
@@ -229,39 +248,46 @@ project_root/
 
 ## 响应示例
 
-### 创建任务响应
+### 创建任务响应 (`/release_task`)
 
 ```json
 {
-  "job_id": "abc123-def456",
+  "task_id": "abc123-def456",
   "status": "queued",
   "queue_position": 1
 }
 ```
 
-### 任务完成响应
+### 查询结果请求 (`/query_result`)
 
 ```json
 {
-  "job_id": "abc123-def456",
-  "status": "succeeded",
-  "result": {
-    "audio_paths": ["/v1/audio?path=..."],
-    "bpm": 120,
-    "keyscale": "C Major",
-    "duration": 60.0,
-    "dit_model": "acestep-v15-turbo"
-  }
+  "task_id_list": ["abc123-def456", "xyz789"]
 }
 ```
+
+### 查询结果响应
+
+```json
+[
+  {
+    "task_id": "abc123-def456",
+    "status": 1,
+    "result": "[{\"file\":\"/v1/audio?path=...\",\"status\":1,\"metas\":{\"bpm\":120,\"duration\":60,\"keyscale\":\"C Major\"}}]"
+  }
+]
+```
+
+状态码：`0` = 处理中, `1` = 成功, `2` = 失败
 
 ## 注意事项
 
 1. **配置优先级**: 命令行参数 > config.json 默认值。用户指定的参数临时生效，不修改配置文件
 2. **修改默认配置**: 只有 `config --set` 命令才会永久修改 config.json
-3. **默认高质量模式**: `thinking=true`, `use_format=true`，可通过 `--no-thinking`/`--no-format` 临时禁用
-4. **异步任务**: 所有生成任务都是异步的，需要轮询 `/v1/jobs/{job_id}` 获取结果
+3. **thinking 模式**: 启用后使用 5Hz LM 生成音频代码，质量更高但速度较慢
+4. **异步任务**: 所有生成任务都是异步的，需要通过 `POST /query_result` 轮询获取结果
 5. **自动下载**: 任务完成后会自动保存 JSON 结果并下载音频文件到 `acemusic_output/` 目录
+6. **状态码**: 查询结果中 status 为整数：0=处理中, 1=成功, 2=失败
 
 ## 参考资源
 - Shell 脚本: [scripts/acemusic.sh](scripts/acemusic.sh) (Linux/macOS/Git Bash)

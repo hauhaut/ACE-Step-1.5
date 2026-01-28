@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# ACE-Step Music Generation CLI (Bash + Curl)
+# ACE-Step Music Generation CLI (Bash + Curl + jq)
 #
-# Requirements: curl (no jq needed)
+# Requirements: curl, jq
 #
 # Usage:
 #   ./acemusic.sh generate "Music description" [options]
@@ -17,6 +17,10 @@
 #   - Audio files downloaded to output/<job_id>_1.mp3, output/<job_id>_2.mp3, ...
 
 set -e
+
+# Ensure UTF-8 encoding for non-ASCII characters (Japanese, Chinese, etc.)
+export LANG="${LANG:-en_US.UTF-8}"
+export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/config.json"
@@ -37,48 +41,26 @@ check_deps() {
         echo -e "${RED}Error: curl is required but not installed.${NC}"
         exit 1
     fi
-}
-
-# Simple JSON value extractor (no jq needed)
-# Usage: json_get "$json" "key"
-json_get() {
-    local json="$1"
-    local key="$2"
-    # Handle nested keys like "generation.thinking"
-    if [[ "$key" == *.* ]]; then
-        local first="${key%%.*}"
-        local rest="${key#*.}"
-        # Extract the nested object
-        local nested=$(echo "$json" | sed 's/.*"'"$first"'"[[:space:]]*:[[:space:]]*{/{/' | sed 's/}.*/}/' | head -1)
-        json_get "$nested" "$rest"
-    else
-        # Extract string value
-        local result=$(echo "$json" | grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/' | head -1)
-        if [ -z "$result" ]; then
-            # Try non-string value (number, boolean, null)
-            result=$(echo "$json" | grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*[^,}]*' | sed 's/.*:[[:space:]]*//' | tr -d ' ' | head -1)
-        fi
-        echo "$result"
+    if ! command -v jq &> /dev/null; then
+        echo -e "${RED}Error: jq is required but not installed.${NC}"
+        echo "Install: apt install jq / brew install jq / choco install jq"
+        exit 1
     fi
 }
 
-# Extract array values (for audio_paths)
-json_get_array() {
+# JSON value extractor using jq
+# Usage: json_get "$json" ".key" or json_get "$json" ".nested.key"
+json_get() {
     local json="$1"
-    local key="$2"
-    echo "$json" | grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*\[[^]]*\]' | sed 's/.*\[//;s/\].*//' | tr ',' '\n' | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//'
+    local path="$2"
+    echo "$json" | jq -r "$path // empty" 2>/dev/null
 }
 
-# Escape string for JSON
-json_escape() {
-    local str="$1"
-    # Escape backslashes, double quotes, and control characters
-    str="${str//\\/\\\\}"
-    str="${str//\"/\\\"}"
-    str="${str//$'\n'/\\n}"
-    str="${str//$'\r'/\\r}"
-    str="${str//$'\t'/\\t}"
-    echo "$str"
+# Extract array values using jq
+json_get_array() {
+    local json="$1"
+    local path="$2"
+    echo "$json" | jq -r "$path[]? // empty" 2>/dev/null
 }
 
 # Ensure output directory exists
@@ -106,42 +88,45 @@ ensure_config() {
     fi
 }
 
-# Get config value
+# Get config value using jq
 get_config() {
     local key="$1"
     ensure_config
-    local json=$(cat "$CONFIG_FILE" | tr -d '\n')
-    json_get "$json" "$key"
+    # Convert dot notation to jq path: "generation.thinking" -> ".generation.thinking"
+    local jq_path=".${key}"
+    local value
+    value=$(jq -r "$jq_path // empty" "$CONFIG_FILE" 2>/dev/null)
+    # Remove any trailing whitespace/newlines (Windows compatibility)
+    echo "$value" | tr -d '\r\n'
 }
 
-# Set config value (simple implementation)
+# Normalize boolean value for jq --argjson
+normalize_bool() {
+    local val="$1"
+    local default="${2:-false}"
+    case "$val" in
+        true|True|TRUE|1) echo "true" ;;
+        false|False|FALSE|0) echo "false" ;;
+        *) echo "$default" ;;
+    esac
+}
+
+# Set config value using jq
 set_config() {
     local key="$1"
     local value="$2"
     ensure_config
 
     local tmp_file="${CONFIG_FILE}.tmp"
+    local jq_path=".${key}"
 
-    if [[ "$key" == *.* ]]; then
-        # Nested key like "generation.thinking"
-        local subkey="${key#*.}"
-
-        if [ "$value" = "true" ] || [ "$value" = "false" ]; then
-            sed "s/\"$subkey\"[[:space:]]*:[[:space:]]*[^,}]*/\"$subkey\": $value/" "$CONFIG_FILE" > "$tmp_file"
-        elif [[ "$value" =~ ^[0-9]+$ ]] || [[ "$value" =~ ^[0-9]+\.[0-9]+$ ]]; then
-            sed "s/\"$subkey\"[[:space:]]*:[[:space:]]*[^,}]*/\"$subkey\": $value/" "$CONFIG_FILE" > "$tmp_file"
-        else
-            sed "s/\"$subkey\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"$subkey\": \"$value\"/" "$CONFIG_FILE" > "$tmp_file"
-        fi
+    # Determine value type and set accordingly
+    if [ "$value" = "true" ] || [ "$value" = "false" ]; then
+        jq "$jq_path = $value" "$CONFIG_FILE" > "$tmp_file"
+    elif [[ "$value" =~ ^-?[0-9]+$ ]] || [[ "$value" =~ ^-?[0-9]+\.[0-9]+$ ]]; then
+        jq "$jq_path = $value" "$CONFIG_FILE" > "$tmp_file"
     else
-        # Top-level key
-        if [ "$value" = "true" ] || [ "$value" = "false" ]; then
-            sed "s/\"$key\"[[:space:]]*:[[:space:]]*[^,}]*/\"$key\": $value/" "$CONFIG_FILE" > "$tmp_file"
-        elif [[ "$value" =~ ^[0-9]+$ ]] || [[ "$value" =~ ^[0-9]+\.[0-9]+$ ]]; then
-            sed "s/\"$key\"[[:space:]]*:[[:space:]]*[^,}]*/\"$key\": $value/" "$CONFIG_FILE" > "$tmp_file"
-        else
-            sed "s/\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"$key\": \"$value\"/" "$CONFIG_FILE" > "$tmp_file"
-        fi
+        jq "$jq_path = \"$value\"" "$CONFIG_FILE" > "$tmp_file"
     fi
 
     mv "$tmp_file" "$CONFIG_FILE"
@@ -193,34 +178,6 @@ ensure_connection() {
 
     echo -e "${RED}Error: Cannot connect to $new_url${NC}" >&2
     exit 1
-}
-
-# Download audio files from result
-download_audios() {
-    local api_url="$1"
-    local job_id="$2"
-    local result_json="$3"
-
-    ensure_output_dir
-
-    local audio_format=$(get_config "generation.audio_format")
-    [ -z "$audio_format" ] && audio_format="mp3"
-
-    local count=1
-    for audio_path in $(json_get_array "$result_json" "audio_paths"); do
-        if [ -n "$audio_path" ]; then
-            local output_file="${OUTPUT_DIR}/${job_id}_${count}.${audio_format}"
-            local download_url="${api_url}${audio_path}"
-
-            echo -e "  ${CYAN}Downloading audio $count...${NC}"
-            if curl -s -o "$output_file" "$download_url"; then
-                echo -e "  ${GREEN}Saved: $output_file${NC}"
-            else
-                echo -e "  ${RED}Failed to download: $download_url${NC}"
-            fi
-            count=$((count + 1))
-        fi
-    done
 }
 
 # Save result to JSON file
@@ -316,6 +273,44 @@ cmd_models() {
     echo ""
 }
 
+# Query job result via /query_result endpoint
+query_job_result() {
+    local api_url="$1"
+    local job_id="$2"
+
+    local payload=$(jq -n --arg id "$job_id" '{"task_id_list": [$id]}')
+
+    curl -s -X POST "${api_url}/query_result" \
+        -H "Content-Type: application/json; charset=utf-8" \
+        -d "$payload"
+}
+
+# Parse query_result response to extract status (0=processing, 1=success, 2=failed)
+parse_query_status() {
+    local response="$1"
+    echo "$response" | jq -r '.[0].status // 0'
+}
+
+# Parse result JSON string from query_result response
+# The result field is a JSON string that needs to be parsed
+parse_query_result() {
+    local response="$1"
+    echo "$response" | jq -r '.[0].result // "[]"'
+}
+
+# Extract audio file paths from result (returns newline-separated paths)
+parse_audio_files() {
+    local result="$1"
+    echo "$result" | jq -r '.[]?.file // empty' 2>/dev/null
+}
+
+# Extract metas value from result
+parse_metas_value() {
+    local result="$1"
+    local key="$2"
+    echo "$result" | jq -r ".[0].metas.$key // .[0].$key // empty" 2>/dev/null
+}
+
 # Status command
 cmd_status() {
     check_deps
@@ -324,32 +319,69 @@ cmd_status() {
     [ -z "$job_id" ] && { echo -e "${RED}Error: job_id required${NC}"; echo "Usage: $0 status <job_id>"; exit 1; }
 
     local api_url=$(ensure_connection)
-    local response=$(curl -s "${api_url}/v1/jobs/${job_id}")
+    local response=$(query_job_result "$api_url" "$job_id")
 
-    local status=$(json_get "$response" "status")
-    echo "Job ID: $(json_get "$response" "job_id")"
-    echo "Status: $status"
+    local status=$(parse_query_status "$response")
+    echo "Job ID: $job_id"
 
-    if [ "$status" = "queued" ]; then
-        echo "Queue Position: $(json_get "$response" "queue_position")"
-    fi
+    case "$status" in
+        0)
+            echo "Status: processing"
+            ;;
+        1)
+            echo "Status: succeeded"
+            echo ""
+            local result=$(parse_query_result "$response")
+            local bpm=$(parse_metas_value "$result" "bpm")
+            local keyscale=$(parse_metas_value "$result" "keyscale")
+            local duration=$(parse_metas_value "$result" "duration")
 
-    if [ "$status" = "succeeded" ]; then
-        echo ""
-        echo "Result:"
-        echo "  BPM: $(json_get "$response" "bpm")"
-        echo "  Key: $(json_get "$response" "keyscale")"
-        echo "  Duration: $(json_get "$response" "duration")s"
+            echo "Result:"
+            [ -n "$bpm" ] && echo "  BPM: $bpm"
+            [ -n "$keyscale" ] && echo "  Key: $keyscale"
+            [ -n "$duration" ] && echo "  Duration: ${duration}s"
 
-        # Save and download
-        save_result "$job_id" "$response"
-        download_audios "$api_url" "$job_id" "$response"
-    fi
+            # Save and download
+            save_result "$job_id" "$response"
+            download_audios "$api_url" "$job_id" "$result"
+            ;;
+        2)
+            echo "Status: failed"
+            echo ""
+            echo -e "${RED}Task failed${NC}"
+            ;;
+        *)
+            echo "Status: unknown ($status)"
+            ;;
+    esac
+}
 
-    if [ "$status" = "failed" ]; then
-        echo ""
-        echo -e "${RED}Error: $(json_get "$response" "error")${NC}"
-    fi
+# Download audio files from parsed result
+download_audios() {
+    local api_url="$1"
+    local job_id="$2"
+    local result="$3"
+
+    ensure_output_dir
+
+    local audio_format=$(get_config "generation.audio_format")
+    [ -z "$audio_format" ] && audio_format="mp3"
+
+    local count=1
+    while IFS= read -r audio_path; do
+        if [ -n "$audio_path" ]; then
+            local output_file="${OUTPUT_DIR}/${job_id}_${count}.${audio_format}"
+            local download_url="${api_url}${audio_path}"
+
+            echo -e "  ${CYAN}Downloading audio $count...${NC}"
+            if curl -s -o "$output_file" "$download_url"; then
+                echo -e "  ${GREEN}Saved: $output_file${NC}"
+            else
+                echo -e "  ${RED}Failed to download: $download_url${NC}"
+            fi
+            count=$((count + 1))
+        fi
+    done <<< "$(parse_audio_files "$result")"
 }
 
 # Wait for job and download results
@@ -362,18 +394,24 @@ wait_for_job() {
     echo ""
 
     while true; do
-        local response=$(curl -s "${api_url}/v1/jobs/${job_id}")
-        local status=$(json_get "$response" "status")
+        local response=$(query_job_result "$api_url" "$job_id")
+        local status=$(parse_query_status "$response")
 
         case "$status" in
-            "succeeded")
+            1)
                 echo ""
                 echo -e "${GREEN}Generation completed!${NC}"
                 echo ""
+
+                local result=$(parse_query_result "$response")
+                local bpm=$(parse_metas_value "$result" "bpm")
+                local keyscale=$(parse_metas_value "$result" "keyscale")
+                local duration=$(parse_metas_value "$result" "duration")
+
                 echo "Metadata:"
-                echo "  BPM: $(json_get "$response" "bpm")"
-                echo "  Key: $(json_get "$response" "keyscale")"
-                echo "  Duration: $(json_get "$response" "duration")s"
+                [ -n "$bpm" ] && echo "  BPM: $bpm"
+                [ -n "$keyscale" ] && echo "  Key: $keyscale"
+                [ -n "$duration" ] && echo "  Duration: ${duration}s"
                 echo ""
 
                 # Save result JSON
@@ -381,27 +419,25 @@ wait_for_job() {
 
                 # Download audio files
                 echo "Downloading audio files..."
-                download_audios "$api_url" "$job_id" "$response"
+                download_audios "$api_url" "$job_id" "$result"
 
                 echo ""
                 echo -e "${GREEN}Done! Files saved to: $OUTPUT_DIR${NC}"
                 return 0
                 ;;
-            "failed")
+            2)
                 echo ""
                 echo -e "${RED}Generation failed!${NC}"
-                echo "Error: $(json_get "$response" "error")"
 
                 # Save error result
                 save_result "$job_id" "$response"
                 return 1
                 ;;
-            "queued")
-                local pos=$(json_get "$response" "queue_position")
-                printf "\rQueued (position: %s)...    " "${pos:-?}"
+            0)
+                printf "\rProcessing...              "
                 ;;
             *)
-                printf "\rGenerating...              "
+                printf "\rWaiting...                 "
                 ;;
         esac
         sleep 5
@@ -427,7 +463,7 @@ cmd_generate() {
             --use-format) use_format="true"; shift ;;
             --no-format) no_format=true; shift ;;
             --model|-m) model="$2"; shift 2 ;;
-            --language) language="$2"; shift 2 ;;
+            --language|--vocal-language) language="$2"; shift 2 ;;
             --steps) steps="$2"; shift 2 ;;
             --guidance) guidance="$2"; shift 2 ;;
             --seed) seed="$2"; shift 2 ;;
@@ -464,32 +500,44 @@ cmd_generate() {
     [ "$no_thinking" = true ] && thinking="false"
     [ "$no_format" = true ] && use_format="false"
 
-    # Build payload manually (no jq) - escape strings for JSON
-    local esc_caption=$(json_escape "$caption")
-    local esc_lyrics=$(json_escape "${lyrics:-}")
-    local esc_description=$(json_escape "${description:-}")
+    # Normalize boolean values for jq --argjson
+    thinking=$(normalize_bool "$thinking" "true")
+    use_format=$(normalize_bool "$use_format" "true")
+    local cot_caption=$(normalize_bool "$def_cot_caption" "true")
+    local cot_language=$(normalize_bool "$def_cot_language" "true")
 
-    local payload="{"
-    payload+="\"caption\":\"${esc_caption}\","
-    payload+="\"lyrics\":\"${esc_lyrics}\","
-    payload+="\"sample_query\":\"${esc_description}\","
-    payload+="\"thinking\":${thinking},"
-    payload+="\"use_format\":${use_format},"
-    payload+="\"use_cot_caption\":${def_cot_caption:-true},"
-    payload+="\"use_cot_language\":${def_cot_language:-true},"
-    payload+="\"vocal_language\":\"${language}\","
-    payload+="\"audio_format\":\"${def_audio_format:-mp3}\","
-    payload+="\"use_random_seed\":true"
+    # Build payload using jq for proper escaping
+    local payload=$(jq -n \
+        --arg prompt "$caption" \
+        --arg lyrics "${lyrics:-}" \
+        --arg sample_query "${description:-}" \
+        --argjson thinking "$thinking" \
+        --argjson use_format "$use_format" \
+        --argjson use_cot_caption "$cot_caption" \
+        --argjson use_cot_language "$cot_language" \
+        --arg vocal_language "$language" \
+        --arg audio_format "${def_audio_format:-mp3}" \
+        '{
+            prompt: $prompt,
+            lyrics: $lyrics,
+            sample_query: $sample_query,
+            thinking: $thinking,
+            use_format: $use_format,
+            use_cot_caption: $use_cot_caption,
+            use_cot_language: $use_cot_language,
+            vocal_language: $vocal_language,
+            audio_format: $audio_format,
+            use_random_seed: true
+        }')
 
-    [ -n "$model" ] && payload+=",\"model\":\"$(json_escape "$model")\""
-    [ -n "$steps" ] && payload+=",\"inference_steps\":${steps}"
-    [ -n "$guidance" ] && payload+=",\"guidance_scale\":${guidance}"
-    [ -n "$seed" ] && payload+=",\"seed\":${seed},\"use_random_seed\":false"
-    [ -n "$duration" ] && payload+=",\"audio_duration\":${duration}"
-    [ -n "$bpm" ] && payload+=",\"bpm\":${bpm}"
-    [ -n "$batch" ] && payload+=",\"batch_size\":${batch}"
-
-    payload+="}"
+    # Add optional parameters
+    [ -n "$model" ] && payload=$(echo "$payload" | jq --arg v "$model" '. + {model: $v}')
+    [ -n "$steps" ] && payload=$(echo "$payload" | jq --argjson v "$steps" '. + {inference_steps: $v}')
+    [ -n "$guidance" ] && payload=$(echo "$payload" | jq --argjson v "$guidance" '. + {guidance_scale: $v}')
+    [ -n "$seed" ] && payload=$(echo "$payload" | jq --argjson v "$seed" '. + {seed: $v, use_random_seed: false}')
+    [ -n "$duration" ] && payload=$(echo "$payload" | jq --argjson v "$duration" '. + {audio_duration: $v}')
+    [ -n "$bpm" ] && payload=$(echo "$payload" | jq --argjson v "$bpm" '. + {bpm: $v}')
+    [ -n "$batch" ] && payload=$(echo "$payload" | jq --argjson v "$batch" '. + {batch_size: $v}')
 
     echo "Generating music..."
     if [ -n "$description" ]; then
@@ -503,17 +551,17 @@ cmd_generate() {
     echo "  Output: $OUTPUT_DIR"
     echo ""
 
-    # Write payload to temp file to ensure UTF-8 encoding
+    # Write payload to temp file to ensure proper UTF-8 encoding
     local temp_payload=$(mktemp)
-    printf "%s" "$payload" > "$temp_payload"
+    printf '%s' "$payload" > "$temp_payload"
 
-    local response=$(curl -s -X POST "${api_url}/v1/music/generate" \
+    local response=$(curl -s -X POST "${api_url}/release_task" \
         -H "Content-Type: application/json; charset=utf-8" \
         --data-binary "@${temp_payload}")
 
     rm -f "$temp_payload"
 
-    local job_id=$(json_get "$response" "job_id")
+    local job_id=$(echo "$response" | jq -r '.task_id // empty')
 
     [ -z "$job_id" ] && { echo -e "${RED}Error: Failed to create job${NC}"; echo "$response"; exit 1; }
 
@@ -547,21 +595,27 @@ cmd_random() {
     [ -z "$thinking" ] && thinking="${def_thinking:-true}"
     [ "$no_thinking" = true ] && thinking="false"
 
+    # Normalize boolean for jq --argjson
+    thinking=$(normalize_bool "$thinking" "true")
+
     echo "Generating random music..."
     echo "  Thinking: $thinking"
     echo "  Output: $OUTPUT_DIR"
     echo ""
 
-    local temp_payload=$(mktemp)
-    printf "{\"thinking\": %s}" "$thinking" > "$temp_payload"
+    local payload=$(jq -n --argjson thinking "$thinking" '{sample_mode: true, thinking: $thinking}')
 
-    local response=$(curl -s -X POST "${api_url}/v1/music/random" \
+    # Write payload to temp file
+    local temp_payload=$(mktemp)
+    printf '%s' "$payload" > "$temp_payload"
+
+    local response=$(curl -s -X POST "${api_url}/release_task" \
         -H "Content-Type: application/json; charset=utf-8" \
         --data-binary "@${temp_payload}")
 
     rm -f "$temp_payload"
 
-    local job_id=$(json_get "$response" "job_id")
+    local job_id=$(echo "$response" | jq -r '.task_id // empty')
 
     [ -z "$job_id" ] && { echo -e "${RED}Error: Failed to create job${NC}"; echo "$response"; exit 1; }
 
@@ -577,7 +631,7 @@ cmd_random() {
 show_help() {
     echo "ACE-Step Music Generation CLI"
     echo ""
-    echo "Requirements: curl"
+    echo "Requirements: curl, jq"
     echo ""
     echo "Usage: $0 <command> [options]"
     echo ""
