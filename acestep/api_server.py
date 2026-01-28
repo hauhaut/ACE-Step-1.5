@@ -63,6 +63,8 @@ from acestep.gradio_ui.events.results_handlers import _build_generation_info
 RESULT_KEY_PREFIX = "ace_step_v1.5_"
 RESULT_EXPIRE_SECONDS = 7 * 24 * 60 * 60  # 7 days
 TASK_TIMEOUT_SECONDS = 3600  # 1 hour
+JOB_STORE_CLEANUP_INTERVAL = 300  # 5 minutes - interval for cleaning up old jobs
+JOB_STORE_MAX_AGE_SECONDS = 86400  # 24 hours - completed jobs older than this will be cleaned
 STATUS_MAP = {"queued": 0, "running": 0, "succeeded": 1, "failed": 2}
 
 LM_DEFAULT_TEMPERATURE = 0.85
@@ -306,9 +308,10 @@ class _JobRecord:
 
 
 class _JobStore:
-    def __init__(self) -> None:
+    def __init__(self, max_age_seconds: int = JOB_STORE_MAX_AGE_SECONDS) -> None:
         self._lock = Lock()
         self._jobs: Dict[str, _JobRecord] = {}
+        self._max_age = max_age_seconds
 
     def create(self) -> _JobRecord:
         job_id = str(uuid4())
@@ -354,6 +357,49 @@ class _JobStore:
             rec.finished_at = time.time()
             rec.result = None
             rec.error = error
+
+    def cleanup_old_jobs(self, max_age_seconds: Optional[int] = None) -> int:
+        """
+        Clean up completed jobs older than max_age_seconds.
+
+        Only removes jobs with status 'succeeded' or 'failed'.
+        Jobs that are 'queued' or 'running' are never removed.
+
+        Returns the number of jobs removed.
+        """
+        max_age = max_age_seconds if max_age_seconds is not None else self._max_age
+        now = time.time()
+        removed = 0
+
+        with self._lock:
+            to_remove = []
+            for job_id, rec in self._jobs.items():
+                if rec.status in ("succeeded", "failed"):
+                    finish_time = rec.finished_at or rec.created_at
+                    age = now - finish_time
+                    if age > max_age:
+                        to_remove.append(job_id)
+
+            for job_id in to_remove:
+                del self._jobs[job_id]
+                removed += 1
+
+        return removed
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get statistics about jobs in the store."""
+        with self._lock:
+            stats = {
+                "total": len(self._jobs),
+                "queued": 0,
+                "running": 0,
+                "succeeded": 0,
+                "failed": 0,
+            }
+            for rec in self._jobs.values():
+                if rec.status in stats:
+                    stats[rec.status] += 1
+            return stats
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -1248,13 +1294,30 @@ def create_app() -> FastAPI:
                     await _cleanup_job_temp_files(job_id)
                     app.state.job_queue.task_done()
 
+        async def _job_store_cleanup_worker() -> None:
+            """Background task to periodically clean up old completed jobs."""
+            while True:
+                try:
+                    await asyncio.sleep(JOB_STORE_CLEANUP_INTERVAL)
+                    removed = store.cleanup_old_jobs()
+                    if removed > 0:
+                        stats = store.get_stats()
+                        print(f"[API Server] Cleaned up {removed} old jobs. Current stats: {stats}")
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    print(f"[API Server] Job cleanup error: {e}")
+
         worker_count = max(1, WORKER_COUNT)
         workers = [asyncio.create_task(_queue_worker(i)) for i in range(worker_count)]
+        cleanup_task = asyncio.create_task(_job_store_cleanup_worker())
         app.state.worker_tasks = workers
+        app.state.cleanup_task = cleanup_task
 
         try:
             yield
         finally:
+            cleanup_task.cancel()
             for t in workers:
                 t.cancel()
             executor.shutdown(wait=False, cancel_futures=True)
@@ -1554,6 +1617,19 @@ def create_app() -> FastAPI:
             "status": "ok",
             "service": "ACE-Step API",
             "version": "1.0",
+        }
+
+    @app.get("/v1/stats")
+    async def get_stats():
+        """Get server statistics including job store stats."""
+        job_stats = store.get_stats()
+        async with app.state.stats_lock:
+            avg_job_seconds = getattr(app.state, "avg_job_seconds", INITIAL_AVG_JOB_SECONDS)
+        return {
+            "jobs": job_stats,
+            "queue_size": app.state.job_queue.qsize(),
+            "queue_maxsize": QUEUE_MAXSIZE,
+            "avg_job_seconds": avg_job_seconds,
         }
 
     @app.get("/v1/models")
