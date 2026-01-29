@@ -412,7 +412,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                             info=t("generation.keyscale_info")
                         )
                         time_signature = gr.Dropdown(
-                            choices=["2", "3", "4", "N/A", ""],
+                            choices=["", "2", "3", "4", "6", "N/A"],
                             value="",
                             label=t("generation.timesig_label"),
                             allow_custom_value=True,

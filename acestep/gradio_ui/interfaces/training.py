@@ -205,7 +205,7 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                                 placeholder="C Major",
                             )
                             edit_timesig = gr.Dropdown(
-                                choices=["", "2", "3", "4", "6"],
+                                choices=["", "2", "3", "4", "6", "N/A"],
                                 label="Time Signature",
                             )
                             edit_duration = gr.Number(
@@ -374,15 +374,15 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                 with gr.Row():
                     learning_rate = gr.Number(
                         label="Learning Rate",
-                        value=1e-4,
-                        info="Start with 1e-4, adjust if needed",
+                        value=3e-4,
+                        info="Start with 3e-4, adjust if needed",
                     )
                     
                     train_epochs = gr.Slider(
                         minimum=100,
                         maximum=4000,
                         step=100,
-                        value=500,
+                        value=1000,
                         label="Max Epochs",
                     )
                     
