@@ -52,8 +52,8 @@ class AudioSample:
     bpm: Optional[int] = None
     keyscale: str = ""
     timesignature: str = ""
-    duration: float = 0.0
-    language: str = "instrumental"
+    duration: int = 0
+    language: str = "unknown"
     is_instrumental: bool = True
     custom_tag: str = ""
     labeled: bool = False
@@ -191,21 +191,21 @@ class DatasetBuilder:
         status = f"✅ Found {len(self.samples)} audio files in {directory}"
         return self.samples, status
     
-    def _get_audio_duration(self, audio_path: str) -> float:
+    def _get_audio_duration(self, audio_path: str) -> int:
         """Get the duration of an audio file in seconds.
         
         Args:
             audio_path: Path to audio file
             
         Returns:
-            Duration in seconds
+            Duration in seconds (integer)
         """
         try:
             info = torchaudio.info(audio_path)
-            return info.num_frames / info.sample_rate
+            return int(info.num_frames / info.sample_rate)
         except Exception as e:
             logger.warning(f"Failed to get duration for {audio_path}: {e}")
-            return 0.0
+            return 0
     
     def label_sample(
         self,
@@ -258,12 +258,12 @@ class DatasetBuilder:
             sample.bpm = self._parse_int(metadata.get('bpm'))
             sample.keyscale = metadata.get('keyscale', '')
             sample.timesignature = metadata.get('timesignature', '')
-            sample.language = metadata.get('vocal_language', 'instrumental')
+            sample.language = metadata.get('vocal_language', 'unknown')
             
             # Handle lyrics based on instrumental flag
             if sample.is_instrumental:
                 sample.lyrics = "[Instrumental]"
-                sample.language = "instrumental"
+                sample.language = "unknown"
             else:
                 sample.lyrics = metadata.get('lyrics', '')
             
@@ -403,7 +403,7 @@ class DatasetBuilder:
             sample.is_instrumental = is_instrumental
             if is_instrumental:
                 sample.lyrics = "[Instrumental]"
-                sample.language = "instrumental"
+                sample.language = "unknown"
     
     def get_sample_count(self) -> int:
         """Get the number of samples in the dataset."""

@@ -334,7 +334,7 @@ class AceStepTrainingDataset(Dataset):
                 "keyscale": sample.get("keyscale", ""),
                 "timesignature": sample.get("timesignature", ""),
                 "duration": sample.get("duration", audio.shape[1] / self.target_sample_rate),
-                "language": sample.get("language", "instrumental"),
+                "language": sample.get("language", "unknown"),
                 "is_instrumental": sample.get("is_instrumental", True),
             },
             "audio_path": audio_path,

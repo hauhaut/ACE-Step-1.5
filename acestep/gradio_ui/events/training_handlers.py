@@ -196,7 +196,7 @@ def save_sample_edit(
         bpm=int(bpm) if bpm else None,
         keyscale=keyscale,
         timesignature=timesig,
-        language="instrumental" if is_instrumental else language,
+        language="unknown" if is_instrumental else language,
         is_instrumental=is_instrumental,
         labeled=True,
     )
