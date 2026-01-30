@@ -299,9 +299,11 @@ async def release_task(request: Request, _: None = Depends(verify_api_key)):
         # Extract audio paths
         audio_paths = [a["path"] for a in result.audios if a.get("path")]
 
-        # Build result data
+        # Build result data with download URLs
+        from urllib.parse import urlencode
         result_data = [{
             "file": p,
+            "url": f"/v1/audio?{urlencode({'path': p})}",
             "status": 1,
             "create_time": int(time.time()),
         } for p in audio_paths]
@@ -315,6 +317,22 @@ async def release_task(request: Request, _: None = Depends(verify_api_key)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def setup_api_routes_to_app(app, dit_handler, llm_handler, api_key: Optional[str] = None):
+    """
+    Mount API routes to a FastAPI application (for use with gr.mount_gradio_app)
+
+    Args:
+        app: FastAPI application instance
+        dit_handler: DiT handler
+        llm_handler: LLM handler
+        api_key: Optional API key for authentication
+    """
+    set_api_key(api_key)
+    app.state.dit_handler = dit_handler
+    app.state.llm_handler = llm_handler
+    app.include_router(router)
 
 
 def setup_api_routes(demo, dit_handler, llm_handler, api_key: Optional[str] = None):

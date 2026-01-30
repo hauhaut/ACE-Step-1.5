@@ -147,7 +147,18 @@ def main():
     parser.add_argument("--api-key", type=str, default=None, help="API key for API endpoints authentication")
 
     args = parser.parse_args()
-    
+
+    # Enable API requires init_service
+    if args.enable_api:
+        args.init_service = True
+        # Load config from .env if not specified
+        if args.config_path is None:
+            args.config_path = os.environ.get("ACESTEP_CONFIG_PATH")
+        if args.lm_model_path is None:
+            args.lm_model_path = os.environ.get("ACESTEP_LM_MODEL_PATH")
+        if os.environ.get("ACESTEP_LM_BACKEND"):
+            args.backend = os.environ.get("ACESTEP_LM_BACKEND")
+
     # Service mode defaults (can be configured via .env file)
     if args.service_mode:
         print("Service mode enabled - applying preset configurations...")
@@ -173,7 +184,9 @@ def main():
     
     try:
         init_params = None
-        
+        dit_handler = None
+        llm_handler = None
+
         # If init_service is True, perform initialization before creating UI
         if args.init_service:
             print("Initializing service from command line...")
@@ -285,15 +298,6 @@ def main():
             status_update_rate="auto",  # Update rate for queue status
         )
 
-        # Enable API endpoints if requested
-        if args.enable_api:
-            print("Enabling API endpoints...")
-            from acestep.gradio_ui.api_routes import setup_api_routes
-            setup_api_routes(demo, dit_handler, llm_handler, api_key=args.api_key)
-            if args.api_key:
-                print("API authentication enabled")
-            print("API endpoints enabled: /health, /v1/models, /release_task, /query_result, /create_random_sample, /format_lyrics")
-
         print(f"Launching server on {args.server_name}:{args.port}...")
 
         # Setup authentication if provided
@@ -302,16 +306,48 @@ def main():
             auth = (args.auth_username, args.auth_password)
             print("Authentication enabled")
 
-        demo.launch(
-            server_name=args.server_name,
-            server_port=args.port,
-            share=args.share,
-            debug=args.debug,
-            show_error=True,
-            prevent_thread_lock=False,
-            inbrowser=False,
-            auth=auth,
-        )
+        # Enable API endpoints if requested
+        if args.enable_api:
+            print("Enabling API endpoints...")
+            from acestep.gradio_ui.api_routes import setup_api_routes
+
+            # Launch Gradio first with prevent_thread_lock=True
+            demo.launch(
+                server_name=args.server_name,
+                server_port=args.port,
+                share=args.share,
+                debug=args.debug,
+                show_error=True,
+                prevent_thread_lock=True,  # Don't block, so we can add routes
+                inbrowser=False,
+                auth=auth,
+            )
+
+            # Now add API routes to Gradio's FastAPI app (app is available after launch)
+            setup_api_routes(demo, dit_handler, llm_handler, api_key=args.api_key)
+
+            if args.api_key:
+                print("API authentication enabled")
+            print("API endpoints enabled: /health, /v1/models, /release_task, /query_result, /create_random_sample, /format_lyrics")
+
+            # Keep the main thread alive
+            try:
+                while True:
+                    import time
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nShutting down...")
+        else:
+            demo.launch(
+                server_name=args.server_name,
+                server_port=args.port,
+                share=args.share,
+                debug=args.debug,
+                show_error=True,
+                prevent_thread_lock=False,
+                inbrowser=False,
+                auth=auth,
+            )
     except Exception as e:
         print(f"Error launching Gradio: {e}", file=sys.stderr)
         import traceback
