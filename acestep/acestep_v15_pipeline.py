@@ -137,7 +137,15 @@ def main():
     parser.add_argument("--use_flash_attention", type=lambda x: x.lower() in ['true', '1', 'yes'], default=None, help="Use flash attention (default: auto-detect)")
     parser.add_argument("--offload_to_cpu", type=lambda x: x.lower() in ['true', '1', 'yes'], default=auto_offload, help=f"Offload models to CPU (default: {'True' if auto_offload else 'False'}, auto-detected based on GPU VRAM)")
     parser.add_argument("--offload_dit_to_cpu", type=lambda x: x.lower() in ['true', '1', 'yes'], default=False, help="Offload DiT to CPU (default: False)")
-    
+
+    # API mode argument
+    parser.add_argument("--enable-api", action="store_true", help="Enable API endpoints (default: False)")
+
+    # Authentication arguments
+    parser.add_argument("--auth-username", type=str, default=None, help="Username for Gradio authentication")
+    parser.add_argument("--auth-password", type=str, default=None, help="Password for Gradio authentication")
+    parser.add_argument("--api-key", type=str, default=None, help="API key for API endpoints authentication")
+
     args = parser.parse_args()
     
     # Service mode defaults (can be configured via .env file)
@@ -276,16 +284,33 @@ def main():
             max_size=20,  # Maximum queue size (adjust based on your needs)
             status_update_rate="auto",  # Update rate for queue status
         )
-        
+
+        # Enable API endpoints if requested
+        if args.enable_api:
+            print("Enabling API endpoints...")
+            from acestep.gradio_ui.api_routes import setup_api_routes
+            setup_api_routes(demo, dit_handler, llm_handler, api_key=args.api_key)
+            if args.api_key:
+                print("API authentication enabled")
+            print("API endpoints enabled: /health, /v1/models, /release_task, /query_result, /create_random_sample, /format_lyrics")
+
         print(f"Launching server on {args.server_name}:{args.port}...")
+
+        # Setup authentication if provided
+        auth = None
+        if args.auth_username and args.auth_password:
+            auth = (args.auth_username, args.auth_password)
+            print("Authentication enabled")
+
         demo.launch(
             server_name=args.server_name,
             server_port=args.port,
             share=args.share,
             debug=args.debug,
             show_error=True,
-            prevent_thread_lock=False,  # Keep thread locked to maintain server running
-            inbrowser=False,  # Don't auto-open browser
+            prevent_thread_lock=False,
+            inbrowser=False,
+            auth=auth,
         )
     except Exception as e:
         print(f"Error launching Gradio: {e}", file=sys.stderr)

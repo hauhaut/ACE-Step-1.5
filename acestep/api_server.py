@@ -1,11 +1,13 @@
 """FastAPI server for ACE-Step V1.5.
 
 Endpoints:
-- POST /release_task     Create music generation task
-- POST /query_result     Batch query task results
-- GET  /v1/models        List available models
-- GET  /v1/audio         Download audio file
-- GET  /health           Health check
+- POST /release_task          Create music generation task
+- POST /query_result          Batch query task results
+- POST /create_random_sample  Generate random music parameters via LLM
+- POST /format_lyrics         Format and enhance lyrics/caption via LLM
+- GET  /v1/models             List available models
+- GET  /v1/audio              Download audio file
+- GET  /health                Health check
 
 NOTE:
 - In-memory queue and job store -> run uvicorn with workers=1.
@@ -35,7 +37,7 @@ try:
 except ImportError:  # Optional dependency
     load_dotenv = None  # type: ignore
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
@@ -71,6 +73,36 @@ LM_DEFAULT_TEMPERATURE = 0.85
 LM_DEFAULT_CFG_SCALE = 2.5
 LM_DEFAULT_TOP_P = 0.9
 
+# =============================================================================
+# API Key Authentication
+# =============================================================================
+
+_api_key: Optional[str] = None
+
+
+def set_api_key(key: Optional[str]):
+    """Set the API key for authentication"""
+    global _api_key
+    _api_key = key
+
+
+async def verify_api_key(authorization: Optional[str] = Header(None)):
+    """Verify API key from Authorization header"""
+    if _api_key is None:
+        return  # No auth required
+
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    # Support "Bearer <key>" format
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    else:
+        token = authorization
+
+    if token != _api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
 # Parameter aliases for request parsing
 PARAM_ALIASES = {
     "prompt": ["prompt"],
@@ -95,6 +127,7 @@ PARAM_ALIASES = {
     "use_cot_caption": ["use_cot_caption", "cot_caption", "cot-caption"],
     "use_cot_language": ["use_cot_language", "cot_language", "cot-language"],
     "is_format_caption": ["is_format_caption", "isFormatCaption"],
+    "allow_lm_batch": ["allow_lm_batch", "allowLmBatch", "parallel_thinking"],
 }
 
 
@@ -239,6 +272,7 @@ class GenerateMusicRequest(BaseModel):
     use_cot_caption: bool = True
     use_cot_language: bool = True
     is_format_caption: bool = False
+    allow_lm_batch: bool = True
 
     lm_temperature: float = 0.85
     lm_cfg_scale: float = 2.5
@@ -592,6 +626,10 @@ async def _save_upload_to_temp(upload: StarletteUploadFile, *, prefix: str) -> s
 
 def create_app() -> FastAPI:
     store = _JobStore()
+
+    # API Key authentication (from environment variable)
+    api_key = os.getenv("ACESTEP_API_KEY", None)
+    set_api_key(api_key)
 
     QUEUE_MAXSIZE = int(os.getenv("ACESTEP_QUEUE_MAXSIZE", "200"))
     WORKER_COUNT = int(os.getenv("ACESTEP_QUEUE_WORKERS", "1"))  # Single GPU recommended
@@ -1149,6 +1187,7 @@ def create_app() -> FastAPI:
                 batch_size = req.batch_size if req.batch_size is not None else 2
                 config = GenerationConfig(
                     batch_size=batch_size,
+                    allow_lm_batch=req.allow_lm_batch,
                     use_random_seed=req.use_random_seed,
                     seeds=None,  # Let unified logic handle seed generation
                     audio_format=req.audio_format,
@@ -1339,7 +1378,7 @@ def create_app() -> FastAPI:
         return pos * avg
 
     @app.post("/release_task", response_model=CreateJobResponse)
-    async def create_music_generate_job(request: Request) -> CreateJobResponse:
+    async def create_music_generate_job(request: Request, _: None = Depends(verify_api_key)) -> CreateJobResponse:
         content_type = (request.headers.get("content-type") or "").lower()
         temp_files: list[str] = []
 
@@ -1389,6 +1428,7 @@ def create_app() -> FastAPI:
                 use_cot_caption=p.bool("use_cot_caption", True),
                 use_cot_language=p.bool("use_cot_language", True),
                 is_format_caption=p.bool("is_format_caption"),
+                allow_lm_batch=p.bool("allow_lm_batch", True),
                 **kwargs,
             )
 
@@ -1502,7 +1542,7 @@ def create_app() -> FastAPI:
         return CreateJobResponse(task_id=rec.job_id, status="queued", queue_position=position)
 
     @app.post("/query_result")
-    async def query_result(request: Request) -> List[Dict[str, Any]]:
+    async def query_result(request: Request, _: None = Depends(verify_api_key)) -> List[Dict[str, Any]]:
         """Batch query job results"""
         content_type = (request.headers.get("content-type") or "").lower()
 
@@ -1620,7 +1660,7 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/v1/stats")
-    async def get_stats():
+    async def get_stats(_: None = Depends(verify_api_key)):
         """Get server statistics including job store stats."""
         job_stats = store.get_stats()
         async with app.state.stats_lock:
@@ -1633,7 +1673,7 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/v1/models")
-    async def list_models():
+    async def list_models(_: None = Depends(verify_api_key)):
         """List available DiT models."""
         models = []
         
@@ -1669,8 +1709,220 @@ def create_app() -> FastAPI:
             "default_model": models[0]["name"] if models else None,
         }
 
+    @app.post("/create_random_sample")
+    async def create_random_sample_endpoint(request: Request, _: None = Depends(verify_api_key)):
+        """
+        Create random sample parameters via LLM.
+
+        Generates random music parameters (caption, lyrics, bpm, etc.) using the LLM,
+        which can be used to fill in the form for music generation.
+        """
+        content_type = (request.headers.get("content-type") or "").lower()
+
+        if "json" in content_type:
+            body = await request.json()
+        else:
+            form = await request.form()
+            body = {k: v for k, v in form.items()}
+
+        llm: LLMHandler = app.state.llm_handler
+
+        # Initialize LLM if needed
+        with app.state._llm_init_lock:
+            if not getattr(app.state, "_llm_initialized", False):
+                if getattr(app.state, "_llm_init_error", None):
+                    raise HTTPException(status_code=500, detail=f"LLM init failed: {app.state._llm_init_error}")
+
+                project_root = _get_project_root()
+                checkpoint_dir = os.path.join(project_root, "checkpoints")
+                lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B").strip()
+                backend = os.getenv("ACESTEP_LM_BACKEND", "vllm").strip().lower()
+                if backend not in {"vllm", "pt"}:
+                    backend = "vllm"
+
+                lm_device = os.getenv("ACESTEP_LM_DEVICE", os.getenv("ACESTEP_DEVICE", "auto"))
+                lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
+
+                h: AceStepHandler = app.state.handler
+                status, ok = llm.initialize(
+                    checkpoint_dir=checkpoint_dir,
+                    lm_model_path=lm_model_path,
+                    backend=backend,
+                    device=lm_device,
+                    offload_to_cpu=lm_offload,
+                    dtype=h.dtype,
+                )
+                if not ok:
+                    app.state._llm_init_error = status
+                    raise HTTPException(status_code=500, detail=f"LLM init failed: {status}")
+                app.state._llm_initialized = True
+
+        # Parse parameters
+        sample_query = body.get("query", "NO USER INPUT") or "NO USER INPUT"
+        temperature = _to_float(body.get("temperature"), 0.85)
+
+        # Parse description hints
+        parsed_language, parsed_instrumental = _parse_description_hints(sample_query)
+
+        # Get language from request or parsed
+        language = body.get("language", "") or ""
+        if language and language not in ("en", "unknown", ""):
+            sample_language = language
+        else:
+            sample_language = parsed_language
+
+        # Call create_sample
+        try:
+            sample_result = create_sample(
+                llm_handler=llm,
+                query=sample_query,
+                instrumental=parsed_instrumental,
+                vocal_language=sample_language,
+                temperature=temperature,
+                use_constrained_decoding=True,
+            )
+
+            if not sample_result.success:
+                error_msg = sample_result.error or sample_result.status_message
+                raise HTTPException(status_code=500, detail=f"create_sample failed: {error_msg}")
+
+            return {
+                "caption": sample_result.caption,
+                "lyrics": sample_result.lyrics,
+                "bpm": sample_result.bpm,
+                "key_scale": sample_result.keyscale,
+                "time_signature": sample_result.timesignature,
+                "duration": sample_result.duration,
+                "vocal_language": sample_result.language or sample_language or "unknown",
+                "instrumental": sample_result.instrumental,
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"create_sample error: {str(e)}")
+
+    @app.post("/format_lyrics")
+    async def format_lyrics_endpoint(request: Request, _: None = Depends(verify_api_key)):
+        """
+        Format and enhance lyrics/caption via LLM.
+
+        Takes user-provided caption and lyrics, and uses the LLM to enhance them
+        with proper structure and metadata.
+        """
+        content_type = (request.headers.get("content-type") or "").lower()
+
+        if "json" in content_type:
+            body = await request.json()
+        else:
+            form = await request.form()
+            body = {k: v for k, v in form.items()}
+
+        llm: LLMHandler = app.state.llm_handler
+
+        # Initialize LLM if needed
+        with app.state._llm_init_lock:
+            if not getattr(app.state, "_llm_initialized", False):
+                if getattr(app.state, "_llm_init_error", None):
+                    raise HTTPException(status_code=500, detail=f"LLM init failed: {app.state._llm_init_error}")
+
+                project_root = _get_project_root()
+                checkpoint_dir = os.path.join(project_root, "checkpoints")
+                lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B").strip()
+                backend = os.getenv("ACESTEP_LM_BACKEND", "vllm").strip().lower()
+                if backend not in {"vllm", "pt"}:
+                    backend = "vllm"
+
+                lm_device = os.getenv("ACESTEP_LM_DEVICE", os.getenv("ACESTEP_DEVICE", "auto"))
+                lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
+
+                h: AceStepHandler = app.state.handler
+                status, ok = llm.initialize(
+                    checkpoint_dir=checkpoint_dir,
+                    lm_model_path=lm_model_path,
+                    backend=backend,
+                    device=lm_device,
+                    offload_to_cpu=lm_offload,
+                    dtype=h.dtype,
+                )
+                if not ok:
+                    app.state._llm_init_error = status
+                    raise HTTPException(status_code=500, detail=f"LLM init failed: {status}")
+                app.state._llm_initialized = True
+
+        # Parse parameters
+        prompt = body.get("prompt", "") or ""
+        lyrics = body.get("lyrics", "") or ""
+        temperature = _to_float(body.get("temperature"), 0.85)
+
+        # Parse param_obj if provided
+        param_obj_str = body.get("param_obj", "{}")
+        if isinstance(param_obj_str, dict):
+            param_obj = param_obj_str
+        else:
+            try:
+                param_obj = json.loads(param_obj_str) if param_obj_str else {}
+            except json.JSONDecodeError:
+                param_obj = {}
+
+        # Extract metadata from param_obj
+        duration = _to_float(param_obj.get("duration"))
+        bpm = _to_int(param_obj.get("bpm"))
+        key_scale = param_obj.get("key", "") or param_obj.get("key_scale", "") or ""
+        time_signature = param_obj.get("time_signature", "") or body.get("time_signature", "") or ""
+        language = param_obj.get("language", "") or ""
+
+        # Build user_metadata for format_sample
+        user_metadata_for_format = {}
+        if bpm is not None:
+            user_metadata_for_format['bpm'] = bpm
+        if duration is not None and duration > 0:
+            user_metadata_for_format['duration'] = int(duration)
+        if key_scale:
+            user_metadata_for_format['keyscale'] = key_scale
+        if time_signature:
+            user_metadata_for_format['timesignature'] = time_signature
+        if language and language != "unknown":
+            user_metadata_for_format['language'] = language
+
+        # Call format_sample
+        try:
+            format_result = format_sample(
+                llm_handler=llm,
+                caption=prompt,
+                lyrics=lyrics,
+                user_metadata=user_metadata_for_format if user_metadata_for_format else None,
+                temperature=temperature,
+                use_constrained_decoding=True,
+            )
+
+            if not format_result.success:
+                error_msg = format_result.error or format_result.status_message
+                raise HTTPException(status_code=500, detail=f"format_sample failed: {error_msg}")
+
+            # Use formatted results or fallback to original
+            result_caption = format_result.caption or prompt
+            result_lyrics = format_result.lyrics or lyrics
+            result_duration = format_result.duration or duration
+            result_bpm = format_result.bpm or bpm
+            result_key_scale = format_result.keyscale or key_scale
+            result_time_signature = format_result.timesignature or time_signature
+
+            return {
+                "caption": result_caption,
+                "lyrics": result_lyrics,
+                "bpm": result_bpm,
+                "key_scale": result_key_scale,
+                "time_signature": result_time_signature,
+                "duration": result_duration,
+                "vocal_language": format_result.language or language or "unknown",
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"format_sample error: {str(e)}")
+
     @app.get("/v1/audio")
-    async def get_audio(path: str):
+    async def get_audio(path: str, _: None = Depends(verify_api_key)):
         """Serve audio file by path."""
         from fastapi.responses import FileResponse
 
@@ -1710,7 +1962,17 @@ def main() -> None:
         default=int(os.getenv("ACESTEP_API_PORT", "8001")),
         help="Bind port (default from ACESTEP_API_PORT or 8001)",
     )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=os.getenv("ACESTEP_API_KEY", None),
+        help="API key for authentication (default from ACESTEP_API_KEY)",
+    )
     args = parser.parse_args()
+
+    # Set API key from command line argument
+    if args.api_key:
+        os.environ["ACESTEP_API_KEY"] = args.api_key
 
     # IMPORTANT: in-memory queue/store -> workers MUST be 1
     uvicorn.run(
