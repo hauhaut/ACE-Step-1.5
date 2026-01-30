@@ -5,12 +5,12 @@
 # Requirements: curl, jq
 #
 # Usage:
-#   ./acemusic.sh generate "Music description" [options]
-#   ./acemusic.sh random [--no-thinking]
-#   ./acemusic.sh status <job_id>
-#   ./acemusic.sh models
-#   ./acemusic.sh health
-#   ./acemusic.sh config [--get|--set|--reset]
+#   ./acestep.sh generate "Music description" [options]
+#   ./acestep.sh random [--no-thinking]
+#   ./acestep.sh status <job_id>
+#   ./acestep.sh models
+#   ./acestep.sh health
+#   ./acestep.sh config [--get|--set|--reset]
 #
 # Output:
 #   - Results saved to output/<job_id>.json
@@ -25,7 +25,7 @@ export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/config.json"
 # Output dir at same level as .claude (go up 4 levels from scripts/)
-OUTPUT_DIR="$(cd "${SCRIPT_DIR}/../../../.." && pwd)/acemusic_output"
+OUTPUT_DIR="$(cd "${SCRIPT_DIR}/../../../.." && pwd)/acestep_output"
 DEFAULT_API_URL="http://127.0.0.1:8001"
 
 # Colors
@@ -71,6 +71,7 @@ ensure_output_dir() {
 # Default config
 DEFAULT_CONFIG='{
   "api_url": "http://127.0.0.1:8001",
+  "api_key": "",
   "generation": {
     "thinking": true,
     "use_format": true,
@@ -139,12 +140,26 @@ load_api_url() {
     echo "${url:-$DEFAULT_API_URL}"
 }
 
+# Load API Key
+load_api_key() {
+    local key=$(get_config "api_key")
+    echo "${key:-}"
+}
+
 # Check API health
 check_health() {
     local url="$1"
     local status
     status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "${url}/health" 2>/dev/null) || true
     [ "$status" = "200" ]
+}
+
+# Build auth header
+build_auth_header() {
+    local api_key=$(load_api_key)
+    if [ -n "$api_key" ]; then
+        echo "-H \"Authorization: Bearer ${api_key}\""
+    fi
 }
 
 # Prompt for URL
@@ -266,10 +281,15 @@ cmd_config() {
 cmd_models() {
     check_deps
     local api_url=$(ensure_connection)
+    local api_key=$(load_api_key)
 
     echo "Available Models:"
     echo "----------------------------------------"
-    curl -s "${api_url}/v1/models"
+    if [ -n "$api_key" ]; then
+        curl -s -H "Authorization: Bearer ${api_key}" "${api_url}/v1/models"
+    else
+        curl -s "${api_url}/v1/models"
+    fi
     echo ""
 }
 
@@ -277,12 +297,20 @@ cmd_models() {
 query_job_result() {
     local api_url="$1"
     local job_id="$2"
+    local api_key=$(load_api_key)
 
     local payload=$(jq -n --arg id "$job_id" '{"task_id_list": [$id]}')
 
-    curl -s -X POST "${api_url}/query_result" \
-        -H "Content-Type: application/json; charset=utf-8" \
-        -d "$payload"
+    if [ -n "$api_key" ]; then
+        curl -s -X POST "${api_url}/query_result" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -H "Authorization: Bearer ${api_key}" \
+            -d "$payload"
+    else
+        curl -s -X POST "${api_url}/query_result" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -d "$payload"
+    fi
 }
 
 # Parse query_result response to extract status (0=processing, 1=success, 2=failed)
@@ -361,6 +389,7 @@ download_audios() {
     local api_url="$1"
     local job_id="$2"
     local result="$3"
+    local api_key=$(load_api_key)
 
     ensure_output_dir
 
@@ -374,7 +403,13 @@ download_audios() {
             local download_url="${api_url}${audio_path}"
 
             echo -e "  ${CYAN}Downloading audio $count...${NC}"
-            if curl -s -o "$output_file" "$download_url"; then
+            if [ -n "$api_key" ]; then
+                curl -s -o "$output_file" -H "Authorization: Bearer ${api_key}" "$download_url"
+            else
+                curl -s -o "$output_file" "$download_url"
+            fi
+
+            if [ -f "$output_file" ]; then
                 echo -e "  ${GREEN}Saved: $output_file${NC}"
             else
                 echo -e "  ${RED}Failed to download: $download_url${NC}"
@@ -555,9 +590,18 @@ cmd_generate() {
     local temp_payload=$(mktemp)
     printf '%s' "$payload" > "$temp_payload"
 
-    local response=$(curl -s -X POST "${api_url}/release_task" \
-        -H "Content-Type: application/json; charset=utf-8" \
-        --data-binary "@${temp_payload}")
+    local api_key=$(load_api_key)
+    local response
+    if [ -n "$api_key" ]; then
+        response=$(curl -s -X POST "${api_url}/release_task" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -H "Authorization: Bearer ${api_key}" \
+            --data-binary "@${temp_payload}")
+    else
+        response=$(curl -s -X POST "${api_url}/release_task" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            --data-binary "@${temp_payload}")
+    fi
 
     rm -f "$temp_payload"
 
@@ -609,9 +653,18 @@ cmd_random() {
     local temp_payload=$(mktemp)
     printf '%s' "$payload" > "$temp_payload"
 
-    local response=$(curl -s -X POST "${api_url}/release_task" \
-        -H "Content-Type: application/json; charset=utf-8" \
-        --data-binary "@${temp_payload}")
+    local api_key=$(load_api_key)
+    local response
+    if [ -n "$api_key" ]; then
+        response=$(curl -s -X POST "${api_url}/release_task" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -H "Authorization: Bearer ${api_key}" \
+            --data-binary "@${temp_payload}")
+    else
+        response=$(curl -s -X POST "${api_url}/release_task" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            --data-binary "@${temp_payload}")
+    fi
 
     rm -f "$temp_payload"
 
