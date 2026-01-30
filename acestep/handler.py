@@ -155,9 +155,9 @@ class AceStepHandler:
             return "❌ PEFT library not installed. Please install with: pip install peft"
         
         try:
+            import copy
             # Backup base decoder if not already backed up
             if self._base_decoder is None:
-                import copy
                 self._base_decoder = copy.deepcopy(self.model.decoder)
                 logger.info("Base decoder backed up")
             else:
