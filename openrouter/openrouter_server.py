@@ -58,6 +58,8 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
+    # OpenRouter 多模态参数
+    modalities: Optional[List[str]] = None
     # Music params
     lyrics: Optional[str] = None
     bpm: Optional[int] = Field(None, ge=30, le=300)
@@ -108,6 +110,7 @@ class ModelInfo(BaseModel):
     output_modalities: List[str]
     context_length: int
     pricing: Dict[str, str]
+    supported_sampling_parameters: Optional[List[str]] = None
 
 
 class ModelsResponse(BaseModel):
@@ -185,14 +188,20 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # =============================================================================
 
 def tensor_to_base64(tensor: torch.Tensor, sr: int = 48000) -> str:
+    """将音频张量转换为 base64 编码的字符串
+    
+    注意：MP3 格式需要使用临时文件，因为 torchaudio 的 ffmpeg 后端不支持 BytesIO
+    """
     if tensor.device.type != "cpu":
         tensor = tensor.cpu()
     if tensor.dim() == 1:
         tensor = tensor.unsqueeze(0)
-    buf = io.BytesIO()
-    torchaudio.save(buf, tensor, sr, format="mp3")
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode()
+    
+    # 使用临时文件保存 MP3，然后读取并编码
+    with tempfile.NamedTemporaryFile(suffix=".mp3") as tmp_file:
+        torchaudio.save(tmp_file.name, tensor, sr, format="mp3")
+        with open(tmp_file.name, "rb") as f:
+            return base64.b64encode(f.read()).decode()
 
 
 async def run_gen(params, config, save_dir):
@@ -217,7 +226,8 @@ async def list_models():
         input_modalities=["text"],
         output_modalities=["audio"],
         context_length=4096,
-        pricing={"prompt": "0", "completion": "0", "request": PRICE_PER_REQUEST},
+        pricing={"prompt": "0.000005", "completion": "0.02", "request": PRICE_PER_REQUEST},
+        supported_sampling_parameters=["temperature", "top_p"],
     )])
 
 
@@ -229,15 +239,28 @@ async def chat_completions(req: ChatRequest):
     if req.model != MODEL_ID:
         raise HTTPException(400, f"Model not found: {req.model}")
     
-    if semaphore.locked():
-        raise HTTPException(429, "Server at capacity", headers={"Retry-After": "30"})
+    # 检查 modalities 参数，确保包含 "audio" 或为空
+    if req.modalities is not None and "audio" not in req.modalities:
+        raise HTTPException(400, "This model only supports 'audio' modality")
     
-    async with semaphore:
+    # 尝试非阻塞方式获取信号量
+    acquired = False
+    try:
+        # 使用 acquire_nowait() 避免竞争条件
+        acquired = semaphore.acquire_nowait()
+        if not acquired:
+            raise HTTPException(429, "Server at capacity", headers={"Retry-After": "30"})
+        
         # Get prompt
         user_msgs = [m for m in req.messages if m.role == "user"]
         if not user_msgs:
             raise HTTPException(400, "No user message")
         caption = user_msgs[-1].content
+        
+        # 修复 duration 默认值处理，避免 0 被当作 False
+        duration = -1.0
+        if req.duration is not None:
+            duration = req.duration
         
         # Build params
         params = GenerationParams(
@@ -246,7 +269,7 @@ async def chat_completions(req: ChatRequest):
             lyrics=req.lyrics or ("[Instrumental]" if req.instrumental else ""),
             instrumental=req.instrumental or False,
             bpm=req.bpm,
-            duration=req.duration or -1.0,
+            duration=duration,
             seed=req.seed if req.seed is not None else -1,
         )
         config = GenerationConfig(batch_size=1, audio_format="mp3")
@@ -281,6 +304,10 @@ async def chat_completions(req: ChatRequest):
                 )],
                 usage=Usage(),
             )
+    finally:
+        # 确保在函数退出时释放信号量
+        if acquired:
+            semaphore.release()
 
 
 @app.get("/health")

@@ -28,7 +28,11 @@ def test_models(url: str) -> bool:
         print(f"✅ Found {len(data['data'])} model(s)")
         for m in data["data"]:
             print(f"   - {m['id']}: {m['name']}")
-            print(f"     Pricing: ${m['pricing']['request']}/request")
+            print(f"     Description: {m['description']}")
+            print(f"     Modalities: Input {m['input_modalities']}, Output {m['output_modalities']}")
+            print(f"     Pricing: ${m['pricing']['prompt']}/token (prompt), ${m['pricing']['completion']}/token (completion), ${m['pricing']['request']}/request")
+            if m.get('supported_sampling_parameters'):
+                print(f"     Sampling Parameters: {', '.join(m['supported_sampling_parameters'])}")
         return True
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -43,6 +47,7 @@ def test_completion(url: str, prompt: str, output_file: str = "output.mp3") -> b
     payload = {
         "model": "acestep/music-gen-v1",
         "messages": [{"role": "user", "content": prompt}],
+        "modalities": ["audio"],  # 指定输出模态为音频
         "duration": 30,  # Short for testing
     }
     
