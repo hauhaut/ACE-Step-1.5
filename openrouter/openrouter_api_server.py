@@ -24,12 +24,17 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Load .env file from project root
+from dotenv import load_dotenv
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(_project_root, ".env"))
+
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from acestep.handler import AceStepHandler
 from acestep.llm_inference import LLMHandler
@@ -174,34 +179,105 @@ def _env_bool(name: str, default: bool) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _extract_prompt_and_lyrics(messages: List[ChatMessage]) -> tuple[str, str]:
+import re
+
+
+def _looks_like_lyrics(text: str) -> bool:
     """
-    Extract prompt (caption) and lyrics from messages.
-    
-    Simple parsing:
-    - Last user message content is used as the prompt
-    - If content contains [lyrics]...[/lyrics], extract lyrics separately
+    Heuristic to detect if text looks like song lyrics.
+    """
+    if not text:
+        return False
+
+    # Check for common lyrics markers
+    lyrics_markers = [
+        "[verse", "[chorus", "[bridge", "[intro", "[outro",
+        "[hook", "[pre-chorus", "[refrain", "[inst",
+    ]
+    text_lower = text.lower()
+    for marker in lyrics_markers:
+        if marker in text_lower:
+            return True
+
+    # Check line structure (lyrics tend to have many short lines)
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if len(lines) >= 4:
+        avg_line_length = sum(len(l) for l in lines) / len(lines)
+        if avg_line_length < 60:
+            return True
+
+    return False
+
+
+def _extract_tagged_content(text: str) -> tuple[str, str, str]:
+    """
+    Extract content from <prompt> and <lyrics> tags.
+
+    Returns:
+        (prompt, lyrics, remaining_text)
+    """
+    prompt = None
+    lyrics = None
+    remaining = text
+
+    # Extract <prompt>...</prompt>
+    prompt_match = re.search(r'<prompt>(.*?)</prompt>', text, re.DOTALL | re.IGNORECASE)
+    if prompt_match:
+        prompt = prompt_match.group(1).strip()
+        remaining = remaining.replace(prompt_match.group(0), '').strip()
+
+    # Extract <lyrics>...</lyrics>
+    lyrics_match = re.search(r'<lyrics>(.*?)</lyrics>', text, re.DOTALL | re.IGNORECASE)
+    if lyrics_match:
+        lyrics = lyrics_match.group(1).strip()
+        remaining = remaining.replace(lyrics_match.group(0), '').strip()
+
+    return prompt, lyrics, remaining
+
+
+def _extract_prompt_and_lyrics(messages: List[ChatMessage]) -> tuple[str, str, str]:
+    """
+    Extract prompt (caption), lyrics, and sample_query from messages.
+
+    Processing logic:
+    1. If <prompt> and/or <lyrics> tags present: extract tagged content
+    2. If no tags: use heuristic detection
+       - If text looks like lyrics -> set as lyrics
+       - If text doesn't look like lyrics -> set as sample_query (for LLM sample mode)
+
+    Returns:
+        (prompt, lyrics, sample_query)
     """
     prompt = ""
     lyrics = ""
-    
+    sample_query = ""
+
     # Get the last user message
     for msg in reversed(messages):
         if msg.role == "user" and msg.content:
             content = msg.content.strip()
-            
-            # Check for [lyrics] tag
-            lyrics_start = content.lower().find("[lyrics]")
-            lyrics_end = content.lower().find("[/lyrics]")
-            
-            if lyrics_start != -1 and lyrics_end != -1:
-                lyrics = content[lyrics_start + 8:lyrics_end].strip()
-                prompt = (content[:lyrics_start] + content[lyrics_end + 9:]).strip()
+
+            # Try to extract tagged content first
+            tagged_prompt, tagged_lyrics, remaining = _extract_tagged_content(content)
+
+            if tagged_prompt is not None or tagged_lyrics is not None:
+                # Tags found - use tagged content
+                prompt = tagged_prompt or ""
+                lyrics = tagged_lyrics or ""
+                # If there's remaining text and no prompt, use remaining as prompt
+                if remaining and not prompt:
+                    prompt = remaining
             else:
-                prompt = content
+                # No tags - use heuristic detection
+                if _looks_like_lyrics(content):
+                    # Looks like lyrics
+                    lyrics = content
+                else:
+                    # Doesn't look like lyrics - use as sample_query for LLM
+                    sample_query = content
             break
-    
-    return prompt, lyrics
+
+    return prompt, lyrics, sample_query
 
 
 def _read_audio_as_base64(file_path: str) -> str:
@@ -224,83 +300,88 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Application lifespan: initialize and cleanup resources."""
-        
+
         # Setup cache directories
         project_root = _get_project_root()
         cache_root = os.path.join(project_root, ".cache", "openrouter")
         tmp_root = os.path.join(cache_root, "tmp")
-        
+
         for p in [cache_root, tmp_root]:
             os.makedirs(p, exist_ok=True)
-        
+
         # Initialize handlers
         handler = AceStepHandler()
         llm_handler = LLMHandler()
-        
+
         app.state.handler = handler
         app.state.llm_handler = llm_handler
         app.state._initialized = False
         app.state._init_error = None
-        app.state._init_lock = asyncio.Lock()
         app.state._llm_initialized = False
         app.state.temp_audio_dir = tmp_root
-        
+
         # Thread pool for blocking operations
         executor = ThreadPoolExecutor(max_workers=1)
         app.state.executor = executor
-        
-        async def _ensure_initialized() -> None:
-            """Lazy initialization of models."""
-            if app.state._initialized:
-                return
-            if app.state._init_error:
-                raise RuntimeError(app.state._init_error)
-            
-            async with app.state._init_lock:
-                if app.state._initialized:
-                    return
-                if app.state._init_error:
-                    raise RuntimeError(app.state._init_error)
-                
-                # Initialize DiT model
-                config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
-                device = os.getenv("ACESTEP_DEVICE", "auto")
-                use_flash_attention = _env_bool("ACESTEP_USE_FLASH_ATTENTION", True)
-                offload_to_cpu = _env_bool("ACESTEP_OFFLOAD_TO_CPU", False)
-                
-                status_msg, ok = handler.initialize_service(
-                    project_root=project_root,
-                    config_path=config_path,
-                    device=device,
-                    use_flash_attention=use_flash_attention,
-                    compile_model=False,
-                    offload_to_cpu=offload_to_cpu,
-                )
-                
-                if not ok:
-                    app.state._init_error = status_msg
-                    raise RuntimeError(status_msg)
-                
-                app.state._initialized = True
-                
-                # Initialize LLM (optional, for thinking mode)
-                try:
-                    checkpoint_dir = os.path.join(project_root, "checkpoints")
-                    lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B")
-                    backend = os.getenv("ACESTEP_LM_BACKEND", "vllm")
-                    
-                    lm_status, lm_ok = llm_handler.initialize(
-                        checkpoint_dir=checkpoint_dir,
-                        lm_model_path=lm_model_path,
-                        backend=backend,
-                        device=device,
-                    )
-                    app.state._llm_initialized = lm_ok
-                except Exception:
-                    app.state._llm_initialized = False
-        
-        app.state._ensure_initialized = _ensure_initialized
-        
+
+        # =================================================================
+        # Initialize models at startup
+        # =================================================================
+        print("[OpenRouter API] Initializing models at startup...")
+
+        config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
+        device = os.getenv("ACESTEP_DEVICE", "auto")
+        use_flash_attention = _env_bool("ACESTEP_USE_FLASH_ATTENTION", True)
+        offload_to_cpu = _env_bool("ACESTEP_OFFLOAD_TO_CPU", False)
+        offload_dit_to_cpu = _env_bool("ACESTEP_OFFLOAD_DIT_TO_CPU", False)
+
+        # Initialize DiT model
+        print(f"[OpenRouter API] Loading DiT model: {config_path}")
+        status_msg, ok = handler.initialize_service(
+            project_root=project_root,
+            config_path=config_path,
+            device=device,
+            use_flash_attention=use_flash_attention,
+            compile_model=False,
+            offload_to_cpu=offload_to_cpu,
+            offload_dit_to_cpu=offload_dit_to_cpu,
+        )
+
+        if not ok:
+            app.state._init_error = status_msg
+            print(f"[OpenRouter API] ERROR: DiT model failed: {status_msg}")
+            raise RuntimeError(status_msg)
+
+        app.state._initialized = True
+        print(f"[OpenRouter API] DiT model loaded successfully")
+
+        # Initialize LLM
+        print("[OpenRouter API] Loading LLM model...")
+        checkpoint_dir = os.path.join(project_root, "checkpoints")
+        lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B")
+        backend = os.getenv("ACESTEP_LM_BACKEND", "vllm")
+        lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
+
+        try:
+            lm_status, lm_ok = llm_handler.initialize(
+                checkpoint_dir=checkpoint_dir,
+                lm_model_path=lm_model_path,
+                backend=backend,
+                device=device,
+                offload_to_cpu=lm_offload,
+                dtype=handler.dtype,
+            )
+            app.state._llm_initialized = lm_ok
+            if lm_ok:
+                print(f"[OpenRouter API] LLM model loaded: {lm_model_path}")
+            else:
+                print(f"[OpenRouter API] Warning: LLM failed: {lm_status}")
+        except Exception as e:
+            app.state._llm_initialized = False
+            print(f"[OpenRouter API] Warning: LLM init error: {e}")
+
+        print("[OpenRouter API] All models initialized!")
+
         try:
             yield
         finally:
@@ -347,27 +428,57 @@ def create_app() -> FastAPI:
     ) -> ChatCompletionResponse:
         """
         Generate music from text prompt (OpenAI Chat Completions format).
-        
-        The last user message is used as the music description (caption).
-        Optionally include lyrics using [lyrics]...[/lyrics] tags.
+
+        Input processing:
+        - With tags: use <prompt>...</prompt> and <lyrics>...</lyrics>
+        - Without tags: heuristic detection (lyrics vs sample_query for LLM)
         """
-        await app.state._ensure_initialized()
-        
-        # Extract prompt and lyrics from messages
-        prompt, lyrics_from_msg = _extract_prompt_and_lyrics(request.messages)
+        # Check if model is initialized
+        if not app.state._initialized:
+            raise HTTPException(status_code=503, detail="Model not initialized")
+
+        # Extract prompt, lyrics, and sample_query from messages
+        prompt, lyrics_from_msg, sample_query = _extract_prompt_and_lyrics(request.messages)
         lyrics = request.lyrics or lyrics_from_msg
-        
-        if not prompt:
-            raise HTTPException(status_code=400, detail="No prompt provided in messages")
+
+        # Validate input
+        if not prompt and not lyrics and not sample_query:
+            raise HTTPException(status_code=400, detail="No input provided in messages")
         
         # Determine if instrumental
         instrumental = request.instrumental or not lyrics
-        
+
         def _blocking_generate() -> Dict[str, Any]:
             """Run music generation in thread pool."""
+            nonlocal prompt, lyrics, instrumental
+
             h: AceStepHandler = app.state.handler
             llm = app.state.llm_handler if app.state._llm_initialized else None
-            
+
+            # Handle sample_query mode - use LLM to generate prompt and lyrics
+            if sample_query and llm:
+                try:
+                    sample_result, status_msg = llm.create_sample_from_query(
+                        query=sample_query,
+                        instrumental=instrumental,
+                        vocal_language=request.vocal_language,
+                        temperature=request.temperature,
+                        top_p=request.top_p,
+                    )
+                    if sample_result:
+                        prompt = sample_result.get("caption", "") or prompt
+                        lyrics = sample_result.get("lyrics", "") or lyrics
+                        instrumental = sample_result.get("instrumental", instrumental)
+                        print(f"[OpenRouter API] Sample mode: {status_msg}")
+                except Exception as e:
+                    print(f"[OpenRouter API] Warning: create_sample_from_query failed: {e}")
+                    # Fall back to using sample_query as prompt
+                    if not prompt:
+                        prompt = sample_query
+
+            # Default timesteps for turbo model (8 steps)
+            default_timesteps = [0.97, 0.76, 0.615, 0.5, 0.395, 0.28, 0.18, 0.085, 0.0]
+
             # Build generation parameters
             params = GenerationParams(
                 task_type="text2music",
@@ -381,9 +492,10 @@ def create_app() -> FastAPI:
                 guidance_scale=7.0,
                 lm_temperature=request.temperature,
                 lm_top_p=request.top_p,
-                thinking=False,  # Simple mode, no LLM thinking
+                thinking=False,
                 use_cot_caption=False,
                 use_cot_language=False,
+                timesteps=default_timesteps,
             )
             
             config = GenerationConfig(
