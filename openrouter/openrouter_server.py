@@ -24,6 +24,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from pydantic import BaseModel, Field
 
+import sys
+# Add project root to path
+
+# 添加项目父目录到 sys.path
+project_root = os.path.abspath(os.path.dirname(__file__))
+parent_dir = os.path.dirname(project_root)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 from acestep.inference import GenerationConfig, GenerationParams, generate_music
 from contextlib import asynccontextmanager
 
@@ -34,9 +45,9 @@ from acestep.llm_inference import LLMHandler
 # Config
 # =============================================================================
 
-MODEL_ID = "acestep/music-gen-v1"
-MODEL_NAME = "ACE-Step Music Generator"
-PRICE_PER_REQUEST = "0.05"  # USD
+MODEL_ID = "acemusic/acestep-v1.5"
+MODEL_NAME = "ACE-Step Music Generator v1.5"
+PRICE_PER_REQUEST = 0 # USD
 MAX_CONCURRENT = 4
 TIMEOUT = 300
 
@@ -117,7 +128,7 @@ class ModelsResponse(BaseModel):
 
 
 def _get_project_root() -> str:
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return parent_dir
 
 
 @asynccontextmanager
