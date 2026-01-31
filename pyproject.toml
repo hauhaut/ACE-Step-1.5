@@ -65,6 +65,7 @@ torchaudio = [
 [project.scripts]
 acestep = "acestep.acestep_v15_pipeline:main"
 acestep-api = "acestep.api_server:main"
+acestep-download = "acestep.model_downloader:main"
 
 [build-system]
 requires = ["hatchling"]
