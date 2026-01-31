@@ -120,6 +120,10 @@ API runs at http://localhost:8001. See [API Documentation](./docs/en/API.md) for
 | `--config_path` | auto | DiT model (e.g., `acestep-v15-turbo`, `acestep-v15-turbo-shift3`) |
 | `--lm_model_path` | auto | LM model (e.g., `acestep-5Hz-lm-0.6B`, `acestep-5Hz-lm-1.7B`) |
 | `--offload_to_cpu` | auto | CPU offload (auto-enabled if VRAM < 16GB) |
+| `--enable-api` | false | Enable REST API endpoints alongside Gradio UI |
+| `--api-key` | none | API key for API endpoints authentication |
+| `--auth-username` | none | Username for Gradio authentication |
+| `--auth-password` | none | Password for Gradio authentication |
 
 **Examples:**
 
@@ -129,6 +133,12 @@ uv run acestep --server-name 0.0.0.0 --share --language zh
 
 # Pre-initialize models on startup
 uv run acestep --init_service true --config_path acestep-v15-turbo
+
+# Enable API endpoints with authentication
+uv run acestep --enable-api --api-key sk-your-secret-key --port 8001
+
+# Enable both Gradio auth and API auth
+uv run acestep --enable-api --api-key sk-123456 --auth-username admin --auth-password password
 ```
 
 ### Development
