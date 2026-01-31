@@ -285,19 +285,22 @@ class DatasetBuilder:
         dit_handler,
         llm_handler,
         format_lyrics: bool = False,
+        transcribe_lyrics: bool = False,
         progress_callback=None,
     ) -> Tuple[AudioSample, str]:
         """Label a single sample using the LLM.
 
-        If the sample has lyrics loaded from a .txt file:
-        - If format_lyrics=False: Keep original lyrics as-is
-        - If format_lyrics=True: Use LLM to format/structure the lyrics
+        Lyrics handling modes:
+        - format_lyrics=True: Use LLM to format/structure user-provided lyrics from .txt file
+        - transcribe_lyrics=True: Use LLM to transcribe lyrics from audio (ignores .txt file)
+        - Both False: Keep original lyrics as-is (from .txt file or "[Instrumental]")
 
         Args:
             sample_idx: Index of sample to label
             dit_handler: DiT handler for audio encoding
             llm_handler: LLM handler for caption generation
             format_lyrics: If True, use LLM to format user-provided lyrics
+            transcribe_lyrics: If True, use LLM to transcribe lyrics from audio
             progress_callback: Optional callback for progress updates
 
         Returns:
@@ -324,46 +327,76 @@ class DatasetBuilder:
             if progress_callback:
                 progress_callback(f"Generating metadata for: {sample.filename}")
 
-            # Step 2: Use LLM to understand the audio
-            metadata, status = llm_handler.understand_audio_from_codes(
-                audio_codes=audio_codes,
-                temperature=0.7,
-                use_constrained_decoding=True,
-            )
+            # Step 2: Use LLM based on mode
+            if format_lyrics and has_preloaded_lyrics:
+                # Format mode: Use format_sample to format user-provided lyrics
+                from acestep.inference import format_sample
 
-            if not metadata:
-                return sample, f"❌ LLM labeling failed: {status}"
+                result = format_sample(
+                    llm_handler=llm_handler,
+                    caption="",  # Let LLM generate caption
+                    lyrics=sample.raw_lyrics,  # Pass user's raw lyrics
+                    user_metadata=None,
+                    temperature=0.85,
+                    use_constrained_decoding=True,
+                )
 
-            # Step 3: Update sample with generated metadata
-            sample.caption = metadata.get('caption', '')
-            sample.bpm = self._parse_int(metadata.get('bpm'))
-            sample.keyscale = metadata.get('keyscale', '')
-            sample.timesignature = metadata.get('timesignature', '')
-            sample.language = metadata.get('vocal_language', 'unknown')
+                if not result.success:
+                    return sample, f"❌ LLM format failed: {result.error}"
 
-            # Store LLM-generated lyrics as formatted_lyrics (always)
-            llm_lyrics = metadata.get('lyrics', '')
+                # Update sample with formatted results
+                sample.caption = result.caption or ""
+                sample.bpm = result.bpm
+                sample.keyscale = result.keyscale or ""
+                sample.timesignature = result.timesignature or ""
+                sample.language = result.language or "unknown"
+                sample.formatted_lyrics = result.lyrics or ""
+                sample.lyrics = sample.formatted_lyrics if sample.formatted_lyrics else sample.raw_lyrics
 
-            # Handle lyrics based on instrumental flag and settings
-            if sample.is_instrumental:
-                sample.lyrics = "[Instrumental]"
-                sample.language = "unknown"
-                sample.formatted_lyrics = ""
-            elif has_preloaded_lyrics:
-                if format_lyrics:
-                    # Use LLM-generated/formatted lyrics
+                status_suffix = "(lyrics formatted by LM)"
+
+            else:
+                # Understand mode: Use understand_audio_from_codes to get metadata and optionally transcribe lyrics
+                metadata, status = llm_handler.understand_audio_from_codes(
+                    audio_codes=audio_codes,
+                    temperature=0.7,
+                    use_constrained_decoding=True,
+                )
+
+                if not metadata:
+                    return sample, f"❌ LLM labeling failed: {status}"
+
+                # Update sample with generated metadata
+                sample.caption = metadata.get('caption', '')
+                sample.bpm = self._parse_int(metadata.get('bpm'))
+                sample.keyscale = metadata.get('keyscale', '')
+                sample.timesignature = metadata.get('timesignature', '')
+                sample.language = metadata.get('vocal_language', 'unknown')
+
+                # LLM-generated/transcribed lyrics
+                llm_lyrics = metadata.get('lyrics', '')
+
+                # Handle lyrics based on mode
+                if sample.is_instrumental:
+                    sample.lyrics = "[Instrumental]"
+                    sample.language = "unknown"
+                    sample.formatted_lyrics = ""
+                    status_suffix = "(instrumental)"
+                elif transcribe_lyrics:
+                    # Transcribe mode: Use LLM-generated lyrics, ignore user's .txt file
                     sample.formatted_lyrics = llm_lyrics
-                    sample.lyrics = llm_lyrics if llm_lyrics else sample.raw_lyrics
-                    logger.info(f"Formatted lyrics for {sample.filename}")
-                else:
-                    # Keep the pre-loaded raw lyrics
+                    sample.lyrics = llm_lyrics
+                    status_suffix = "(lyrics transcribed by LM)"
+                elif has_preloaded_lyrics:
+                    # Keep raw lyrics from .txt file
                     sample.lyrics = sample.raw_lyrics
                     sample.formatted_lyrics = ""
-                    logger.info(f"Using raw lyrics for {sample.filename}")
-            else:
-                # No pre-loaded lyrics, use LLM-generated lyrics
-                sample.lyrics = llm_lyrics
-                sample.formatted_lyrics = llm_lyrics
+                    status_suffix = "(using raw lyrics)"
+                else:
+                    # No pre-loaded lyrics and not transcribing, use LLM lyrics
+                    sample.lyrics = llm_lyrics
+                    sample.formatted_lyrics = llm_lyrics
+                    status_suffix = ""
 
             # NOTE: Duration is NOT overwritten from LM metadata.
             # We keep the real audio duration obtained from torchaudio during scan.
@@ -372,11 +405,8 @@ class DatasetBuilder:
             self.samples[sample_idx] = sample
 
             status_msg = f"✅ Labeled: {sample.filename}"
-            if has_preloaded_lyrics:
-                if format_lyrics:
-                    status_msg += " (lyrics formatted by LM)"
-                else:
-                    status_msg += " (using raw lyrics)"
+            if status_suffix:
+                status_msg += f" {status_suffix}"
 
             return sample, status_msg
 
@@ -389,6 +419,7 @@ class DatasetBuilder:
         dit_handler,
         llm_handler,
         format_lyrics: bool = False,
+        transcribe_lyrics: bool = False,
         progress_callback=None,
     ) -> Tuple[List[AudioSample], str]:
         """Label all samples in the dataset.
@@ -397,6 +428,7 @@ class DatasetBuilder:
             dit_handler: DiT handler for audio encoding
             llm_handler: LLM handler for caption generation
             format_lyrics: If True, use LLM to format user-provided lyrics
+            transcribe_lyrics: If True, use LLM to transcribe lyrics from audio
             progress_callback: Optional callback for progress updates
 
         Returns:
@@ -412,7 +444,9 @@ class DatasetBuilder:
             if progress_callback:
                 progress_callback(f"Labeling {i+1}/{len(self.samples)}: {sample.filename}")
 
-            _, status = self.label_sample(i, dit_handler, llm_handler, format_lyrics, progress_callback)
+            _, status = self.label_sample(
+                i, dit_handler, llm_handler, format_lyrics, transcribe_lyrics, progress_callback
+            )
 
             if "✅" in status:
                 success_count += 1
@@ -605,16 +639,25 @@ class DatasetBuilder:
     
     def get_samples_dataframe_data(self) -> List[List[Any]]:
         """Get samples data in a format suitable for Gradio DataFrame.
-        
+
         Returns:
             List of rows for DataFrame display
         """
         rows = []
         for i, sample in enumerate(self.samples):
+            # Determine lyrics status
+            if sample.has_raw_lyrics():
+                lyrics_status = "📝"  # Has lyrics from .txt file
+            elif sample.is_instrumental:
+                lyrics_status = "🎵"  # Instrumental
+            else:
+                lyrics_status = "-"  # No lyrics
+
             rows.append([
                 i,
                 sample.filename,
                 f"{sample.duration:.1f}s",
+                lyrics_status,
                 "✅" if sample.labeled else "❌",
                 sample.bpm or "-",
                 sample.keyscale or "-",

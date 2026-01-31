@@ -69,6 +69,7 @@ def auto_label_all(
     builder_state: Optional[DatasetBuilder],
     skip_metas: bool = False,
     format_lyrics: bool = False,
+    transcribe_lyrics: bool = False,
     progress=None,
 ) -> Tuple[List[List[Any]], str, DatasetBuilder]:
     """Auto-label all samples in the dataset.
@@ -79,6 +80,7 @@ def auto_label_all(
         builder_state: Dataset builder state
         skip_metas: If True, skip LLM labeling. BPM/Key/TimeSig = N/A, Language = unknown for instrumental
         format_lyrics: If True, use LLM to format user-provided lyrics from .txt files
+        transcribe_lyrics: If True, use LLM to transcribe lyrics from audio (ignores .txt files)
         progress: Progress callback
 
     Returns:
@@ -131,6 +133,7 @@ def auto_label_all(
         dit_handler=dit_handler,
         llm_handler=llm_handler,
         format_lyrics=format_lyrics,
+        transcribe_lyrics=transcribe_lyrics,
         progress_callback=progress_callback,
     )
 
@@ -161,10 +164,14 @@ def get_sample_preview(
     # Check if both raw and formatted lyrics exist
     has_both = sample.has_raw_lyrics() and sample.has_formatted_lyrics()
 
+    # Get caption with custom tag applied based on tag_position setting
+    tag_position = builder_state.metadata.tag_position if builder_state.metadata else "prepend"
+    full_caption = sample.get_full_caption(tag_position)
+
     return (
         sample.audio_path,
         sample.filename,
-        sample.caption,
+        full_caption,  # Use full caption with custom tag applied
         sample.lyrics,
         sample.bpm,
         sample.keyscale,

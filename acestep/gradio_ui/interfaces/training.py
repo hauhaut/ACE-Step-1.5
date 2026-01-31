@@ -81,8 +81,8 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                         
                         # Audio files table
                         audio_files_table = gr.Dataframe(
-                            headers=["#", "Filename", "Duration", "Labeled", "BPM", "Key", "Caption"],
-                            datatype=["number", "str", "str", "str", "str", "str", "str"],
+                            headers=["#", "Filename", "Duration", "Lyrics", "Labeled", "BPM", "Key", "Caption"],
+                            datatype=["number", "str", "str", "str", "str", "str", "str", "str"],
                             label="Found Audio Files",
                             interactive=False,
                             wrap=True,
@@ -109,11 +109,10 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                             info="Use LM to format/structure user-provided lyrics from .txt files",
                         )
 
-                        need_lyrics = gr.Checkbox(
-                            label="Transcribe Lyrics",
+                        transcribe_lyrics = gr.Checkbox(
+                            label="Transcribe Lyrics (LM)",
                             value=False,
-                            info="Attempt to transcribe lyrics (slower)",
-                            interactive=False,  # Disabled for now
+                            info="Use LM to transcribe lyrics from audio (ignores .txt files)",
                         )
                         
                         custom_tag = gr.Textbox(
@@ -524,7 +523,7 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
         "dataset_name": dataset_name,
         "all_instrumental": all_instrumental,
         "format_lyrics": format_lyrics,
-        "need_lyrics": need_lyrics,
+        "transcribe_lyrics": transcribe_lyrics,
         "custom_tag": custom_tag,
         "tag_position": tag_position,
         "skip_metas": skip_metas,

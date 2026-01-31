@@ -944,17 +944,33 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
     
     # Auto-label all samples
     training_section["auto_label_btn"].click(
-        fn=lambda state, skip, fmt_lyrics: train_h.auto_label_all(dit_handler, llm_handler, state, skip, fmt_lyrics),
+        fn=lambda state, skip, fmt_lyrics, trans_lyrics: train_h.auto_label_all(
+            dit_handler, llm_handler, state, skip, fmt_lyrics, trans_lyrics
+        ),
         inputs=[
             training_section["dataset_builder_state"],
             training_section["skip_metas"],
             training_section["format_lyrics"],
+            training_section["transcribe_lyrics"],
         ],
         outputs=[
             training_section["audio_files_table"],
             training_section["label_progress"],
             training_section["dataset_builder_state"],
         ]
+    )
+
+    # Mutual exclusion: format_lyrics and transcribe_lyrics cannot both be True
+    training_section["format_lyrics"].change(
+        fn=lambda fmt: gr.update(value=False) if fmt else gr.update(),
+        inputs=[training_section["format_lyrics"]],
+        outputs=[training_section["transcribe_lyrics"]]
+    )
+
+    training_section["transcribe_lyrics"].change(
+        fn=lambda trans: gr.update(value=False) if trans else gr.update(),
+        inputs=[training_section["transcribe_lyrics"]],
+        outputs=[training_section["format_lyrics"]]
     )
 
     # Sample selector change - update preview
