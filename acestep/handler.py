@@ -30,6 +30,13 @@ import warnings
 from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
 from transformers.generation.streamers import BaseStreamer
 from diffusers.models import AutoencoderOobleck
+from acestep.model_downloader import (
+    ensure_main_model,
+    ensure_dit_model,
+    check_main_model_exists,
+    check_model_exists,
+    get_checkpoints_dir,
+)
 from acestep.constants import (
     TASK_INSTRUCTIONS,
     SFT_GEN_PROMPT,
@@ -310,6 +317,26 @@ class AceStepHandler:
             # Auto-detect project root (independent of passed project_root parameter)
             actual_project_root = self._get_project_root()
             checkpoint_dir = os.path.join(actual_project_root, "checkpoints")
+
+            # Auto-download models if not present
+            from pathlib import Path
+            checkpoint_path = Path(checkpoint_dir)
+            
+            # Check and download main model components (vae, text_encoder, default DiT)
+            if not check_main_model_exists(checkpoint_path):
+                logger.info("[initialize_service] Main model not found, starting auto-download...")
+                success, msg = ensure_main_model(checkpoint_path)
+                if not success:
+                    return f"❌ Failed to download main model: {msg}", False
+                logger.info(f"[initialize_service] {msg}")
+            
+            # Check and download the requested DiT model
+            if not check_model_exists(config_path, checkpoint_path):
+                logger.info(f"[initialize_service] DiT model '{config_path}' not found, starting auto-download...")
+                success, msg = ensure_dit_model(config_path, checkpoint_path)
+                if not success:
+                    return f"❌ Failed to download DiT model '{config_path}': {msg}", False
+                logger.info(f"[initialize_service] {msg}")
 
             # 1. Load main model
             # config_path is relative path (e.g., "acestep-v15-turbo"), concatenate to checkpoints directory

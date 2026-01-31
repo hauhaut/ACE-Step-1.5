@@ -17,6 +17,7 @@
 
 - [✨ Features](#-features)
 - [📦 Installation](#-installation)
+- [📥 Model Download](#-model-download)
 - [🚀 Usage](#-usage)
 - [🔨 Train](#-train)
 - [🏗️ Architecture](#️-architecture)
@@ -141,6 +142,68 @@ uv add --dev package-name
 # Update all dependencies
 uv sync --upgrade
 ```
+
+## 📥 Model Download
+
+Models are automatically downloaded from [HuggingFace](https://huggingface.co/collections/ACE-Step/ace-step-15) on first run. You can also manually download models using the CLI or `huggingface-cli`.
+
+### Automatic Download
+
+When you run `acestep` or `acestep-api`, the system will:
+1. Check if the required models exist in `./checkpoints`
+2. If not found, automatically download them from HuggingFace
+
+### Manual Download with CLI
+
+```bash
+# Download main model (includes everything needed to run)
+uv run acestep-download
+
+# Download all available models (including optional variants)
+uv run acestep-download --all
+
+# Download a specific model
+uv run acestep-download --model acestep-v15-sft
+
+# List all available models
+uv run acestep-download --list
+
+# Download to a custom directory
+uv run acestep-download --dir /path/to/checkpoints
+```
+
+### Manual Download with huggingface-cli
+
+You can also use `huggingface-cli` directly:
+
+```bash
+# Download main model (includes vae, Qwen3-Embedding-0.6B, acestep-v15-turbo, acestep-5Hz-lm-1.7B)
+huggingface-cli download ACE-Step/Ace-Step1.5 --local-dir ./checkpoints
+
+# Download optional LM models
+huggingface-cli download ACE-Step/acestep-5Hz-lm-0.6B --local-dir ./checkpoints/acestep-5Hz-lm-0.6B
+huggingface-cli download ACE-Step/acestep-5Hz-lm-4B --local-dir ./checkpoints/acestep-5Hz-lm-4B
+
+# Download optional DiT models
+huggingface-cli download ACE-Step/acestep-v15-base --local-dir ./checkpoints/acestep-v15-base
+huggingface-cli download ACE-Step/acestep-v15-sft --local-dir ./checkpoints/acestep-v15-sft
+huggingface-cli download ACE-Step/acestep-v15-turbo-shift1 --local-dir ./checkpoints/acestep-v15-turbo-shift1
+huggingface-cli download ACE-Step/acestep-v15-turbo-shift3 --local-dir ./checkpoints/acestep-v15-turbo-shift3
+huggingface-cli download ACE-Step/acestep-v15-turbo-continuous --local-dir ./checkpoints/acestep-v15-turbo-continuous
+```
+
+### Available Models
+
+| Model | HuggingFace Repo | Description |
+|-------|------------------|-------------|
+| **Main** | [ACE-Step/Ace-Step1.5](https://huggingface.co/ACE-Step/Ace-Step1.5) | Core components: vae, Qwen3-Embedding-0.6B, acestep-v15-turbo, acestep-5Hz-lm-1.7B |
+| acestep-5Hz-lm-0.6B | [ACE-Step/acestep-5Hz-lm-0.6B](https://huggingface.co/ACE-Step/acestep-5Hz-lm-0.6B) | Lightweight LM model (0.6B params) |
+| acestep-5Hz-lm-4B | [ACE-Step/acestep-5Hz-lm-4B](https://huggingface.co/ACE-Step/acestep-5Hz-lm-4B) | Large LM model (4B params) |
+| acestep-v15-base | [ACE-Step/acestep-v15-base](https://huggingface.co/ACE-Step/acestep-v15-base) | Base DiT model |
+| acestep-v15-sft | [ACE-Step/acestep-v15-sft](https://huggingface.co/ACE-Step/acestep-v15-sft) | SFT DiT model |
+| acestep-v15-turbo-shift1 | [ACE-Step/acestep-v15-turbo-shift1](https://huggingface.co/ACE-Step/acestep-v15-turbo-shift1) | Turbo DiT with shift1 |
+| acestep-v15-turbo-shift3 | [ACE-Step/acestep-v15-turbo-shift3](https://huggingface.co/ACE-Step/acestep-v15-turbo-shift3) | Turbo DiT with shift3 |
+| acestep-v15-turbo-continuous | [ACE-Step/acestep-v15-turbo-continuous](https://huggingface.co/ACE-Step/acestep-v15-turbo-continuous) | Turbo DiT for continuous generation |
 
 ## 🚀 Usage
 
