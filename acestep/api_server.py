@@ -59,6 +59,128 @@ from acestep.gradio_ui.events.results_handlers import _build_generation_info
 
 
 # =============================================================================
+# Model Auto-Download Support
+# =============================================================================
+
+# Model name to repository mapping
+MODEL_REPO_MAPPING = {
+    # Main unified repository
+    "acestep-v15-turbo": "ACE-Step/Ace-Step1.5",
+    "acestep-5Hz-lm-0.6B": "ACE-Step/Ace-Step1.5",
+    "acestep-5Hz-lm-1.7B": "ACE-Step/Ace-Step1.5",
+    "vae": "ACE-Step/Ace-Step1.5",
+    "Qwen3-Embedding-0.6B": "ACE-Step/Ace-Step1.5",
+    # Separate model repositories
+    "acestep-v15-base": "ACE-Step/acestep-v15-base",
+    "acestep-v15-sft": "ACE-Step/acestep-v15-sft",
+    "acestep-v15-turbo-shift3": "ACE-Step/acestep-v15-turbo-shift3",
+    "acestep-5Hz-lm-4B": "ACE-Step/acestep-5Hz-lm-4B",
+}
+
+DEFAULT_REPO_ID = "ACE-Step/Ace-Step1.5"
+
+
+def _can_access_google(timeout: float = 3.0) -> bool:
+    """Check if Google is accessible (to determine HuggingFace vs ModelScope)."""
+    import socket
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("www.google.com", 443))
+        return True
+    except (socket.timeout, socket.error, OSError):
+        return False
+
+
+def _download_from_huggingface(repo_id: str, local_dir: str, model_name: str) -> str:
+    """Download model from HuggingFace Hub."""
+    from huggingface_hub import snapshot_download
+
+    is_unified_repo = repo_id == DEFAULT_REPO_ID or repo_id == "ACE-Step/Ace-Step1.5"
+
+    if is_unified_repo:
+        download_dir = local_dir
+        print(f"[Model Download] Downloading unified repo {repo_id} to {download_dir}...")
+    else:
+        download_dir = os.path.join(local_dir, model_name)
+        os.makedirs(download_dir, exist_ok=True)
+        print(f"[Model Download] Downloading {model_name} from {repo_id} to {download_dir}...")
+
+    snapshot_download(
+        repo_id=repo_id,
+        local_dir=download_dir,
+        local_dir_use_symlinks=False,
+    )
+
+    return os.path.join(local_dir, model_name)
+
+
+def _download_from_modelscope(repo_id: str, local_dir: str, model_name: str) -> str:
+    """Download model from ModelScope."""
+    from modelscope import snapshot_download
+
+    is_unified_repo = repo_id == DEFAULT_REPO_ID or repo_id == "ACE-Step/Ace-Step1.5"
+
+    if is_unified_repo:
+        download_dir = local_dir
+        print(f"[Model Download] Downloading unified repo {repo_id} from ModelScope to {download_dir}...")
+    else:
+        download_dir = os.path.join(local_dir, model_name)
+        os.makedirs(download_dir, exist_ok=True)
+        print(f"[Model Download] Downloading {model_name} from ModelScope {repo_id} to {download_dir}...")
+
+    snapshot_download(
+        model_id=repo_id,
+        local_dir=download_dir,
+    )
+
+    return os.path.join(local_dir, model_name)
+
+
+def _ensure_model_downloaded(model_name: str, checkpoint_dir: str) -> str:
+    """
+    Ensure model is downloaded. Auto-detect source based on network.
+
+    Args:
+        model_name: Model directory name (e.g., "acestep-v15-turbo")
+        checkpoint_dir: Target checkpoint directory
+
+    Returns:
+        Path to the model directory
+    """
+    model_path = os.path.join(checkpoint_dir, model_name)
+
+    # Check if model already exists
+    if os.path.exists(model_path) and os.listdir(model_path):
+        print(f"[Model Download] Model {model_name} already exists at {model_path}")
+        return model_path
+
+    # Get repository ID
+    repo_id = MODEL_REPO_MAPPING.get(model_name, DEFAULT_REPO_ID)
+
+    print(f"[Model Download] Model {model_name} not found, checking network...")
+
+    # Determine download source
+    use_huggingface = _can_access_google()
+
+    if use_huggingface:
+        print("[Model Download] Google accessible, using HuggingFace Hub...")
+        try:
+            return _download_from_huggingface(repo_id, checkpoint_dir, model_name)
+        except Exception as e:
+            print(f"[Model Download] HuggingFace download failed: {e}")
+            print("[Model Download] Falling back to ModelScope...")
+            return _download_from_modelscope(repo_id, checkpoint_dir, model_name)
+    else:
+        print("[Model Download] Google not accessible, using ModelScope...")
+        try:
+            return _download_from_modelscope(repo_id, checkpoint_dir, model_name)
+        except Exception as e:
+            print(f"[Model Download] ModelScope download failed: {e}")
+            print("[Model Download] Trying HuggingFace as fallback...")
+            return _download_from_huggingface(repo_id, checkpoint_dir, model_name)
+
+
+# =============================================================================
 # Constants
 # =============================================================================
 
@@ -746,83 +868,11 @@ def create_app() -> FastAPI:
             app.state.local_cache = None
 
         async def _ensure_initialized() -> None:
-            h: AceStepHandler = app.state.handler
-
-            if getattr(app.state, "_initialized", False):
-                return
+            """Check if models are initialized (they should be loaded at startup)."""
             if getattr(app.state, "_init_error", None):
                 raise RuntimeError(app.state._init_error)
-
-            async with app.state._init_lock:
-                if getattr(app.state, "_initialized", False):
-                    return
-                if getattr(app.state, "_init_error", None):
-                    raise RuntimeError(app.state._init_error)
-
-                project_root = _get_project_root()
-                config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
-                device = os.getenv("ACESTEP_DEVICE", "auto")
-
-                use_flash_attention = _env_bool("ACESTEP_USE_FLASH_ATTENTION", True)
-                offload_to_cpu = _env_bool("ACESTEP_OFFLOAD_TO_CPU", False)
-                offload_dit_to_cpu = _env_bool("ACESTEP_OFFLOAD_DIT_TO_CPU", False)
-
-                # Initialize primary model
-                status_msg, ok = h.initialize_service(
-                    project_root=project_root,
-                    config_path=config_path,
-                    device=device,
-                    use_flash_attention=use_flash_attention,
-                    compile_model=False,
-                    offload_to_cpu=offload_to_cpu,
-                    offload_dit_to_cpu=offload_dit_to_cpu,
-                )
-                if not ok:
-                    app.state._init_error = status_msg
-                    raise RuntimeError(status_msg)
-                app.state._initialized = True
-                
-                # Initialize secondary model if configured
-                if app.state.handler2 and app.state._config_path2:
-                    try:
-                        status_msg2, ok2 = app.state.handler2.initialize_service(
-                            project_root=project_root,
-                            config_path=app.state._config_path2,
-                            device=device,
-                            use_flash_attention=use_flash_attention,
-                            compile_model=False,
-                            offload_to_cpu=offload_to_cpu,
-                            offload_dit_to_cpu=offload_dit_to_cpu,
-                        )
-                        app.state._initialized2 = ok2
-                        if ok2:
-                            print(f"[API Server] Secondary model loaded: {_get_model_name(app.state._config_path2)}")
-                        else:
-                            print(f"[API Server] Warning: Secondary model failed to load: {status_msg2}")
-                    except Exception as e:
-                        print(f"[API Server] Warning: Failed to initialize secondary model: {e}")
-                        app.state._initialized2 = False
-                
-                # Initialize third model if configured
-                if app.state.handler3 and app.state._config_path3:
-                    try:
-                        status_msg3, ok3 = app.state.handler3.initialize_service(
-                            project_root=project_root,
-                            config_path=app.state._config_path3,
-                            device=device,
-                            use_flash_attention=use_flash_attention,
-                            compile_model=False,
-                            offload_to_cpu=offload_to_cpu,
-                            offload_dit_to_cpu=offload_dit_to_cpu,
-                        )
-                        app.state._initialized3 = ok3
-                        if ok3:
-                            print(f"[API Server] Third model loaded: {_get_model_name(app.state._config_path3)}")
-                        else:
-                            print(f"[API Server] Warning: Third model failed to load: {status_msg3}")
-                    except Exception as e:
-                        print(f"[API Server] Warning: Failed to initialize third model: {e}")
-                        app.state._initialized3 = False
+            if not getattr(app.state, "_initialized", False):
+                raise RuntimeError("Model not initialized")
 
         async def _cleanup_job_temp_files(job_id: str) -> None:
             async with app.state.job_temp_files_lock:
@@ -971,6 +1021,14 @@ def create_app() -> FastAPI:
                         backend = (req.lm_backend or os.getenv("ACESTEP_LM_BACKEND") or "vllm").strip().lower()
                         if backend not in {"vllm", "pt"}:
                             backend = "vllm"
+
+                        # Auto-download LM model if not present
+                        lm_model_name = _get_model_name(lm_model_path)
+                        if lm_model_name:
+                            try:
+                                _ensure_model_downloaded(lm_model_name, checkpoint_dir)
+                            except Exception as e:
+                                print(f"[API Server] Warning: Failed to download LM model {lm_model_name}: {e}")
 
                         lm_device = os.getenv("ACESTEP_LM_DEVICE", os.getenv("ACESTEP_DEVICE", "auto"))
                         lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
@@ -1352,6 +1410,142 @@ def create_app() -> FastAPI:
         cleanup_task = asyncio.create_task(_job_store_cleanup_worker())
         app.state.worker_tasks = workers
         app.state.cleanup_task = cleanup_task
+
+        # =================================================================
+        # Initialize models at startup (not lazily on first request)
+        # =================================================================
+        print("[API Server] Initializing models at startup...")
+
+        project_root = _get_project_root()
+        config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
+        device = os.getenv("ACESTEP_DEVICE", "auto")
+        use_flash_attention = _env_bool("ACESTEP_USE_FLASH_ATTENTION", True)
+        offload_to_cpu = _env_bool("ACESTEP_OFFLOAD_TO_CPU", False)
+        offload_dit_to_cpu = _env_bool("ACESTEP_OFFLOAD_DIT_TO_CPU", False)
+
+        # Checkpoint directory
+        checkpoint_dir = os.path.join(project_root, "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Download and initialize primary DiT model
+        dit_model_name = _get_model_name(config_path)
+        if dit_model_name:
+            try:
+                _ensure_model_downloaded(dit_model_name, checkpoint_dir)
+            except Exception as e:
+                print(f"[API Server] Warning: Failed to download DiT model: {e}")
+
+        # Download VAE model
+        try:
+            _ensure_model_downloaded("vae", checkpoint_dir)
+        except Exception as e:
+            print(f"[API Server] Warning: Failed to download VAE model: {e}")
+
+        print(f"[API Server] Loading primary DiT model: {config_path}")
+        status_msg, ok = handler.initialize_service(
+            project_root=project_root,
+            config_path=config_path,
+            device=device,
+            use_flash_attention=use_flash_attention,
+            compile_model=False,
+            offload_to_cpu=offload_to_cpu,
+            offload_dit_to_cpu=offload_dit_to_cpu,
+        )
+        if not ok:
+            app.state._init_error = status_msg
+            print(f"[API Server] ERROR: Primary model failed to load: {status_msg}")
+            raise RuntimeError(status_msg)
+        app.state._initialized = True
+        print(f"[API Server] Primary model loaded: {_get_model_name(config_path)}")
+
+        # Initialize secondary model if configured
+        if handler2 and config_path2:
+            model2_name = _get_model_name(config_path2)
+            if model2_name:
+                try:
+                    _ensure_model_downloaded(model2_name, checkpoint_dir)
+                except Exception as e:
+                    print(f"[API Server] Warning: Failed to download secondary model: {e}")
+
+            print(f"[API Server] Loading secondary DiT model: {config_path2}")
+            try:
+                status_msg2, ok2 = handler2.initialize_service(
+                    project_root=project_root,
+                    config_path=config_path2,
+                    device=device,
+                    use_flash_attention=use_flash_attention,
+                    compile_model=False,
+                    offload_to_cpu=offload_to_cpu,
+                    offload_dit_to_cpu=offload_dit_to_cpu,
+                )
+                app.state._initialized2 = ok2
+                if ok2:
+                    print(f"[API Server] Secondary model loaded: {model2_name}")
+                else:
+                    print(f"[API Server] Warning: Secondary model failed: {status_msg2}")
+            except Exception as e:
+                print(f"[API Server] Warning: Failed to initialize secondary model: {e}")
+                app.state._initialized2 = False
+
+        # Initialize third model if configured
+        if handler3 and config_path3:
+            model3_name = _get_model_name(config_path3)
+            if model3_name:
+                try:
+                    _ensure_model_downloaded(model3_name, checkpoint_dir)
+                except Exception as e:
+                    print(f"[API Server] Warning: Failed to download third model: {e}")
+
+            print(f"[API Server] Loading third DiT model: {config_path3}")
+            try:
+                status_msg3, ok3 = handler3.initialize_service(
+                    project_root=project_root,
+                    config_path=config_path3,
+                    device=device,
+                    use_flash_attention=use_flash_attention,
+                    compile_model=False,
+                    offload_to_cpu=offload_to_cpu,
+                    offload_dit_to_cpu=offload_dit_to_cpu,
+                )
+                app.state._initialized3 = ok3
+                if ok3:
+                    print(f"[API Server] Third model loaded: {model3_name}")
+                else:
+                    print(f"[API Server] Warning: Third model failed: {status_msg3}")
+            except Exception as e:
+                print(f"[API Server] Warning: Failed to initialize third model: {e}")
+                app.state._initialized3 = False
+
+        # Initialize LLM model
+        print("[API Server] Loading LLM model...")
+        lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B").strip()
+        lm_backend = os.getenv("ACESTEP_LM_BACKEND", "vllm").strip().lower()
+        if lm_backend not in {"vllm", "pt"}:
+            lm_backend = "vllm"
+        lm_device = os.getenv("ACESTEP_LM_DEVICE", device)
+        lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
+
+        try:
+            _ensure_model_downloaded(lm_model_path, checkpoint_dir)
+        except Exception as e:
+            print(f"[API Server] Warning: Failed to download LLM model: {e}")
+
+        llm_status, llm_ok = llm_handler.initialize(
+            checkpoint_dir=checkpoint_dir,
+            lm_model_path=lm_model_path,
+            backend=lm_backend,
+            device=lm_device,
+            offload_to_cpu=lm_offload,
+            dtype=handler.dtype,
+        )
+        if llm_ok:
+            app.state._llm_initialized = True
+            print(f"[API Server] LLM model loaded: {lm_model_path}")
+        else:
+            app.state._llm_init_error = llm_status
+            print(f"[API Server] Warning: LLM model failed to load: {llm_status}")
+
+        print("[API Server] All models initialized successfully!")
 
         try:
             yield
@@ -1740,6 +1934,14 @@ def create_app() -> FastAPI:
                 if backend not in {"vllm", "pt"}:
                     backend = "vllm"
 
+                # Auto-download LM model if not present
+                lm_model_name = _get_model_name(lm_model_path)
+                if lm_model_name:
+                    try:
+                        _ensure_model_downloaded(lm_model_name, checkpoint_dir)
+                    except Exception as e:
+                        print(f"[API Server] Warning: Failed to download LM model {lm_model_name}: {e}")
+
                 lm_device = os.getenv("ACESTEP_LM_DEVICE", os.getenv("ACESTEP_DEVICE", "auto"))
                 lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
 
@@ -1831,6 +2033,14 @@ def create_app() -> FastAPI:
                 backend = os.getenv("ACESTEP_LM_BACKEND", "vllm").strip().lower()
                 if backend not in {"vllm", "pt"}:
                     backend = "vllm"
+
+                # Auto-download LM model if not present
+                lm_model_name = _get_model_name(lm_model_path)
+                if lm_model_name:
+                    try:
+                        _ensure_model_downloaded(lm_model_name, checkpoint_dir)
+                    except Exception as e:
+                        print(f"[API Server] Warning: Failed to download LM model {lm_model_name}: {e}")
 
                 lm_device = os.getenv("ACESTEP_LM_DEVICE", os.getenv("ACESTEP_DEVICE", "auto"))
                 lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
