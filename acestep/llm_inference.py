@@ -20,6 +20,7 @@ from transformers.generation.logits_process import (
 )
 from acestep.constrained_logits_processor import MetadataConstrainedLogitsProcessor
 from acestep.constants import DEFAULT_LM_INSTRUCTION, DEFAULT_LM_UNDERSTAND_INSTRUCTION, DEFAULT_LM_INSPIRED_INSTRUCTION, DEFAULT_LM_REWRITE_INSTRUCTION
+from acestep.model_downloader import ensure_lm_model, check_model_exists
 
 
 class LLMHandler:
@@ -303,6 +304,17 @@ class LLMHandler:
                 self.dtype = torch.bfloat16 if device in ["cuda", "xpu"] else torch.float32
             else:
                 self.dtype = dtype
+            
+            # Auto-download LM model if not present
+            from pathlib import Path
+            checkpoint_path = Path(checkpoint_dir)
+            
+            if not check_model_exists(lm_model_path, checkpoint_path):
+                logger.info(f"[initialize] LM model '{lm_model_path}' not found, starting auto-download...")
+                success, msg = ensure_lm_model(lm_model_path, checkpoint_path)
+                if not success:
+                    return f"❌ Failed to download LM model '{lm_model_path}': {msg}", False
+                logger.info(f"[initialize] {msg}")
             
             full_lm_model_path = os.path.join(checkpoint_dir, lm_model_path)
             if not os.path.exists(full_lm_model_path):
