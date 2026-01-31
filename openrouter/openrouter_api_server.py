@@ -48,13 +48,13 @@ from acestep.inference import (
 # Constants
 # =============================================================================
 
-MODEL_ID = "acestep/music-v1.5"
-MODEL_NAME = "ACE-Step Music Generator V1.5"
+MODEL_ID = "acemusic/acestep-v1.5-turbo"
+MODEL_NAME = "ACE-Step"
 MODEL_CREATED = 1706688000  # Unix timestamp
 
 # Pricing (USD per token/unit) - adjust as needed
-PRICING_PROMPT = "0.000005"
-PRICING_COMPLETION = "0.02"
+PRICING_PROMPT = "0"
+PRICING_COMPLETION = "0"
 PRICING_REQUEST = "0"
 
 # =============================================================================

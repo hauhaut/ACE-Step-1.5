@@ -21,7 +21,7 @@ set -u
 # NOTE: api_server 使用内存队列/任务存储，要求 workers=1。
 nohup python -m uvicorn openrouter.openrouter_api_server:app \
 	--host "0.0.0.0" \
-	--port "8021" \
+	--port "8002" \
 	--workers 1 \
 	--log-level "$LOG_LEVEL" > server.log 2>&1 &
 echo "Server started in background with PID $!. Logs in server.log"
