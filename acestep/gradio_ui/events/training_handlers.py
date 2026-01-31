@@ -68,26 +68,28 @@ def auto_label_all(
     llm_handler,
     builder_state: Optional[DatasetBuilder],
     skip_metas: bool = False,
+    format_lyrics: bool = False,
     progress=None,
 ) -> Tuple[List[List[Any]], str, DatasetBuilder]:
     """Auto-label all samples in the dataset.
-    
+
     Args:
         dit_handler: DiT handler for audio processing
         llm_handler: LLM handler for caption generation
         builder_state: Dataset builder state
         skip_metas: If True, skip LLM labeling. BPM/Key/TimeSig = N/A, Language = unknown for instrumental
+        format_lyrics: If True, use LLM to format user-provided lyrics from .txt files
         progress: Progress callback
-    
+
     Returns:
         Tuple of (table_data, status, builder_state)
     """
     if builder_state is None:
         return [], "❌ Please scan a directory first", builder_state
-    
+
     if not builder_state.samples:
         return [], "❌ No samples to label. Please scan a directory first.", builder_state
-    
+
     # If skip_metas is True, just set default values without LLM
     if skip_metas:
         for sample in builder_state.samples:
@@ -104,55 +106,61 @@ def auto_label_all(
                 sample.caption = builder_state.metadata.custom_tag
             else:
                 sample.caption = sample.filename
-        
+            # Mark as labeled
+            sample.labeled = True
+
         table_data = builder_state.get_samples_dataframe_data()
         return table_data, f"✅ Skipped AI labeling. {len(builder_state.samples)} samples set with default values.", builder_state
-    
+
     # Check if handlers are initialized
     if dit_handler is None or dit_handler.model is None:
         return builder_state.get_samples_dataframe_data(), "❌ Model not initialized. Please initialize the service first.", builder_state
-    
+
     if llm_handler is None or not llm_handler.llm_initialized:
         return builder_state.get_samples_dataframe_data(), "❌ LLM not initialized. Please initialize the service with LLM enabled.", builder_state
-    
+
     def progress_callback(msg):
         if progress:
             try:
                 progress(msg)
             except:
                 pass
-    
+
     # Label all samples
     samples, status = builder_state.label_all_samples(
         dit_handler=dit_handler,
         llm_handler=llm_handler,
+        format_lyrics=format_lyrics,
         progress_callback=progress_callback,
     )
-    
+
     # Get updated table data
     table_data = builder_state.get_samples_dataframe_data()
-    
+
     return table_data, status, builder_state
 
 
 def get_sample_preview(
     sample_idx: int,
     builder_state: Optional[DatasetBuilder],
-) -> Tuple[str, str, str, str, Optional[int], str, str, float, str, bool]:
+) -> Tuple[str, str, str, str, Optional[int], str, str, float, str, bool, str, str, bool]:
     """Get preview data for a specific sample.
-    
+
     Returns:
-        Tuple of (audio_path, filename, caption, lyrics, bpm, keyscale, timesig, duration, language, instrumental)
+        Tuple of (audio_path, filename, caption, lyrics, bpm, keyscale, timesig, duration, language, instrumental, raw_lyrics, formatted_lyrics, has_both_lyrics)
     """
     if builder_state is None or not builder_state.samples:
-        return None, "", "", "", None, "", "", 0.0, "instrumental", True
-    
+        return None, "", "", "", None, "", "", 0.0, "instrumental", True, "", "", False
+
     idx = int(sample_idx)
     if idx < 0 or idx >= len(builder_state.samples):
-        return None, "", "", "", None, "", "", 0.0, "instrumental", True
-    
+        return None, "", "", "", None, "", "", 0.0, "instrumental", True, "", "", False
+
     sample = builder_state.samples[idx]
-    
+
+    # Check if both raw and formatted lyrics exist
+    has_both = sample.has_raw_lyrics() and sample.has_formatted_lyrics()
+
     return (
         sample.audio_path,
         sample.filename,
@@ -164,7 +172,35 @@ def get_sample_preview(
         sample.duration,
         sample.language,
         sample.is_instrumental,
+        sample.raw_lyrics,
+        sample.formatted_lyrics,
+        has_both,
     )
+
+
+def toggle_lyrics_view(
+    current_view: str,
+    raw_lyrics: str,
+    formatted_lyrics: str,
+    current_lyrics: str,
+) -> Tuple[str, str, str]:
+    """Toggle between raw and formatted lyrics view.
+
+    Args:
+        current_view: Current view state ("raw" or "formatted")
+        raw_lyrics: Original user-provided lyrics
+        formatted_lyrics: LM-formatted lyrics
+        current_lyrics: Currently displayed lyrics
+
+    Returns:
+        Tuple of (new_lyrics_display, new_view_state, new_button_label)
+    """
+    if current_view == "formatted":
+        # Switch to raw
+        return raw_lyrics, "raw", "📋 Formatted"
+    else:
+        # Switch to formatted
+        return formatted_lyrics, "formatted", "📝 Raw"
 
 
 def save_sample_edit(

@@ -28,13 +28,15 @@ SUPPORTED_AUDIO_FORMATS = {'.wav', '.mp3', '.flac', '.ogg', '.opus'}
 @dataclass
 class AudioSample:
     """Represents a single audio sample with its metadata.
-    
+
     Attributes:
         id: Unique identifier for the sample
         audio_path: Path to the audio file
         filename: Original filename
         caption: Generated or user-provided caption describing the music
-        lyrics: Lyrics or "[Instrumental]" for instrumental tracks
+        lyrics: Lyrics or "[Instrumental]" for instrumental tracks (used for training)
+        raw_lyrics: Original user-provided lyrics from .txt file (before formatting)
+        formatted_lyrics: LM-formatted lyrics (if format_lyrics was enabled)
         bpm: Beats per minute
         keyscale: Musical key (e.g., "C Major", "Am")
         timesignature: Time signature (e.g., "4" for 4/4)
@@ -49,6 +51,8 @@ class AudioSample:
     filename: str = ""
     caption: str = ""
     lyrics: str = "[Instrumental]"
+    raw_lyrics: str = ""  # Original user-provided lyrics from .txt file
+    formatted_lyrics: str = ""  # LM-formatted lyrics
     bpm: Optional[int] = None
     keyscale: str = ""
     timesignature: str = ""
@@ -57,32 +61,38 @@ class AudioSample:
     is_instrumental: bool = True
     custom_tag: str = ""
     labeled: bool = False
-    
+
     def __post_init__(self):
         if not self.id:
             self.id = str(uuid.uuid4())[:8]
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return asdict(self)
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AudioSample":
-        """Create from dictionary."""
-        return cls(**data)
-    
+        """Create from dictionary.
+
+        Handles backward compatibility for datasets without raw_lyrics/formatted_lyrics.
+        """
+        # Filter out unknown keys for backward compatibility
+        valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered_data = {k: v for k, v in data.items() if k in valid_keys}
+        return cls(**filtered_data)
+
     def get_full_caption(self, tag_position: str = "prepend") -> str:
         """Get caption with custom tag applied.
-        
+
         Args:
             tag_position: Where to place the custom tag ("prepend", "append", "replace")
-            
+
         Returns:
             Caption with custom tag applied
         """
         if not self.custom_tag:
             return self.caption
-        
+
         if tag_position == "prepend":
             return f"{self.custom_tag}, {self.caption}" if self.caption else self.custom_tag
         elif tag_position == "append":
@@ -91,6 +101,14 @@ class AudioSample:
             return self.custom_tag
         else:
             return self.caption
+
+    def has_raw_lyrics(self) -> bool:
+        """Check if sample has user-provided raw lyrics from .txt file."""
+        return bool(self.raw_lyrics and self.raw_lyrics.strip())
+
+    def has_formatted_lyrics(self) -> bool:
+        """Check if sample has LM-formatted lyrics."""
+        return bool(self.formatted_lyrics and self.formatted_lyrics.strip())
 
 
 @dataclass
@@ -139,22 +157,26 @@ class DatasetBuilder:
     
     def scan_directory(self, directory: str) -> Tuple[List[AudioSample], str]:
         """Scan a directory for audio files.
-        
+
+        If a .txt file with the same name as an audio file exists, it will be
+        treated as the lyrics file for that audio. For example:
+        - song.mp3 + song.txt -> song.txt is the lyrics file
+
         Args:
             directory: Path to directory containing audio files
-            
+
         Returns:
             Tuple of (list of AudioSample objects, status message)
         """
         if not os.path.exists(directory):
             return [], f"❌ Directory not found: {directory}"
-        
+
         if not os.path.isdir(directory):
             return [], f"❌ Not a directory: {directory}"
-        
+
         self._current_dir = directory
         self.samples = []
-        
+
         # Scan for audio files
         audio_files = []
         for root, dirs, files in os.walk(directory):
@@ -162,34 +184,84 @@ class DatasetBuilder:
                 ext = os.path.splitext(file)[1].lower()
                 if ext in SUPPORTED_AUDIO_FORMATS:
                     audio_files.append(os.path.join(root, file))
-        
+
         if not audio_files:
             return [], f"❌ No audio files found in {directory}\nSupported formats: {', '.join(SUPPORTED_AUDIO_FORMATS)}"
-        
+
         # Sort files by name
         audio_files.sort()
-        
+
+        # Count how many samples have lyrics files
+        lyrics_count = 0
+
         # Create AudioSample objects
         for audio_path in audio_files:
             try:
                 # Get duration
                 duration = self._get_audio_duration(audio_path)
-                
+
+                # Check for accompanying lyrics .txt file with same name
+                lyrics_content, has_lyrics_file = self._load_lyrics_file(audio_path)
+
+                # Determine if instrumental based on lyrics file presence
+                is_instrumental = self.metadata.all_instrumental
+                if has_lyrics_file:
+                    is_instrumental = False
+                    lyrics_count += 1
+
                 sample = AudioSample(
                     audio_path=audio_path,
                     filename=os.path.basename(audio_path),
                     duration=duration,
-                    is_instrumental=self.metadata.all_instrumental,
+                    is_instrumental=is_instrumental,
                     custom_tag=self.metadata.custom_tag,
+                    lyrics=lyrics_content if has_lyrics_file else "[Instrumental]",
+                    raw_lyrics=lyrics_content if has_lyrics_file else "",  # Store original lyrics
                 )
                 self.samples.append(sample)
             except Exception as e:
                 logger.warning(f"Failed to process {audio_path}: {e}")
-        
+
         self.metadata.num_samples = len(self.samples)
-        
+
+        # Build status message
         status = f"✅ Found {len(self.samples)} audio files in {directory}"
+        if lyrics_count > 0:
+            status += f"\n   📝 {lyrics_count} files have accompanying lyrics (.txt)"
+
         return self.samples, status
+
+    def _load_lyrics_file(self, audio_path: str) -> Tuple[str, bool]:
+        """Load lyrics from a .txt file with the same name as the audio file.
+
+        Args:
+            audio_path: Path to the audio file
+
+        Returns:
+            Tuple of (lyrics_content, has_lyrics_file)
+            - lyrics_content: The lyrics text or empty string if not found
+            - has_lyrics_file: True if a lyrics file was found and loaded
+        """
+        # Get the base name without extension
+        base_path = os.path.splitext(audio_path)[0]
+        lyrics_path = base_path + ".txt"
+
+        if os.path.exists(lyrics_path):
+            try:
+                with open(lyrics_path, 'r', encoding='utf-8') as f:
+                    lyrics_content = f.read().strip()
+
+                if lyrics_content:
+                    logger.info(f"Loaded lyrics from {lyrics_path}")
+                    return lyrics_content, True
+                else:
+                    logger.warning(f"Lyrics file is empty: {lyrics_path}")
+                    return "", False
+            except Exception as e:
+                logger.warning(f"Failed to read lyrics file {lyrics_path}: {e}")
+                return "", False
+
+        return "", False
     
     def _get_audio_duration(self, audio_path: str) -> int:
         """Get the duration of an audio file in seconds.
@@ -212,110 +284,145 @@ class DatasetBuilder:
         sample_idx: int,
         dit_handler,
         llm_handler,
+        format_lyrics: bool = False,
         progress_callback=None,
     ) -> Tuple[AudioSample, str]:
         """Label a single sample using the LLM.
-        
+
+        If the sample has lyrics loaded from a .txt file:
+        - If format_lyrics=False: Keep original lyrics as-is
+        - If format_lyrics=True: Use LLM to format/structure the lyrics
+
         Args:
             sample_idx: Index of sample to label
             dit_handler: DiT handler for audio encoding
             llm_handler: LLM handler for caption generation
+            format_lyrics: If True, use LLM to format user-provided lyrics
             progress_callback: Optional callback for progress updates
-            
+
         Returns:
             Tuple of (updated AudioSample, status message)
         """
         if sample_idx < 0 or sample_idx >= len(self.samples):
             return None, f"❌ Invalid sample index: {sample_idx}"
-        
+
         sample = self.samples[sample_idx]
-        
+
+        # Check if sample has pre-loaded lyrics from .txt file
+        has_preloaded_lyrics = sample.has_raw_lyrics() and not sample.is_instrumental
+
         try:
             if progress_callback:
                 progress_callback(f"Processing: {sample.filename}")
-            
+
             # Step 1: Load and encode audio to get audio codes
             audio_codes = self._get_audio_codes(sample.audio_path, dit_handler)
-            
+
             if not audio_codes:
                 return sample, f"❌ Failed to encode audio: {sample.filename}"
-            
+
             if progress_callback:
                 progress_callback(f"Generating metadata for: {sample.filename}")
-            
+
             # Step 2: Use LLM to understand the audio
             metadata, status = llm_handler.understand_audio_from_codes(
                 audio_codes=audio_codes,
                 temperature=0.7,
                 use_constrained_decoding=True,
             )
-            
+
             if not metadata:
                 return sample, f"❌ LLM labeling failed: {status}"
-            
+
             # Step 3: Update sample with generated metadata
             sample.caption = metadata.get('caption', '')
             sample.bpm = self._parse_int(metadata.get('bpm'))
             sample.keyscale = metadata.get('keyscale', '')
             sample.timesignature = metadata.get('timesignature', '')
             sample.language = metadata.get('vocal_language', 'unknown')
-            
-            # Handle lyrics based on instrumental flag
+
+            # Store LLM-generated lyrics as formatted_lyrics (always)
+            llm_lyrics = metadata.get('lyrics', '')
+
+            # Handle lyrics based on instrumental flag and settings
             if sample.is_instrumental:
                 sample.lyrics = "[Instrumental]"
                 sample.language = "unknown"
+                sample.formatted_lyrics = ""
+            elif has_preloaded_lyrics:
+                if format_lyrics:
+                    # Use LLM-generated/formatted lyrics
+                    sample.formatted_lyrics = llm_lyrics
+                    sample.lyrics = llm_lyrics if llm_lyrics else sample.raw_lyrics
+                    logger.info(f"Formatted lyrics for {sample.filename}")
+                else:
+                    # Keep the pre-loaded raw lyrics
+                    sample.lyrics = sample.raw_lyrics
+                    sample.formatted_lyrics = ""
+                    logger.info(f"Using raw lyrics for {sample.filename}")
             else:
-                sample.lyrics = metadata.get('lyrics', '')
-            
+                # No pre-loaded lyrics, use LLM-generated lyrics
+                sample.lyrics = llm_lyrics
+                sample.formatted_lyrics = llm_lyrics
+
             # NOTE: Duration is NOT overwritten from LM metadata.
             # We keep the real audio duration obtained from torchaudio during scan.
-            
+
             sample.labeled = True
             self.samples[sample_idx] = sample
-            
-            return sample, f"✅ Labeled: {sample.filename}"
-            
+
+            status_msg = f"✅ Labeled: {sample.filename}"
+            if has_preloaded_lyrics:
+                if format_lyrics:
+                    status_msg += " (lyrics formatted by LM)"
+                else:
+                    status_msg += " (using raw lyrics)"
+
+            return sample, status_msg
+
         except Exception as e:
             logger.exception(f"Error labeling sample {sample.filename}")
             return sample, f"❌ Error: {str(e)}"
-    
+
     def label_all_samples(
         self,
         dit_handler,
         llm_handler,
+        format_lyrics: bool = False,
         progress_callback=None,
     ) -> Tuple[List[AudioSample], str]:
         """Label all samples in the dataset.
-        
+
         Args:
             dit_handler: DiT handler for audio encoding
             llm_handler: LLM handler for caption generation
+            format_lyrics: If True, use LLM to format user-provided lyrics
             progress_callback: Optional callback for progress updates
-            
+
         Returns:
             Tuple of (list of updated samples, status message)
         """
         if not self.samples:
             return [], "❌ No samples to label. Please scan a directory first."
-        
+
         success_count = 0
         fail_count = 0
-        
+
         for i, sample in enumerate(self.samples):
             if progress_callback:
                 progress_callback(f"Labeling {i+1}/{len(self.samples)}: {sample.filename}")
-            
-            _, status = self.label_sample(i, dit_handler, llm_handler, progress_callback)
-            
+
+            _, status = self.label_sample(i, dit_handler, llm_handler, format_lyrics, progress_callback)
+
             if "✅" in status:
                 success_count += 1
             else:
                 fail_count += 1
-        
+
         status_msg = f"✅ Labeled {success_count}/{len(self.samples)} samples"
         if fail_count > 0:
             status_msg += f" ({fail_count} failed)"
-        
+
         return self.samples, status_msg
     
     def _get_audio_codes(self, audio_path: str, dit_handler) -> Optional[str]:

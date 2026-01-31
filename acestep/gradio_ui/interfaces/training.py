@@ -102,7 +102,13 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                             value=True,
                             info="Check if all tracks are instrumental (no vocals)",
                         )
-                        
+
+                        format_lyrics = gr.Checkbox(
+                            label="Format Lyrics (LM)",
+                            value=False,
+                            info="Use LM to format/structure user-provided lyrics from .txt files",
+                        )
+
                         need_lyrics = gr.Checkbox(
                             label="Transcribe Lyrics",
                             value=False,
@@ -187,13 +193,25 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                                 lines=3,
                                 placeholder="Music description...",
                             )
-                        
+
                         with gr.Row():
-                            edit_lyrics = gr.Textbox(
-                                label="Lyrics",
-                                lines=4,
-                                placeholder="[Verse 1]\nLyrics here...\n\n[Chorus]\n...",
-                            )
+                            with gr.Column(scale=4):
+                                edit_lyrics = gr.Textbox(
+                                    label="Lyrics",
+                                    lines=4,
+                                    placeholder="[Verse 1]\nLyrics here...\n\n[Chorus]\n...",
+                                )
+                            with gr.Column(scale=1):
+                                lyrics_toggle_btn = gr.Button(
+                                    "📝 Raw",
+                                    variant="secondary",
+                                    size="sm",
+                                    visible=False,  # Only show when both versions exist
+                                )
+                                lyrics_view_state = gr.State("formatted")  # Track which view is shown
+                                lyrics_has_both = gr.State(False)  # Track if both versions exist
+                                raw_lyrics_state = gr.State("")  # Store raw lyrics
+                                formatted_lyrics_state = gr.State("")  # Store formatted lyrics
                         
                         with gr.Row():
                             edit_bpm = gr.Number(
@@ -505,6 +523,7 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
         "audio_files_table": audio_files_table,
         "dataset_name": dataset_name,
         "all_instrumental": all_instrumental,
+        "format_lyrics": format_lyrics,
         "need_lyrics": need_lyrics,
         "custom_tag": custom_tag,
         "tag_position": tag_position,
@@ -516,6 +535,11 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
         "preview_filename": preview_filename,
         "edit_caption": edit_caption,
         "edit_lyrics": edit_lyrics,
+        "lyrics_toggle_btn": lyrics_toggle_btn,
+        "lyrics_view_state": lyrics_view_state,
+        "lyrics_has_both": lyrics_has_both,
+        "raw_lyrics_state": raw_lyrics_state,
+        "formatted_lyrics_state": formatted_lyrics_state,
         "edit_bpm": edit_bpm,
         "edit_keyscale": edit_keyscale,
         "edit_timesig": edit_timesig,

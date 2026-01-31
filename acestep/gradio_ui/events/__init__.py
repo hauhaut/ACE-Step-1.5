@@ -944,10 +944,11 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
     
     # Auto-label all samples
     training_section["auto_label_btn"].click(
-        fn=lambda state, skip: train_h.auto_label_all(dit_handler, llm_handler, state, skip),
+        fn=lambda state, skip, fmt_lyrics: train_h.auto_label_all(dit_handler, llm_handler, state, skip, fmt_lyrics),
         inputs=[
             training_section["dataset_builder_state"],
             training_section["skip_metas"],
+            training_section["format_lyrics"],
         ],
         outputs=[
             training_section["audio_files_table"],
@@ -955,7 +956,7 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
             training_section["dataset_builder_state"],
         ]
     )
-    
+
     # Sample selector change - update preview
     training_section["sample_selector"].change(
         fn=train_h.get_sample_preview,
@@ -974,6 +975,33 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
             training_section["edit_duration"],
             training_section["edit_language"],
             training_section["edit_instrumental"],
+            training_section["raw_lyrics_state"],
+            training_section["formatted_lyrics_state"],
+            training_section["lyrics_has_both"],
+        ]
+    ).then(
+        # Update toggle button visibility and reset view state based on whether both lyrics exist
+        fn=lambda has_both: (gr.update(visible=has_both), "formatted"),
+        inputs=[training_section["lyrics_has_both"]],
+        outputs=[
+            training_section["lyrics_toggle_btn"],
+            training_section["lyrics_view_state"],
+        ]
+    )
+
+    # Lyrics toggle button - switch between raw and formatted lyrics
+    training_section["lyrics_toggle_btn"].click(
+        fn=train_h.toggle_lyrics_view,
+        inputs=[
+            training_section["lyrics_view_state"],
+            training_section["raw_lyrics_state"],
+            training_section["formatted_lyrics_state"],
+            training_section["edit_lyrics"],
+        ],
+        outputs=[
+            training_section["edit_lyrics"],
+            training_section["lyrics_view_state"],
+            training_section["lyrics_toggle_btn"],
         ]
     )
     
