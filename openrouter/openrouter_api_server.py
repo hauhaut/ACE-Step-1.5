@@ -112,16 +112,21 @@ class ChatCompletionRequest(BaseModel):
     instrumental: bool = False
 
 
-class AudioOutput(BaseModel):
-    id: str = ""
-    data: str = ""  # Base64 encoded audio
-    transcript: str = ""  # Optional transcript/lyrics
+class AudioUrlContent(BaseModel):
+    """Audio URL content in OpenRouter format."""
+    url: str = ""
+
+
+class AudioOutputItem(BaseModel):
+    """Single audio output item in OpenRouter format."""
+    type: str = "audio_url"
+    audio_url: AudioUrlContent = Field(default_factory=AudioUrlContent)
 
 
 class ResponseMessage(BaseModel):
     role: str = "assistant"
     content: Optional[str] = None
-    audio: Optional[AudioOutput] = None
+    audio: Optional[List[AudioOutputItem]] = None  # OpenRouter format: list of audio items
 
 
 class Choice(BaseModel):
@@ -284,6 +289,71 @@ def _read_audio_as_base64(file_path: str) -> str:
     """Read audio file and return Base64 encoded string."""
     with open(file_path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
+
+
+def _audio_to_base64_url(audio_path: str, audio_format: str = "mp3") -> str:
+    """Convert audio file to base64 data URL (OpenRouter format)."""
+    if not audio_path or not os.path.exists(audio_path):
+        return ""
+
+    mime_types = {
+        "mp3": "audio/mpeg",
+        "wav": "audio/wav",
+        "flac": "audio/flac",
+        "ogg": "audio/ogg",
+        "m4a": "audio/mp4",
+        "aac": "audio/aac",
+    }
+    mime_type = mime_types.get(audio_format.lower(), "audio/mpeg")
+
+    with open(audio_path, "rb") as f:
+        audio_data = f.read()
+
+    b64_data = base64.b64encode(audio_data).decode("utf-8")
+    return f"data:{mime_type};base64,{b64_data}"
+
+
+def _format_lm_content(result: Dict[str, Any]) -> str:
+    """
+    Format LM generation result as content string.
+
+    If LM was used, returns formatted metadata and lyrics.
+    Otherwise returns a simple success message.
+    """
+    if not result.get("lm_used"):
+        return "Music generated successfully."
+
+    metadata = result.get("metadata", {})
+    lyrics = result.get("lyrics", "")
+
+    parts = []
+
+    # Add metadata section
+    meta_lines = []
+    if metadata.get("caption"):
+        meta_lines.append(f"**Caption:** {metadata['caption']}")
+    if metadata.get("bpm"):
+        meta_lines.append(f"**BPM:** {metadata['bpm']}")
+    if metadata.get("duration"):
+        meta_lines.append(f"**Duration:** {metadata['duration']}s")
+    if metadata.get("keyscale"):
+        meta_lines.append(f"**Key:** {metadata['keyscale']}")
+    if metadata.get("timesignature"):
+        meta_lines.append(f"**Time Signature:** {metadata['timesignature']}/4")
+    if metadata.get("language"):
+        meta_lines.append(f"**Language:** {metadata['language']}")
+
+    if meta_lines:
+        parts.append("## Metadata\n" + "\n".join(meta_lines))
+
+    # Add lyrics section
+    if lyrics and lyrics.strip() and lyrics.strip().lower() not in ("[inst]", "[instrumental]"):
+        parts.append(f"## Lyrics\n{lyrics}")
+
+    if parts:
+        return "\n\n".join(parts)
+    else:
+        return "Music generated successfully."
 
 
 # =============================================================================
@@ -514,22 +584,47 @@ def create_app() -> FastAPI:
             
             if not result.success:
                 raise RuntimeError(result.error or "Music generation failed")
-            
+
             # Get first audio path
             audio_path = None
             if result.audios and result.audios[0].get("path"):
                 audio_path = result.audios[0]["path"]
-            
+
             if not audio_path or not os.path.exists(audio_path):
                 raise RuntimeError("No audio file generated")
-            
-            # Read and encode audio
-            audio_base64 = _read_audio_as_base64(audio_path)
-            
+
+            # Build metadata dict for response
+            metadata = {
+                "caption": prompt,
+                "bpm": request.bpm,
+                "duration": request.duration,
+                "keyscale": None,
+                "timesignature": None,
+                "language": request.vocal_language,
+                "instrumental": instrumental,
+            }
+
+            # Extract LM metadata from result if available
+            lm_metadata = result.extra_outputs.get("lm_metadata", {}) if hasattr(result, 'extra_outputs') else {}
+            if lm_metadata:
+                if lm_metadata.get("caption"):
+                    metadata["caption"] = lm_metadata.get("caption")
+                if lm_metadata.get("bpm"):
+                    metadata["bpm"] = lm_metadata.get("bpm")
+                if lm_metadata.get("duration"):
+                    metadata["duration"] = lm_metadata.get("duration")
+                if lm_metadata.get("keyscale"):
+                    metadata["keyscale"] = lm_metadata.get("keyscale")
+                if lm_metadata.get("timesignature"):
+                    metadata["timesignature"] = lm_metadata.get("timesignature")
+                if lm_metadata.get("language"):
+                    metadata["language"] = lm_metadata.get("language")
+
             return {
-                "audio_data": audio_base64,
                 "audio_path": audio_path,
                 "lyrics": lyrics,
+                "metadata": metadata,
+                "lm_used": llm is not None,
             }
         
         try:
@@ -537,10 +632,23 @@ def create_app() -> FastAPI:
             result = await loop.run_in_executor(app.state.executor, _blocking_generate)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
-        
-        # Build response
-        audio_id = f"audio_{int(time.time())}_{os.urandom(4).hex()}"
-        
+
+        # Format content with LM results
+        text_content = _format_lm_content(result)
+
+        # Build audio in OpenRouter format: [{"type": "audio_url", "audio_url": {"url": "data:..."}}]
+        audio_list = None
+        audio_path = result.get("audio_path")
+        if audio_path and os.path.exists(audio_path):
+            b64_url = _audio_to_base64_url(audio_path, "mp3")
+            if b64_url:
+                audio_list = [
+                    AudioOutputItem(
+                        type="audio_url",
+                        audio_url=AudioUrlContent(url=b64_url)
+                    )
+                ]
+
         response = ChatCompletionResponse(
             id=f"chatcmpl-{os.urandom(8).hex()}",
             created=int(time.time()),
@@ -550,11 +658,8 @@ def create_app() -> FastAPI:
                     index=0,
                     message=ResponseMessage(
                         role="assistant",
-                        audio=AudioOutput(
-                            id=audio_id,
-                            data=result["audio_data"],
-                            transcript=result.get("lyrics", ""),
-                        ),
+                        content=text_content,
+                        audio=audio_list,
                     ),
                     finish_reason="stop",
                 )
@@ -565,7 +670,7 @@ def create_app() -> FastAPI:
                 total_tokens=len(prompt.split()) + 100,
             ),
         )
-        
+
         return response
     
     @app.get("/health")
