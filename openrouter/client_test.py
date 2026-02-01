@@ -24,7 +24,7 @@ import requests
 # 配置
 # =============================================================================
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8003"
+DEFAULT_BASE_URL = "https://api.acemusic.ai"
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "test_outputs")
 
 
@@ -98,7 +98,7 @@ def test_health(base_url: str, api_key: Optional[str] = None) -> bool:
     try:
         resp = requests.get(f"{base_url}/health", timeout=10)
         print(f"状态码: {resp.status_code}")
-        print(f"响应: {json.dumps(resp.json(), indent=2, ensure_ascii=False)}")
+        print(f"响应: {json.dumps(resp.text, indent=2, ensure_ascii=False)}")
         return resp.status_code == 200
     except Exception as e:
         print(f"错误: {e}")
