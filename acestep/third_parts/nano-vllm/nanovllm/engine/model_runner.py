@@ -62,7 +62,28 @@ class ModelRunner:
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         # Use dtype instead of deprecated torch_dtype
-        config_dtype = getattr(hf_config, 'dtype', getattr(hf_config, 'torch_dtype', torch.float32))
+        config_dtype = getattr(hf_config, 'dtype', getattr(hf_config, 'torch_dtype', None))
+
+        # Validate and convert config_dtype to a valid torch floating-point dtype
+        if config_dtype is None:
+            config_dtype = torch.float32
+        elif isinstance(config_dtype, str):
+            # Convert string dtype to torch dtype
+            dtype_map = {
+                'float32': torch.float32,
+                'float16': torch.float16,
+                'bfloat16': torch.bfloat16,
+                'float64': torch.float64,
+                'torch.float32': torch.float32,
+                'torch.float16': torch.float16,
+                'torch.bfloat16': torch.bfloat16,
+                'torch.float64': torch.float64,
+            }
+            config_dtype = dtype_map.get(config_dtype.lower(), torch.float32)
+        elif not isinstance(config_dtype, torch.dtype) or not config_dtype.is_floating_point:
+            # If not a valid floating-point torch dtype, default to float32
+            config_dtype = torch.float32
+
         torch.set_default_dtype(config_dtype)
         torch.set_default_device("cuda")
         self.model = Qwen3ForCausalLM(hf_config)
