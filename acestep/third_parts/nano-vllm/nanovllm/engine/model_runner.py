@@ -65,8 +65,9 @@ class ModelRunner:
         config_dtype = getattr(hf_config, 'dtype', getattr(hf_config, 'torch_dtype', None))
 
         # Validate and convert config_dtype to a valid torch floating-point dtype
+        # Default to bfloat16 for CUDA (required for Flash Attention 2)
         if config_dtype is None:
-            config_dtype = torch.float32
+            config_dtype = torch.bfloat16
         elif isinstance(config_dtype, str):
             # Convert string dtype to torch dtype
             dtype_map = {
@@ -79,11 +80,12 @@ class ModelRunner:
                 'torch.bfloat16': torch.bfloat16,
                 'torch.float64': torch.float64,
             }
-            config_dtype = dtype_map.get(config_dtype.lower(), torch.float32)
+            config_dtype = dtype_map.get(config_dtype.lower(), torch.bfloat16)
         elif not isinstance(config_dtype, torch.dtype) or not config_dtype.is_floating_point:
-            # If not a valid floating-point torch dtype, default to float32
-            config_dtype = torch.float32
+            # If not a valid floating-point torch dtype, default to bfloat16
+            config_dtype = torch.bfloat16
 
+        self.dtype = config_dtype  # Save for later use
         torch.set_default_dtype(config_dtype)
         torch.set_default_device("cuda")
         self.model = Qwen3ForCausalLM(hf_config)
@@ -201,9 +203,7 @@ class ModelRunner:
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        # Use dtype instead of deprecated torch_dtype
-        config_dtype = getattr(hf_config, 'dtype', getattr(hf_config, 'torch_dtype', torch.float32))
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * config_dtype.itemsize
+        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * self.dtype.itemsize
         
         # Calculate available memory for KV cache
         # After warmup_model, empty_cache has been called, so current represents model memory only
