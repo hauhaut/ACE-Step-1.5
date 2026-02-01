@@ -65,7 +65,10 @@
 | ✅ LoRA Training | One-click annotation & training in Gradio. 8 songs, 1 hour on 3090 (12GB VRAM) |
 | ✅ Quality Scoring | Automatic quality assessment for generated audio |
 
-
+## Staying ahead
+-----------------
+Star ACE-Step on GitHub and be instantly notified of new releases
+![](assets/star.gif)
 
 ## 📦 Installation
 
