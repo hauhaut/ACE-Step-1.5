@@ -762,17 +762,11 @@ class DatasetBuilder:
         self.metadata.num_samples = len(self.samples)
         self.metadata.created_at = datetime.now().isoformat()
         
-        # Build dataset with captions that include custom tags
+        # Build dataset (save raw values, custom tag is applied during preprocessing)
         dataset = {
             "metadata": self.metadata.to_dict(),
-            "samples": []
+            "samples": [sample.to_dict() for sample in self.samples]
         }
-        
-        for sample in self.samples:
-            sample_dict = sample.to_dict()
-            # Apply custom tag to caption based on position
-            sample_dict["caption"] = sample.get_full_caption(self.metadata.tag_position)
-            dataset["samples"].append(sample_dict)
         
         try:
             # Ensure output directory exists
