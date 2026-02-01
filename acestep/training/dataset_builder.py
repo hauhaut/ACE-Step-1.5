@@ -162,6 +162,10 @@ class DatasetBuilder:
         treated as the lyrics file for that audio. For example:
         - song.mp3 + song.txt -> song.txt is the lyrics file
 
+        Also scans for CSV metadata files (e.g., key_bpm.csv) with columns:
+        File, Artist, Title, BPM, Key, Camelot, and optionally Caption/caption.
+        If found, pre-fills BPM, Key, and Caption metadata.
+
         Args:
             directory: Path to directory containing audio files
 
@@ -191,6 +195,10 @@ class DatasetBuilder:
         # Sort files by name
         audio_files.sort()
 
+        # Load CSV metadata if available
+        csv_metadata = self._load_csv_metadata(directory)
+        csv_count = 0
+
         # Count how many samples have lyrics files
         lyrics_count = 0
 
@@ -218,6 +226,19 @@ class DatasetBuilder:
                     lyrics=lyrics_content if has_lyrics_file else "[Instrumental]",
                     raw_lyrics=lyrics_content if has_lyrics_file else "",  # Store original lyrics
                 )
+
+                # Apply CSV metadata if available
+                if csv_metadata and sample.filename in csv_metadata:
+                    meta = csv_metadata[sample.filename]
+                    if meta.get('bpm'):
+                        sample.bpm = meta['bpm']
+                    if meta.get('key'):
+                        sample.keyscale = meta['key']
+                    if meta.get('caption'):
+                        sample.caption = meta['caption']
+                        sample.labeled = True  # Mark as labeled if caption exists
+                    csv_count += 1
+
                 self.samples.append(sample)
             except Exception as e:
                 logger.warning(f"Failed to process {audio_path}: {e}")
@@ -228,8 +249,102 @@ class DatasetBuilder:
         status = f"✅ Found {len(self.samples)} audio files in {directory}"
         if lyrics_count > 0:
             status += f"\n   📝 {lyrics_count} files have accompanying lyrics (.txt)"
+        if csv_count > 0:
+            status += f"\n   📊 {csv_count} files have metadata from CSV"
 
         return self.samples, status
+
+    def _load_csv_metadata(self, directory: str) -> Dict[str, Dict[str, Any]]:
+        """Load metadata from CSV files in the directory.
+
+        Looks for CSV files with columns: File, Artist, Title, BPM, Key, Camelot.
+        Optionally also recognizes Caption or caption columns.
+
+        Args:
+            directory: Path to directory to search for CSV files
+
+        Returns:
+            Dict mapping filename -> {bpm, key, caption} metadata
+        """
+        import csv
+
+        metadata = {}
+
+        # Find all CSV files in directory
+        csv_files = []
+        for file in os.listdir(directory):
+            if file.lower().endswith('.csv'):
+                csv_files.append(os.path.join(directory, file))
+
+        if not csv_files:
+            return metadata
+
+        for csv_path in csv_files:
+            try:
+                with open(csv_path, 'r', encoding='utf-8') as f:
+                    # Try to detect delimiter
+                    sample = f.read(4096)
+                    f.seek(0)
+
+                    # Use csv.Sniffer to detect delimiter, fallback to comma
+                    try:
+                        dialect = csv.Sniffer().sniff(sample, delimiters=',;\t')
+                        reader = csv.DictReader(f, dialect=dialect)
+                    except csv.Error:
+                        reader = csv.DictReader(f)
+
+                    # Normalize header names (case-insensitive)
+                    if reader.fieldnames is None:
+                        continue
+
+                    header_map = {h.lower(): h for h in reader.fieldnames}
+
+                    # Check if this CSV has the required columns
+                    if 'file' not in header_map:
+                        continue
+
+                    file_col = header_map['file']
+                    bpm_col = header_map.get('bpm')
+                    key_col = header_map.get('key')
+                    caption_col = header_map.get('caption')
+
+                    for row in reader:
+                        filename = row.get(file_col, '').strip()
+                        if not filename:
+                            continue
+
+                        entry = {}
+
+                        # Parse BPM
+                        if bpm_col and row.get(bpm_col):
+                            try:
+                                bpm_val = row[bpm_col].strip()
+                                # Handle decimal BPM (e.g., "120.5" -> 120)
+                                entry['bpm'] = int(float(bpm_val))
+                            except (ValueError, TypeError):
+                                pass
+
+                        # Parse Key
+                        if key_col and row.get(key_col):
+                            key_val = row[key_col].strip()
+                            if key_val:
+                                entry['key'] = key_val
+
+                        # Parse Caption
+                        if caption_col and row.get(caption_col):
+                            caption_val = row[caption_col].strip()
+                            if caption_val:
+                                entry['caption'] = caption_val
+
+                        if entry:
+                            metadata[filename] = entry
+
+                logger.info(f"Loaded {len(metadata)} entries from CSV: {csv_path}")
+
+            except Exception as e:
+                logger.warning(f"Failed to load CSV {csv_path}: {e}")
+
+        return metadata
 
     def _load_lyrics_file(self, audio_path: str) -> Tuple[str, bool]:
         """Load lyrics from a .txt file with the same name as the audio file.
@@ -314,6 +429,10 @@ class DatasetBuilder:
         # Check if sample has pre-loaded lyrics from .txt file
         has_preloaded_lyrics = sample.has_raw_lyrics() and not sample.is_instrumental
 
+        # Remember if sample has pre-existing metadata from CSV (don't overwrite)
+        has_csv_bpm = sample.bpm is not None
+        has_csv_key = bool(sample.keyscale)
+
         try:
             if progress_callback:
                 progress_callback(f"Processing: {sample.filename}")
@@ -344,10 +463,12 @@ class DatasetBuilder:
                 if not result.success:
                     return sample, f"❌ LLM format failed: {result.error}"
 
-                # Update sample with formatted results
+                # Update sample with formatted results (preserve CSV metadata)
                 sample.caption = result.caption or ""
-                sample.bpm = result.bpm
-                sample.keyscale = result.keyscale or ""
+                if not has_csv_bpm:
+                    sample.bpm = result.bpm
+                if not has_csv_key:
+                    sample.keyscale = result.keyscale or ""
                 sample.timesignature = result.timesignature or ""
                 sample.language = result.language or "unknown"
                 sample.formatted_lyrics = result.lyrics or ""
@@ -366,10 +487,12 @@ class DatasetBuilder:
                 if not metadata:
                     return sample, f"❌ LLM labeling failed: {status}"
 
-                # Update sample with generated metadata
+                # Update sample with generated metadata (preserve CSV metadata for BPM/Key)
                 sample.caption = metadata.get('caption', '')
-                sample.bpm = self._parse_int(metadata.get('bpm'))
-                sample.keyscale = metadata.get('keyscale', '')
+                if not has_csv_bpm:
+                    sample.bpm = self._parse_int(metadata.get('bpm'))
+                if not has_csv_key:
+                    sample.keyscale = metadata.get('keyscale', '')
                 sample.timesignature = metadata.get('timesignature', '')
                 sample.language = metadata.get('vocal_language', 'unknown')
 

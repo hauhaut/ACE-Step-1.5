@@ -106,13 +106,15 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                         format_lyrics = gr.Checkbox(
                             label="Format Lyrics (LM)",
                             value=False,
-                            info="Use LM to format/structure user-provided lyrics from .txt files",
+                            info="Use LM to format/structure user-provided lyrics from .txt files (coming soon)",
+                            interactive=False,  # Disabled for now - model update needed
                         )
 
                         transcribe_lyrics = gr.Checkbox(
                             label="Transcribe Lyrics (LM)",
                             value=False,
-                            info="Use LM to transcribe lyrics from audio (ignores .txt files)",
+                            info="Use LM to transcribe lyrics from audio (coming soon)",
+                            interactive=False,  # Disabled for now - model update needed
                         )
                         
                         custom_tag = gr.Textbox(
