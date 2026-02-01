@@ -1,31 +1,13 @@
-"""OpenRouter-compatible API client test suite for ACE-Step Music Generator.
+"""
+ACE-Step OpenRouter API 客户端测试代码
 
-This comprehensive test suite validates the OpenRouter provider API implementation:
-- OpenRouter API compliance (models, chat completions)
-- OpenAI SDK compatibility
-- Authentication (Bearer token)
-- Input processing modes (tags, heuristic, sample_query)
-- Audio output validation
-- Error handling
+使用 requests 库测试 API 的各个端点和功能模式。
 
 Usage:
-    # Using requests (default)
-    python client_test.py --base-url http://127.0.0.1:8002
-
-    # Using OpenAI SDK
-    python client_test.py --base-url http://127.0.0.1:8002 --use-openai-sdk
-
-    # With API key authentication
-    python client_test.py --base-url http://127.0.0.1:8002 --api-key your_key
-
-    # Quick test (skip audio generation)
-    python client_test.py --skip-generation
-
-    # Full test with all scenarios
-    python client_test.py --full-test
+    python -m openrouter.test_client
+    python -m openrouter.test_client --base-url http://127.0.0.1:8002
+    python -m openrouter.test_client --api-key your-api-key
 """
-
-from __future__ import annotations
 
 import argparse
 import base64
@@ -33,1311 +15,538 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import Any, Dict, List, Optional, Callable
+from typing import Optional
 
-# =============================================================================
-# Configuration
-# =============================================================================
-
-DEFAULT_BASE_URL = "http://127.0.0.1:8002"
-DEFAULT_MODEL = "acemusic/acestep-v1.5-turbo"
-
-# Timeouts (seconds)
-TIMEOUT_HEALTH = 10
-TIMEOUT_MODELS = 10
-TIMEOUT_GENERATION = 600  # 10 minutes for music generation
+import requests
 
 
 # =============================================================================
-# Test Framework
+# 配置
 # =============================================================================
 
-class TestStatus(Enum):
-    PASSED = "passed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
+DEFAULT_BASE_URL = "http://127.0.0.1:8003"
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "test_outputs")
 
 
-@dataclass
-class TestResult:
-    """Container for test execution results."""
-    name: str
-    status: TestStatus
-    message: str = ""
-    duration_ms: float = 0
-    data: Any = None
-
-    @property
-    def passed(self) -> bool:
-        return self.status == TestStatus.PASSED
-
-    def __repr__(self) -> str:
-        return f"TestResult({self.name}: {self.status.value})"
-
-
-@dataclass
-class TestContext:
-    """Shared context for test execution."""
-    base_url: str
-    api_key: Optional[str] = None
-    use_openai_sdk: bool = False
-    save_audio: bool = True
-    output_dir: str = "."
-    verbose: bool = False
-
-
-# =============================================================================
-# Utilities
-# =============================================================================
-
-def print_header(title: str, char: str = "=", width: int = 70) -> None:
-    """Print formatted section header."""
-    print(f"\n{char * width}")
-    print(f"  {title}")
-    print(f"{char * width}")
-
-
-def print_subheader(title: str) -> None:
-    """Print formatted subsection header."""
-    print(f"\n--- {title} ---")
-
-
-def truncate_str(s: str, max_len: int = 100) -> str:
-    """Truncate string with ellipsis."""
-    if len(s) <= max_len:
-        return s
-    return f"{s[:max_len]}... ({len(s)} chars total)"
-
-
-def print_json(data: Any, max_str_len: int = 100, indent: int = 2) -> None:
-    """Print JSON with truncated strings."""
-    def _truncate(obj: Any) -> Any:
-        if isinstance(obj, str):
-            return truncate_str(obj, max_str_len)
-        elif isinstance(obj, dict):
-            return {k: _truncate(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [_truncate(item) for item in obj]
-        return obj
-
-    print(json.dumps(_truncate(data), indent=indent, ensure_ascii=False))
-
-
-def save_audio(audio_base64: str, filename: str, output_dir: str = ".") -> str:
-    """Decode and save base64 audio to file."""
-    filepath = os.path.join(output_dir, filename)
-    audio_bytes = base64.b64decode(audio_base64)
-    with open(filepath, "wb") as f:
-        f.write(audio_bytes)
-    return filepath
-
-
-def get_headers(api_key: Optional[str] = None) -> Dict[str, str]:
-    """Build HTTP headers with optional auth."""
+def get_headers(api_key: Optional[str] = None) -> dict:
+    """构建请求头"""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
 
 
-# =============================================================================
-# HTTP Client (requests-based)
-# =============================================================================
+def handle_response(resp, audio_filename: str) -> bool:
+    """处理 API 响应并保存音频"""
+    print(f"状态码: {resp.status_code}")
 
-class HTTPClient:
-    """Simple HTTP client using requests library."""
+    if resp.status_code != 200:
+        print(f"错误响应: {resp.text}")
+        return False
 
-    def __init__(self, base_url: str, api_key: Optional[str] = None):
-        import requests
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
-        self.session = requests.Session()
+    data = resp.json()
+    message = data["choices"][0]["message"]
+    content = message.get("content") or ""
+    audio_list = message.get("audio") or []
 
-    def _headers(self) -> Dict[str, str]:
-        return get_headers(self.api_key)
+    print(f"\n内容:\n{content if content else '(无文本内容)'}")
+    print(f"音频数量: {len(audio_list)}")
 
-    def get(self, path: str, timeout: int = 30) -> Dict[str, Any]:
-        """HTTP GET request."""
-        url = f"{self.base_url}{path}"
-        resp = self.session.get(url, headers=self._headers(), timeout=timeout)
-        return {
-            "status_code": resp.status_code,
-            "body": resp.json() if resp.content else {},
-            "text": resp.text,
-        }
+    if audio_list and len(audio_list) > 0:
+        audio_url = audio_list[0].get("audio_url", {}).get("url", "")
+        if audio_url:
+            filepath = save_audio(audio_url, audio_filename)
+            print(f"音频已保存: {filepath}")
+        else:
+            print("警告: audio_url 为空")
+    else:
+        print("警告: 没有返回音频数据")
 
-    def post(self, path: str, data: Dict[str, Any], timeout: int = 300) -> Dict[str, Any]:
-        """HTTP POST request."""
-        url = f"{self.base_url}{path}"
-        resp = self.session.post(
-            url, headers=self._headers(), json=data, timeout=timeout
-        )
-        return {
-            "status_code": resp.status_code,
-            "body": resp.json() if resp.content else {},
-            "text": resp.text,
-        }
+    return True
 
 
-# =============================================================================
-# OpenAI SDK Client (optional)
-# =============================================================================
+def save_audio(audio_url: str, filename: str) -> str:
+    """从 base64 data URL 保存音频文件"""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-class OpenAIClient:
-    """Client using OpenAI Python SDK for compatibility testing."""
+    # 解析 data URL: data:audio/mpeg;base64,<data>
+    if not audio_url.startswith("data:"):
+        print(f"  [警告] 无效的 audio URL 格式")
+        return ""
 
-    def __init__(self, base_url: str, api_key: Optional[str] = None):
-        try:
-            from openai import OpenAI
-        except ImportError:
-            raise ImportError("openai package required. Install with: pip install openai")
+    # 提取 base64 数据
+    b64_data = audio_url.split(",", 1)[1]
+    audio_bytes = base64.b64decode(b64_data)
 
-        self.client = OpenAI(
-            base_url=f"{base_url.rstrip('/')}/v1",
-            api_key=api_key or "dummy-key",  # OpenAI SDK requires a key
-        )
+    filepath = os.path.join(OUTPUT_DIR, filename)
+    with open(filepath, "wb") as f:
+        f.write(audio_bytes)
 
-    def chat_completions(
-        self,
-        model: str,
-        messages: List[Dict[str, str]],
-        **kwargs
-    ) -> Dict[str, Any]:
-        """Create chat completion using OpenAI SDK."""
-        response = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            **kwargs
-        )
-        return response.model_dump()
+    return filepath
 
 
 # =============================================================================
-# Test Cases
+# 测试函数
 # =============================================================================
 
-def test_health_check(ctx: TestContext) -> TestResult:
-    """
-    Test: Health Check Endpoint
-
-    OpenRouter Requirement: Providers should expose a health endpoint.
-
-    Validates:
-    - GET /health returns 200
-    - Response contains status information
-    - Server is ready to accept requests
-    """
-    print_header("Test: Health Check")
-    start_time = time.time()
+def test_health(base_url: str, api_key: Optional[str] = None) -> bool:
+    """测试健康检查端点"""
+    print("\n" + "=" * 60)
+    print("测试: GET /health")
+    print("=" * 60)
 
     try:
-        client = HTTPClient(ctx.base_url, ctx.api_key)
-        print(f"GET {ctx.base_url}/health")
-
-        resp = client.get("/health", timeout=TIMEOUT_HEALTH)
-        duration = (time.time() - start_time) * 1000
-
-        print(f"Status Code: {resp['status_code']}")
-        print("Response:")
-        print_json(resp["body"])
-
-        if resp["status_code"] != 200:
-            return TestResult(
-                "Health Check",
-                TestStatus.FAILED,
-                f"Expected 200, got {resp['status_code']}",
-                duration,
-            )
-
-        body = resp["body"]
-        if "status" not in body:
-            return TestResult(
-                "Health Check",
-                TestStatus.FAILED,
-                "Missing 'status' field in response",
-                duration,
-            )
-
-        return TestResult(
-            "Health Check",
-            TestStatus.PASSED,
-            f"Server healthy, status: {body.get('status')}",
-            duration,
-        )
-
+        resp = requests.get(f"{base_url}/health", timeout=10)
+        print(f"状态码: {resp.status_code}")
+        print(f"响应: {json.dumps(resp.json(), indent=2, ensure_ascii=False)}")
+        return resp.status_code == 200
     except Exception as e:
-        return TestResult(
-            "Health Check",
-            TestStatus.FAILED,
-            f"Error: {str(e)}",
-            (time.time() - start_time) * 1000,
-        )
+        print(f"错误: {e}")
+        return False
 
 
-def test_list_models(ctx: TestContext) -> TestResult:
-    """
-    Test: List Models Endpoint
-
-    OpenRouter Requirement: GET /api/v1/models must return available models
-    with pricing and capability information.
-
-    Validates:
-    - Endpoint returns 200
-    - Response has 'data' array
-    - Each model has required fields: id, name, pricing, modalities
-    - Pricing format is correct (strings, not numbers)
-    """
-    print_header("Test: List Models (OpenRouter Format)")
-    start_time = time.time()
+def test_list_models(base_url: str, api_key: Optional[str] = None) -> bool:
+    """测试模型列表端点"""
+    print("\n" + "=" * 60)
+    print("测试: GET /api/v1/models")
+    print("=" * 60)
 
     try:
-        client = HTTPClient(ctx.base_url, ctx.api_key)
-        print(f"GET {ctx.base_url}/api/v1/models")
-
-        resp = client.get("/api/v1/models", timeout=TIMEOUT_MODELS)
-        duration = (time.time() - start_time) * 1000
-
-        print(f"Status Code: {resp['status_code']}")
-        print("Response:")
-        print_json(resp["body"])
-
-        if resp["status_code"] == 401:
-            return TestResult(
-                "List Models",
-                TestStatus.FAILED,
-                "Authentication failed",
-                duration,
-            )
-
-        if resp["status_code"] != 200:
-            return TestResult(
-                "List Models",
-                TestStatus.FAILED,
-                f"Expected 200, got {resp['status_code']}",
-                duration,
-            )
-
-        body = resp["body"]
-
-        # Validate OpenRouter response structure
-        if "data" not in body:
-            return TestResult(
-                "List Models",
-                TestStatus.FAILED,
-                "Missing 'data' field (OpenRouter format requires 'data' array)",
-                duration,
-            )
-
-        if not isinstance(body["data"], list) or len(body["data"]) == 0:
-            return TestResult(
-                "List Models",
-                TestStatus.FAILED,
-                "'data' must be a non-empty array",
-                duration,
-            )
-
-        # Validate model structure per OpenRouter spec
-        model = body["data"][0]
-        required_fields = [
-            "id",
-            "name",
-            "created",
-            "pricing",
-            "input_modalities",
-            "output_modalities",
-        ]
-        missing = [f for f in required_fields if f not in model]
-
-        if missing:
-            return TestResult(
-                "List Models",
-                TestStatus.FAILED,
-                f"Model missing required fields: {missing}",
-                duration,
-            )
-
-        # Validate pricing format (OpenRouter requires strings)
-        pricing = model.get("pricing", {})
-        if not isinstance(pricing, dict):
-            return TestResult(
-                "List Models",
-                TestStatus.FAILED,
-                "Pricing must be an object",
-                duration,
-            )
-
-        for key in ["prompt", "completion"]:
-            if key in pricing and not isinstance(pricing[key], str):
-                return TestResult(
-                    "List Models",
-                    TestStatus.FAILED,
-                    f"Pricing '{key}' must be a string (OpenRouter format)",
-                    duration,
-                )
-
-        # Validate modalities
-        if "audio" not in model.get("output_modalities", []):
-            return TestResult(
-                "List Models",
-                TestStatus.FAILED,
-                "Output modalities should include 'audio'",
-                duration,
-            )
-
-        print(f"\n✓ Found {len(body['data'])} model(s)")
-        print(f"✓ Primary model: {model['name']} ({model['id']})")
-        print(f"✓ Pricing: prompt={pricing.get('prompt')}, completion={pricing.get('completion')}")
-
-        return TestResult(
-            "List Models",
-            TestStatus.PASSED,
-            f"Found {len(body['data'])} model(s), OpenRouter format valid",
-            duration,
-            body,
+        resp = requests.get(
+            f"{base_url}/api/v1/models",
+            headers=get_headers(api_key),
+            timeout=10
         )
-
+        print(f"状态码: {resp.status_code}")
+        print(f"响应: {json.dumps(resp.json(), indent=2, ensure_ascii=False)}")
+        return resp.status_code == 200
     except Exception as e:
-        return TestResult(
-            "List Models",
-            TestStatus.FAILED,
-            f"Error: {str(e)}",
-            (time.time() - start_time) * 1000,
-        )
+        print(f"错误: {e}")
+        return False
 
 
-def test_chat_completions_basic(ctx: TestContext) -> TestResult:
-    """
-    Test: Basic Chat Completions (Sample Query Mode)
+def test_natural_language_mode(base_url: str, api_key: Optional[str] = None) -> bool:
+    """测试自然语言模式 (Sample Mode)"""
+    print("\n" + "=" * 60)
+    print("测试: 自然语言模式 (Sample Mode)")
+    print("=" * 60)
 
-    Tests the LLM-powered sample generation where user provides a simple
-    description and the system generates appropriate prompt and lyrics.
+    payload = {
+        "messages": [
+            {"role": "user", "content": "Generate an upbeat pop song about summer and travel"}
+        ],
+        "vocal_language": "en",
+        "duration": 30,
+    }
 
-    Validates:
-    - POST /v1/chat/completions returns 200
-    - Response follows OpenAI chat completion format
-    - Audio data is present and valid base64
-    - Usage statistics are included
-    """
-    print_header("Test: Chat Completions - Sample Query Mode")
-    start_time = time.time()
+    print(f"请求: {json.dumps(payload, indent=2, ensure_ascii=False)}")
 
     try:
-        client = HTTPClient(ctx.base_url, ctx.api_key)
-
-        request_body = {
-            "model": DEFAULT_MODEL,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "Create an upbeat electronic dance track with energetic beats"
-                }
-            ],
-            "modalities": ["audio"],
-            "temperature": 0.85,
-            "top_p": 0.9,
-            "instrumental": True,
-        }
-
-        print("Request Body:")
-        print_json(request_body)
-        print("\n⏳ Generating music... (this may take 1-5 minutes)")
-
-        resp = client.post(
-            "/v1/chat/completions",
-            request_body,
-            timeout=TIMEOUT_GENERATION,
+        resp = requests.post(
+            f"{base_url}/v1/chat/completions",
+            headers=get_headers(api_key),
+            json=payload,
+            timeout=300
         )
-        duration = (time.time() - start_time) * 1000
+        print(f"状态码: {resp.status_code}")
 
-        print(f"\nStatus Code: {resp['status_code']}")
+        if resp.status_code == 200:
+            data = resp.json()
+            message = data["choices"][0]["message"]
+            content = message.get("content") or ""
+            audio_list = message.get("audio") or []
 
-        if resp["status_code"] != 200:
-            print(f"Error: {resp['text'][:500]}")
-            return TestResult(
-                "Chat Completions (Basic)",
-                TestStatus.FAILED,
-                f"Expected 200, got {resp['status_code']}",
-                duration,
-            )
+            print(f"\n内容:\n{content if content else '(无文本内容)'}")
+            print(f"音频数量: {len(audio_list)}")
 
-        body = resp["body"]
+            if audio_list and len(audio_list) > 0:
+                audio_item = audio_list[0]
+                audio_url = audio_item.get("audio_url", {}).get("url", "")
+                if audio_url:
+                    filepath = save_audio(audio_url, "test_natural_language.mp3")
+                    print(f"音频已保存: {filepath}")
+                else:
+                    print("警告: audio_url 为空")
+            else:
+                print("警告: 没有返回音频数据")
 
-        # Validate OpenAI chat completion format
-        required_fields = ["id", "object", "created", "model", "choices", "usage"]
-        missing = [f for f in required_fields if f not in body]
-
-        if missing:
-            return TestResult(
-                "Chat Completions (Basic)",
-                TestStatus.FAILED,
-                f"Missing required fields: {missing}",
-                duration,
-            )
-
-        if body.get("object") != "chat.completion":
-            return TestResult(
-                "Chat Completions (Basic)",
-                TestStatus.FAILED,
-                f"Expected object='chat.completion', got '{body.get('object')}'",
-                duration,
-            )
-
-        # Validate choices
-        choices = body.get("choices", [])
-        if not choices:
-            return TestResult(
-                "Chat Completions (Basic)",
-                TestStatus.FAILED,
-                "Response has no choices",
-                duration,
-            )
-
-        choice = choices[0]
-        message = choice.get("message", {})
-        audio = message.get("audio", {})
-
-        if not audio.get("data"):
-            return TestResult(
-                "Chat Completions (Basic)",
-                TestStatus.FAILED,
-                "No audio data in response",
-                duration,
-            )
-
-        # Validate base64 audio
-        try:
-            audio_bytes = base64.b64decode(audio["data"])
-        except Exception as e:
-            return TestResult(
-                "Chat Completions (Basic)",
-                TestStatus.FAILED,
-                f"Invalid base64 audio: {e}",
-                duration,
-            )
-
-        # Display response (without audio data)
-        display_body = json.loads(json.dumps(body))
-        display_body["choices"][0]["message"]["audio"]["data"] = f"<{len(audio['data'])} chars base64>"
-        print("\nResponse Body:")
-        print_json(display_body)
-
-        # Save audio if enabled
-        audio_file = None
-        if ctx.save_audio:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            audio_file = save_audio(
-                audio["data"],
-                f"test_basic_{timestamp}.mp3",
-                ctx.output_dir,
-            )
-            print(f"\n✓ Audio saved: {audio_file}")
-
-        print(f"✓ Audio size: {len(audio_bytes)} bytes ({len(audio_bytes)/1024/1024:.2f} MB)")
-        print(f"✓ Usage: prompt_tokens={body['usage'].get('prompt_tokens')}, completion_tokens={body['usage'].get('completion_tokens')}")
-
-        return TestResult(
-            "Chat Completions (Basic)",
-            TestStatus.PASSED,
-            f"Generated {len(audio_bytes)} bytes audio",
-            duration,
-            {"audio_file": audio_file, "audio_size": len(audio_bytes)},
-        )
-
+            return True
+        else:
+            print(f"错误响应: {resp.text}")
+            return False
     except Exception as e:
-        return TestResult(
-            "Chat Completions (Basic)",
-            TestStatus.FAILED,
-            f"Error: {str(e)}",
-            (time.time() - start_time) * 1000,
-        )
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 
-def test_chat_completions_with_tags(ctx: TestContext) -> TestResult:
-    """
-    Test: Chat Completions with Tag Format
+def test_tagged_mode(base_url: str, api_key: Optional[str] = None) -> bool:
+    """测试标签模式 (Tagged Mode)"""
+    print("\n" + "=" * 60)
+    print("测试: 标签模式 (Tagged Mode)")
+    print("=" * 60)
 
-    Tests the explicit tag-based input format:
-    - <prompt>...</prompt> for style/description
-    - <lyrics>...</lyrics> for song lyrics
-
-    This is the recommended format for precise control.
-    """
-    print_header("Test: Chat Completions - Tag Format (<prompt> <lyrics>)")
-    start_time = time.time()
-
-    try:
-        client = HTTPClient(ctx.base_url, ctx.api_key)
-
-        # Use tag format for explicit prompt and lyrics
-        content = """<prompt>Soft acoustic ballad with gentle guitar and warm vocals</prompt>
-<lyrics>
-[Verse]
-Walking through the morning light
-Everything feels so right
-The world is waking up with me
-And I feel so free
-
-[Chorus]
-This is the moment we live for
-Open up every door
-Let the sunshine in
-</lyrics>"""
-
-        request_body = {
-            "model": DEFAULT_MODEL,
-            "messages": [{"role": "user", "content": content}],
-            "modalities": ["audio"],
-            "temperature": 0.85,
-            "vocal_language": "en",
-            "instrumental": False,
-        }
-
-        print("Request Body (Tag Format):")
-        print_json(request_body, max_str_len=300)
-        print("\n⏳ Generating music with lyrics... (this may take 1-5 minutes)")
-
-        resp = client.post(
-            "/v1/chat/completions",
-            request_body,
-            timeout=TIMEOUT_GENERATION,
-        )
-        duration = (time.time() - start_time) * 1000
-
-        print(f"\nStatus Code: {resp['status_code']}")
-
-        if resp["status_code"] != 200:
-            print(f"Error: {resp['text'][:500]}")
-            return TestResult(
-                "Chat Completions (Tags)",
-                TestStatus.FAILED,
-                f"Expected 200, got {resp['status_code']}",
-                duration,
-            )
-
-        body = resp["body"]
-        choices = body.get("choices", [])
-
-        if not choices:
-            return TestResult(
-                "Chat Completions (Tags)",
-                TestStatus.FAILED,
-                "No choices in response",
-                duration,
-            )
-
-        audio = choices[0].get("message", {}).get("audio", {})
-
-        if not audio.get("data"):
-            return TestResult(
-                "Chat Completions (Tags)",
-                TestStatus.FAILED,
-                "No audio data in response",
-                duration,
-            )
-
-        audio_bytes = base64.b64decode(audio["data"])
-        transcript = audio.get("transcript", "")
-
-        # Save audio
-        audio_file = None
-        if ctx.save_audio:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            audio_file = save_audio(
-                audio["data"],
-                f"test_tags_{timestamp}.mp3",
-                ctx.output_dir,
-            )
-            print(f"\n✓ Audio saved: {audio_file}")
-
-        print(f"✓ Audio size: {len(audio_bytes)} bytes")
-        if transcript:
-            print(f"✓ Transcript: {truncate_str(transcript, 100)}")
-
-        return TestResult(
-            "Chat Completions (Tags)",
-            TestStatus.PASSED,
-            f"Generated vocal track with {len(audio_bytes)} bytes",
-            duration,
-            {"audio_file": audio_file, "transcript": transcript},
-        )
-
-    except Exception as e:
-        return TestResult(
-            "Chat Completions (Tags)",
-            TestStatus.FAILED,
-            f"Error: {str(e)}",
-            (time.time() - start_time) * 1000,
-        )
-
-
-def test_chat_completions_lyrics_heuristic(ctx: TestContext) -> TestResult:
-    """
-    Test: Chat Completions with Lyrics Heuristic Detection
-
-    Tests automatic lyrics detection when user provides lyrics-like text
-    without explicit tags. The server should detect and handle accordingly.
-    """
-    print_header("Test: Chat Completions - Lyrics Heuristic Detection")
-    start_time = time.time()
-
-    try:
-        client = HTTPClient(ctx.base_url, ctx.api_key)
-
-        # Lyrics-like content without tags (should be auto-detected)
-        lyrics_content = """[Verse 1]
-Under the stars tonight
-I found my way back home
-Through the darkness and the light
-I never walk alone
+    content = """<prompt>A gentle acoustic ballad in C major, 80 BPM, female vocal</prompt>
+<lyrics>[Verse 1]
+Sunlight through the window
+A brand new day begins
 
 [Chorus]
 We are the dreamers
-We are the believers
-Together forever
-Nothing can break us"""
+We are the light</lyrics>"""
 
-        request_body = {
-            "model": DEFAULT_MODEL,
-            "messages": [{"role": "user", "content": lyrics_content}],
-            "modalities": ["audio"],
-            "temperature": 0.85,
-        }
+    payload = {
+        "messages": [{"role": "user", "content": content}],
+        "vocal_language": "en",
+        "duration": 30,
+    }
 
-        print("Request Body (Lyrics Auto-Detection):")
-        print_json(request_body, max_str_len=200)
-        print("\n⏳ Generating... (server should auto-detect lyrics format)")
-
-        resp = client.post(
-            "/v1/chat/completions",
-            request_body,
-            timeout=TIMEOUT_GENERATION,
-        )
-        duration = (time.time() - start_time) * 1000
-
-        print(f"\nStatus Code: {resp['status_code']}")
-
-        if resp["status_code"] != 200:
-            print(f"Error: {resp['text'][:500]}")
-            return TestResult(
-                "Chat Completions (Heuristic)",
-                TestStatus.FAILED,
-                f"Expected 200, got {resp['status_code']}",
-                duration,
-            )
-
-        body = resp["body"]
-        audio = body.get("choices", [{}])[0].get("message", {}).get("audio", {})
-
-        if not audio.get("data"):
-            return TestResult(
-                "Chat Completions (Heuristic)",
-                TestStatus.FAILED,
-                "No audio data in response",
-                duration,
-            )
-
-        audio_bytes = base64.b64decode(audio["data"])
-
-        if ctx.save_audio:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_audio(audio["data"], f"test_heuristic_{timestamp}.mp3", ctx.output_dir)
-
-        print(f"✓ Audio size: {len(audio_bytes)} bytes")
-        print("✓ Lyrics heuristic detection worked")
-
-        return TestResult(
-            "Chat Completions (Heuristic)",
-            TestStatus.PASSED,
-            f"Lyrics auto-detected, generated {len(audio_bytes)} bytes",
-            duration,
-        )
-
-    except Exception as e:
-        return TestResult(
-            "Chat Completions (Heuristic)",
-            TestStatus.FAILED,
-            f"Error: {str(e)}",
-            (time.time() - start_time) * 1000,
-        )
-
-
-def test_chat_completions_with_params(ctx: TestContext) -> TestResult:
-    """
-    Test: Chat Completions with Custom Parameters
-
-    Tests ACE-Step specific parameters:
-    - duration: Audio length
-    - bpm: Beats per minute
-    - vocal_language: Language code
-    - instrumental: Boolean flag
-    """
-    print_header("Test: Chat Completions - Custom Parameters")
-    start_time = time.time()
+    print(f"请求: {json.dumps(payload, indent=2, ensure_ascii=False)}")
 
     try:
-        client = HTTPClient(ctx.base_url, ctx.api_key)
-
-        request_body = {
-            "model": DEFAULT_MODEL,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "<prompt>Fast-paced rock instrumental with heavy drums</prompt>"
-                }
-            ],
-            "modalities": ["audio"],
-            "temperature": 0.9,
-            "top_p": 0.95,
-            # ACE-Step specific params
-            "duration": 30.0,  # 30 seconds
-            "bpm": 140,
-            "instrumental": True,
-        }
-
-        print("Request Body (Custom Parameters):")
-        print_json(request_body)
-        print("\n⏳ Generating 30-second track at 140 BPM...")
-
-        resp = client.post(
-            "/v1/chat/completions",
-            request_body,
-            timeout=TIMEOUT_GENERATION,
+        resp = requests.post(
+            f"{base_url}/v1/chat/completions",
+            headers=get_headers(api_key),
+            json=payload,
+            timeout=300
         )
-        duration = (time.time() - start_time) * 1000
-
-        print(f"\nStatus Code: {resp['status_code']}")
-
-        if resp["status_code"] != 200:
-            print(f"Error: {resp['text'][:500]}")
-            return TestResult(
-                "Chat Completions (Params)",
-                TestStatus.FAILED,
-                f"Expected 200, got {resp['status_code']}",
-                duration,
-            )
-
-        body = resp["body"]
-        audio = body.get("choices", [{}])[0].get("message", {}).get("audio", {})
-
-        if not audio.get("data"):
-            return TestResult(
-                "Chat Completions (Params)",
-                TestStatus.FAILED,
-                "No audio data",
-                duration,
-            )
-
-        audio_bytes = base64.b64decode(audio["data"])
-
-        if ctx.save_audio:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_audio(audio["data"], f"test_params_{timestamp}.mp3", ctx.output_dir)
-
-        print(f"✓ Audio size: {len(audio_bytes)} bytes")
-        print("✓ Custom parameters accepted")
-
-        return TestResult(
-            "Chat Completions (Params)",
-            TestStatus.PASSED,
-            f"Generated with custom params: {len(audio_bytes)} bytes",
-            duration,
-        )
-
-    except Exception as e:
-        return TestResult(
-            "Chat Completions (Params)",
-            TestStatus.FAILED,
-            f"Error: {str(e)}",
-            (time.time() - start_time) * 1000,
-        )
-
-
-def test_openai_sdk_compatibility(ctx: TestContext) -> TestResult:
-    """
-    Test: OpenAI SDK Compatibility
-
-    Validates that the API works with the official OpenAI Python SDK,
-    which is a key requirement for OpenRouter compatibility.
-    """
-    print_header("Test: OpenAI SDK Compatibility")
-    start_time = time.time()
-
-    if not ctx.use_openai_sdk:
-        return TestResult(
-            "OpenAI SDK",
-            TestStatus.SKIPPED,
-            "Use --use-openai-sdk to enable",
-            0,
-        )
-
-    try:
-        sdk_client = OpenAIClient(ctx.base_url, ctx.api_key)
-
-        print("Using OpenAI Python SDK...")
-        print(f"Base URL: {ctx.base_url}/v1")
-
-        # Note: OpenAI SDK doesn't support custom fields like 'instrumental'
-        # so we use tag format instead
-        response = sdk_client.chat_completions(
-            model=DEFAULT_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "<prompt>Calm ambient music for relaxation</prompt>"
-                }
-            ],
-        )
-        duration = (time.time() - start_time) * 1000
-
-        print("\nResponse received via OpenAI SDK")
-
-        if not response.get("choices"):
-            return TestResult(
-                "OpenAI SDK",
-                TestStatus.FAILED,
-                "No choices in SDK response",
-                duration,
-            )
-
-        print(f"✓ Response ID: {response.get('id')}")
-        print(f"✓ Model: {response.get('model')}")
-        print("✓ OpenAI SDK compatibility confirmed")
-
-        return TestResult(
-            "OpenAI SDK",
-            TestStatus.PASSED,
-            "SDK compatibility verified",
-            duration,
-        )
-
-    except ImportError:
-        return TestResult(
-            "OpenAI SDK",
-            TestStatus.SKIPPED,
-            "openai package not installed",
-            0,
-        )
-    except Exception as e:
-        return TestResult(
-            "OpenAI SDK",
-            TestStatus.FAILED,
-            f"Error: {str(e)}",
-            (time.time() - start_time) * 1000,
-        )
-
-
-def test_error_handling_empty_messages(ctx: TestContext) -> TestResult:
-    """
-    Test: Error Handling - Empty Messages
-
-    Validates proper error response for invalid requests.
-    """
-    print_header("Test: Error Handling - Empty Messages")
-    start_time = time.time()
-
-    try:
-        client = HTTPClient(ctx.base_url, ctx.api_key)
-
-        request_body = {
-            "model": DEFAULT_MODEL,
-            "messages": [],
-            "modalities": ["audio"],
-        }
-
-        print("Sending request with empty messages...")
-        resp = client.post("/v1/chat/completions", request_body, timeout=30)
-        duration = (time.time() - start_time) * 1000
-
-        print(f"Status Code: {resp['status_code']}")
-
-        if resp["status_code"] == 200:
-            return TestResult(
-                "Error (Empty Messages)",
-                TestStatus.FAILED,
-                "Server should reject empty messages",
-                duration,
-            )
-
-        if 400 <= resp["status_code"] < 500:
-            print(f"✓ Server correctly rejected: {resp['body'].get('detail', resp['text'][:200])}")
-            return TestResult(
-                "Error (Empty Messages)",
-                TestStatus.PASSED,
-                f"Correctly rejected with status {resp['status_code']}",
-                duration,
-            )
-
-        return TestResult(
-            "Error (Empty Messages)",
-            TestStatus.FAILED,
-            f"Unexpected status: {resp['status_code']}",
-            duration,
-        )
-
-    except Exception as e:
-        return TestResult(
-            "Error (Empty Messages)",
-            TestStatus.FAILED,
-            f"Error: {str(e)}",
-            (time.time() - start_time) * 1000,
-        )
-
-
-def test_error_handling_invalid_model(ctx: TestContext) -> TestResult:
-    """
-    Test: Error Handling - Invalid Model
-
-    Validates error response when requesting non-existent model.
-    """
-    print_header("Test: Error Handling - Invalid Model")
-    start_time = time.time()
-
-    try:
-        client = HTTPClient(ctx.base_url, ctx.api_key)
-
-        request_body = {
-            "model": "invalid/nonexistent-model",
-            "messages": [{"role": "user", "content": "test"}],
-            "modalities": ["audio"],
-        }
-
-        print("Sending request with invalid model...")
-        resp = client.post("/v1/chat/completions", request_body, timeout=30)
-        duration = (time.time() - start_time) * 1000
-
-        print(f"Status Code: {resp['status_code']}")
-
-        # Note: Some servers may accept any model ID and route to default
-        # This is acceptable behavior
-        if resp["status_code"] == 200:
-            print("⚠ Server accepted invalid model (routing to default)")
-            return TestResult(
-                "Error (Invalid Model)",
-                TestStatus.PASSED,
-                "Server routes invalid model to default (acceptable)",
-                duration,
-            )
-
-        if 400 <= resp["status_code"] < 500:
-            print(f"✓ Server rejected invalid model")
-            return TestResult(
-                "Error (Invalid Model)",
-                TestStatus.PASSED,
-                f"Correctly rejected with status {resp['status_code']}",
-                duration,
-            )
-
-        return TestResult(
-            "Error (Invalid Model)",
-            TestStatus.FAILED,
-            f"Unexpected status: {resp['status_code']}",
-            duration,
-        )
-
-    except Exception as e:
-        return TestResult(
-            "Error (Invalid Model)",
-            TestStatus.FAILED,
-            f"Error: {str(e)}",
-            (time.time() - start_time) * 1000,
-        )
-
-
-def test_authentication_valid(ctx: TestContext) -> TestResult:
-    """
-    Test: Authentication - Valid API Key
-
-    Validates Bearer token authentication works correctly.
-    """
-    print_header("Test: Authentication - Valid Key")
-    start_time = time.time()
-
-    if not ctx.api_key:
-        return TestResult(
-            "Auth (Valid Key)",
-            TestStatus.SKIPPED,
-            "No API key configured",
-            0,
-        )
-
-    try:
-        client = HTTPClient(ctx.base_url, ctx.api_key)
-        print(f"Using API Key: {ctx.api_key[:8]}...")
-
-        resp = client.get("/api/v1/models", timeout=TIMEOUT_MODELS)
-        duration = (time.time() - start_time) * 1000
-
-        print(f"Status Code: {resp['status_code']}")
-
-        if resp["status_code"] == 200:
-            print("✓ Authentication successful")
-            return TestResult(
-                "Auth (Valid Key)",
-                TestStatus.PASSED,
-                "Valid API key accepted",
-                duration,
-            )
-
-        if resp["status_code"] == 401:
-            return TestResult(
-                "Auth (Valid Key)",
-                TestStatus.FAILED,
-                "Valid key rejected",
-                duration,
-            )
-
-        return TestResult(
-            "Auth (Valid Key)",
-            TestStatus.FAILED,
-            f"Unexpected status: {resp['status_code']}",
-            duration,
-        )
-
-    except Exception as e:
-        return TestResult(
-            "Auth (Valid Key)",
-            TestStatus.FAILED,
-            f"Error: {str(e)}",
-            (time.time() - start_time) * 1000,
-        )
-
-
-def test_authentication_invalid(ctx: TestContext) -> TestResult:
-    """
-    Test: Authentication - Invalid API Key
-
-    Validates server rejects invalid Bearer tokens.
-    """
-    print_header("Test: Authentication - Invalid Key")
-    start_time = time.time()
-
-    if not ctx.api_key:
-        return TestResult(
-            "Auth (Invalid Key)",
-            TestStatus.SKIPPED,
-            "No API key configured (auth may be disabled)",
-            0,
-        )
-
-    try:
-        # Use wrong API key
-        client = HTTPClient(ctx.base_url, "invalid_key_12345")
-        print("Using invalid API key...")
-
-        resp = client.get("/api/v1/models", timeout=TIMEOUT_MODELS)
-        duration = (time.time() - start_time) * 1000
-
-        print(f"Status Code: {resp['status_code']}")
-
-        if resp["status_code"] == 401:
-            print("✓ Invalid key correctly rejected")
-            return TestResult(
-                "Auth (Invalid Key)",
-                TestStatus.PASSED,
-                "Invalid key rejected with 401",
-                duration,
-            )
-
-        if resp["status_code"] == 200:
-            return TestResult(
-                "Auth (Invalid Key)",
-                TestStatus.FAILED,
-                "Server accepted invalid key",
-                duration,
-            )
-
-        return TestResult(
-            "Auth (Invalid Key)",
-            TestStatus.FAILED,
-            f"Unexpected status: {resp['status_code']}",
-            duration,
-        )
-
-    except Exception as e:
-        return TestResult(
-            "Auth (Invalid Key)",
-            TestStatus.FAILED,
-            f"Error: {str(e)}",
-            (time.time() - start_time) * 1000,
-        )
-
-
-# =============================================================================
-# Test Runner
-# =============================================================================
-
-def run_tests(ctx: TestContext, skip_generation: bool = False, full_test: bool = False) -> int:
-    """
-    Run test suite and return exit code.
-
-    Args:
-        ctx: Test context with configuration
-        skip_generation: Skip audio generation tests
-        full_test: Run all test scenarios
-
-    Returns:
-        0 if all tests pass, 1 otherwise
-    """
-    print_header("ACE-Step OpenRouter API Test Suite", "=", 70)
-    print(f"Base URL: {ctx.base_url}")
-    print(f"API Key: {'Configured' if ctx.api_key else 'Not configured'}")
-    print(f"OpenAI SDK: {'Enabled' if ctx.use_openai_sdk else 'Disabled'}")
-    print(f"Skip Generation: {skip_generation}")
-    print(f"Full Test: {full_test}")
-    print(f"Output Directory: {ctx.output_dir}")
-
-    results: List[TestResult] = []
-
-    # === Core Tests (always run) ===
-    results.append(test_health_check(ctx))
-    results.append(test_list_models(ctx))
-
-    # === Generation Tests ===
-    if not skip_generation:
-        results.append(test_chat_completions_basic(ctx))
-
-        if full_test:
-            results.append(test_chat_completions_with_tags(ctx))
-            results.append(test_chat_completions_lyrics_heuristic(ctx))
-            results.append(test_chat_completions_with_params(ctx))
-
-    # === SDK Compatibility ===
-    if ctx.use_openai_sdk:
-        results.append(test_openai_sdk_compatibility(ctx))
-
-    # === Error Handling ===
-    results.append(test_error_handling_empty_messages(ctx))
-    results.append(test_error_handling_invalid_model(ctx))
-
-    # === Authentication ===
-    results.append(test_authentication_valid(ctx))
-    results.append(test_authentication_invalid(ctx))
-
-    # === Summary ===
-    print_header("Test Summary", "=", 70)
-
-    passed = sum(1 for r in results if r.status == TestStatus.PASSED)
-    failed = sum(1 for r in results if r.status == TestStatus.FAILED)
-    skipped = sum(1 for r in results if r.status == TestStatus.SKIPPED)
-    total = len(results)
-
-    for result in results:
-        if result.status == TestStatus.PASSED:
-            symbol = "✓"
-            status = "PASSED"
-        elif result.status == TestStatus.FAILED:
-            symbol = "✗"
-            status = "FAILED"
+        print(f"状态码: {resp.status_code}")
+
+        if resp.status_code == 200:
+            data = resp.json()
+            message = data["choices"][0]["message"]
+            content = message.get("content") or ""
+            audio_list = message.get("audio") or []
+
+            print(f"\n内容:\n{content if content else '(无文本内容)'}")
+            print(f"音频数量: {len(audio_list)}")
+
+            if audio_list and len(audio_list) > 0:
+                audio_url = audio_list[0].get("audio_url", {}).get("url", "")
+                if audio_url:
+                    filepath = save_audio(audio_url, "test_tagged_mode.mp3")
+                    print(f"音频已保存: {filepath}")
+
+            return True
         else:
-            symbol = "○"
-            status = "SKIPPED"
-
-        print(f"  {symbol} {result.name}: {status}")
-        if result.message:
-            print(f"    └─ {result.message}")
-        if result.duration_ms > 0:
-            print(f"    └─ Duration: {result.duration_ms/1000:.2f}s")
-
-    print()
-    print(f"Results: {passed} passed, {failed} failed, {skipped} skipped (total: {total})")
-
-    if failed == 0:
-        print("\n✅ All tests PASSED!")
-        return 0
-    else:
-        print(f"\n❌ {failed} test(s) FAILED")
-        return 1
+            print(f"错误响应: {resp.text}")
+            return False
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 
-def main() -> int:
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="OpenRouter-compatible API test suite for ACE-Step",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Basic test
-  python client_test.py --base-url http://127.0.0.1:8002
+def test_lyrics_only_mode(base_url: str, api_key: Optional[str] = None) -> bool:
+    """测试纯歌词模式 (Lyrics-Only Mode)"""
+    print("\n" + "=" * 60)
+    print("测试: 纯歌词模式 (Lyrics-Only Mode)")
+    print("=" * 60)
 
-  # Full test with all scenarios
-  python client_test.py --base-url http://127.0.0.1:8002 --full-test
+    lyrics = """[Verse 1]
+Walking down the street
+Feeling the beat
 
-  # Quick test (skip audio generation)
-  python client_test.py --skip-generation
+[Chorus]
+Dance with me tonight
+Under the moonlight"""
 
-  # With OpenAI SDK
-  python client_test.py --use-openai-sdk
+    payload = {
+        "messages": [{"role": "user", "content": lyrics}],
+        "vocal_language": "en",
+        "duration": 30,
+    }
 
-  # With authentication
-  python client_test.py --api-key your_api_key
-""",
-    )
+    print(f"请求: {json.dumps(payload, indent=2, ensure_ascii=False)}")
 
+    try:
+        resp = requests.post(
+            f"{base_url}/v1/chat/completions",
+            headers=get_headers(api_key),
+            json=payload,
+            timeout=300
+        )
+        print(f"状态码: {resp.status_code}")
+
+        return handle_response(resp, "test_lyrics_only.mp3")
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_instrumental_mode(base_url: str, api_key: Optional[str] = None) -> bool:
+    """测试纯音乐模式 (Instrumental Mode)"""
+    print("\n" + "=" * 60)
+    print("测试: 纯音乐模式 (Instrumental Mode)")
+    print("=" * 60)
+
+    payload = {
+        "messages": [
+            {"role": "user", "content": "<prompt>Epic orchestral cinematic score, dramatic and powerful</prompt>"}
+        ],
+        "instrumental": True,
+        "duration": 30,
+    }
+
+    print(f"请求: {json.dumps(payload, indent=2, ensure_ascii=False)}")
+
+    try:
+        resp = requests.post(
+            f"{base_url}/v1/chat/completions",
+            headers=get_headers(api_key),
+            json=payload,
+            timeout=300
+        )
+        print(f"状态码: {resp.status_code}")
+
+        return handle_response(resp, "test_instrumental.mp3")
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_streaming_mode(base_url: str, api_key: Optional[str] = None) -> bool:
+    """测试流式响应模式 (Streaming Mode)"""
+    print("\n" + "=" * 60)
+    print("测试: 流式响应模式 (Streaming Mode)")
+    print("=" * 60)
+
+    payload = {
+        "messages": [
+            {"role": "user", "content": "Generate a cheerful guitar piece"}
+        ],
+        "stream": True,
+        "instrumental": True,
+        "duration": 30,
+    }
+
+    print(f"请求: {json.dumps(payload, indent=2, ensure_ascii=False)}")
+
+    try:
+        resp = requests.post(
+            f"{base_url}/v1/chat/completions",
+            headers=get_headers(api_key),
+            json=payload,
+            stream=True,
+            timeout=300
+        )
+        print(f"状态码: {resp.status_code}")
+
+        if resp.status_code == 200:
+            content_parts = []
+            audio_url = None
+
+            print("\n接收流式数据:")
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+
+                if not line.startswith("data: "):
+                    continue
+
+                if line == "data: [DONE]":
+                    print("  [DONE]")
+                    break
+
+                try:
+                    chunk = json.loads(line[6:])
+                    delta = chunk["choices"][0]["delta"]
+                    finish_reason = chunk["choices"][0].get("finish_reason")
+
+                    if "role" in delta:
+                        print(f"  角色: {delta['role']}")
+
+                    if "content" in delta and delta["content"]:
+                        content_parts.append(delta["content"])
+                        # 心跳点不打印
+                        if delta["content"] != ".":
+                            print(f"  内容: {delta['content'][:100]}...")
+                        else:
+                            print("  [心跳]")
+
+                    if "audio" in delta and delta["audio"]:
+                        audio_item = delta["audio"][0]
+                        audio_url = audio_item.get("audio_url", {}).get("url", "")
+                        if audio_url:
+                            print(f"  音频数据已接收 (长度: {len(audio_url)} 字符)")
+
+                    if finish_reason:
+                        print(f"  完成原因: {finish_reason}")
+
+                except json.JSONDecodeError as e:
+                    print(f"  [解析错误] {e}")
+
+            full_content = "".join(content_parts)
+            print(f"\n完整内容:\n{full_content}")
+
+            if audio_url:
+                filepath = save_audio(audio_url, "test_streaming.mp3")
+                print(f"\n音频已保存: {filepath}")
+
+            return True
+        else:
+            print(f"错误响应: {resp.text}")
+            return False
+    except Exception as e:
+        print(f"错误: {e}")
+        return False
+
+
+def test_full_parameters(base_url: str, api_key: Optional[str] = None) -> bool:
+    """测试完整参数控制"""
+    print("\n" + "=" * 60)
+    print("测试: 完整参数控制")
+    print("=" * 60)
+
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "<prompt>Dreamy lo-fi hip hop beat with vinyl crackle</prompt><lyrics>[inst]</lyrics>"
+            }
+        ],
+        "temperature": 0.9,
+        "top_p": 0.95,
+        "bpm": 85,
+        "duration": 30,
+        "instrumental": True,
+        "thinking": False,
+        "use_cot_metas": True,
+        "use_cot_caption": True,
+        "use_cot_language": False,
+        "use_format": True,
+    }
+
+    print(f"请求: {json.dumps(payload, indent=2, ensure_ascii=False)}")
+
+    try:
+        resp = requests.post(
+            f"{base_url}/v1/chat/completions",
+            headers=get_headers(api_key),
+            json=payload,
+            timeout=300
+        )
+        print(f"状态码: {resp.status_code}")
+
+        return handle_response(resp, "test_full_params.mp3")
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_error_handling(base_url: str, api_key: Optional[str] = None) -> bool:
+    """测试错误处理"""
+    print("\n" + "=" * 60)
+    print("测试: 错误处理")
+    print("=" * 60)
+
+    # 测试空消息
+    print("\n1. 测试空消息:")
+    payload = {"messages": []}
+    try:
+        resp = requests.post(
+            f"{base_url}/v1/chat/completions",
+            headers=get_headers(api_key),
+            json=payload,
+            timeout=30
+        )
+        print(f"  状态码: {resp.status_code}")
+        print(f"  响应: {resp.text[:200]}")
+    except Exception as e:
+        print(f"  错误: {e}")
+
+    # 测试无内容消息
+    print("\n2. 测试无内容消息:")
+    payload = {"messages": [{"role": "user", "content": ""}]}
+    try:
+        resp = requests.post(
+            f"{base_url}/v1/chat/completions",
+            headers=get_headers(api_key),
+            json=payload,
+            timeout=30
+        )
+        print(f"  状态码: {resp.status_code}")
+        print(f"  响应: {resp.text[:200]}")
+    except Exception as e:
+        print(f"  错误: {e}")
+
+    return True
+
+
+# =============================================================================
+# 主函数
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="ACE-Step OpenRouter API 客户端测试")
     parser.add_argument(
         "--base-url",
-        default=os.getenv("ACESTEP_API_URL", DEFAULT_BASE_URL),
-        help=f"API base URL (default: {DEFAULT_BASE_URL})",
+        default=os.getenv("OPENROUTER_BASE_URL", DEFAULT_BASE_URL),
+        help=f"API 基础 URL (默认: {DEFAULT_BASE_URL})"
     )
     parser.add_argument(
         "--api-key",
         default=os.getenv("OPENROUTER_API_KEY"),
-        help="API key for Bearer authentication",
+        help="API 密钥 (可选)"
     )
     parser.add_argument(
-        "--use-openai-sdk",
-        action="store_true",
-        help="Test with OpenAI Python SDK",
+        "--test",
+        choices=[
+            "health", "models", "natural", "tagged", "lyrics",
+            "instrumental", "streaming", "full", "error", "all"
+        ],
+        default="health",
+        help="要运行的测试 (默认: health)"
     )
-    parser.add_argument(
-        "--skip-generation",
-        action="store_true",
-        help="Skip audio generation tests (faster)",
-    )
-    parser.add_argument(
-        "--full-test",
-        action="store_true",
-        help="Run all test scenarios including advanced cases",
-    )
-    parser.add_argument(
-        "--no-save",
-        action="store_true",
-        help="Don't save generated audio files",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default=os.getenv("ACESTEP_OUTPUT_DIR", "."),
-        help="Directory to save generated audio files",
-    )
-    parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Verbose output",
-    )
-
     args = parser.parse_args()
 
-    # Create output directory if needed
-    if not args.no_save:
-        os.makedirs(args.output_dir, exist_ok=True)
+    print("=" * 60)
+    print("ACE-Step OpenRouter API 客户端测试")
+    print("=" * 60)
+    print(f"Base URL: {args.base_url}")
+    print(f"API Key: {'已设置' if args.api_key else '未设置'}")
+    print(f"输出目录: {OUTPUT_DIR}")
 
-    ctx = TestContext(
-        base_url=args.base_url.rstrip("/"),
-        api_key=args.api_key,
-        use_openai_sdk=args.use_openai_sdk,
-        save_audio=not args.no_save,
-        output_dir=args.output_dir,
-        verbose=args.verbose,
-    )
+    tests = {
+        "health": test_health,
+        "models": test_list_models,
+        "natural": test_natural_language_mode,
+        "tagged": test_tagged_mode,
+        "lyrics": test_lyrics_only_mode,
+        "instrumental": test_instrumental_mode,
+        "streaming": test_streaming_mode,
+        "full": test_full_parameters,
+        "error": test_error_handling,
+    }
 
-    return run_tests(
-        ctx,
-        skip_generation=args.skip_generation,
-        full_test=args.full_test,
-    )
+    results = {}
+
+    if args.test == "all":
+        for name, test_func in tests.items():
+            results[name] = test_func(args.base_url, args.api_key)
+    else:
+        results[args.test] = tests[args.test](args.base_url, args.api_key)
+
+    # 打印测试结果摘要
+    print("\n" + "=" * 60)
+    print("测试结果摘要")
+    print("=" * 60)
+    for name, passed in results.items():
+        status = "通过" if passed else "失败"
+        print(f"  {name}: {status}")
+
+    # 返回退出码
+    all_passed = all(results.values())
+    sys.exit(0 if all_passed else 1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
