@@ -20,15 +20,17 @@ from transformers.generation.logits_process import (
 )
 from acestep.constrained_logits_processor import MetadataConstrainedLogitsProcessor
 from acestep.constants import DEFAULT_LM_INSTRUCTION, DEFAULT_LM_UNDERSTAND_INSTRUCTION, DEFAULT_LM_INSPIRED_INSTRUCTION, DEFAULT_LM_REWRITE_INSTRUCTION
-from acestep.model_downloader import ensure_lm_model, check_model_exists
 
 
 class LLMHandler:
     """5Hz LM Handler for audio code generation"""
 
     STOP_REASONING_TAG = "</think>"
-    
-    def __init__(self):
+
+    # HuggingFace Space environment detection
+    IS_HUGGINGFACE_SPACE = os.environ.get("SPACE_ID") is not None
+
+    def __init__(self, persistent_storage_path: Optional[str] = None):
         """Initialize LLMHandler with default values"""
         self.llm = None
         self.llm_tokenizer = None
@@ -38,26 +40,37 @@ class LLMHandler:
         self.device = "cpu"
         self.dtype = torch.float32
         self.offload_to_cpu = False
-        
-        # Shared constrained decoding processor (initialized once when LLM is loaded)
+
+        # HuggingFace Space persistent storage support
+        if persistent_storage_path is None and self.IS_HUGGINGFACE_SPACE:
+            persistent_storage_path = "/data"
+        self.persistent_storage_path = persistent_storage_path
+
+        # Shared constrained decoding processor
         self.constrained_processor: Optional[MetadataConstrainedLogitsProcessor] = None
-        
-        # Shared HuggingFace model for perplexity calculation (when using vllm backend)
+
+        # Shared HuggingFace model for perplexity calculation
         self._hf_model_for_scoring = None
-    
-    def get_available_5hz_lm_models(self) -> List[str]:
-        """Scan and return all model directory names starting with 'acestep-5Hz-lm-'"""
+
+    def _get_checkpoint_dir(self) -> str:
+        """Get checkpoint directory, prioritizing persistent storage"""
+        if self.persistent_storage_path:
+            return os.path.join(self.persistent_storage_path, "checkpoints")
         current_file = os.path.abspath(__file__)
         project_root = os.path.dirname(os.path.dirname(current_file))
-        checkpoint_dir = os.path.join(project_root, "checkpoints")
-        
+        return os.path.join(project_root, "checkpoints")
+
+    def get_available_5hz_lm_models(self) -> List[str]:
+        """Scan and return all model directory names starting with 'acestep-5Hz-lm-'"""
+        checkpoint_dir = self._get_checkpoint_dir()
+
         models = []
         if os.path.exists(checkpoint_dir):
             for item in os.listdir(checkpoint_dir):
                 item_path = os.path.join(checkpoint_dir, item)
                 if os.path.isdir(item_path) and item.startswith("acestep-5Hz-lm-"):
                     models.append(item)
-        
+
         models.sort()
         return models
     
@@ -296,7 +309,7 @@ class LLMHandler:
         try:
             if device == "auto":
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-            
+
             self.device = device
             self.offload_to_cpu = offload_to_cpu
             # Set dtype based on device: bfloat16 for cuda, float32 for cpu
@@ -304,18 +317,12 @@ class LLMHandler:
                 self.dtype = torch.bfloat16 if device in ["cuda", "xpu"] else torch.float32
             else:
                 self.dtype = dtype
-            
-            # Auto-download LM model if not present
-            from pathlib import Path
-            checkpoint_path = Path(checkpoint_dir)
-            
-            if not check_model_exists(lm_model_path, checkpoint_path):
-                logger.info(f"[initialize] LM model '{lm_model_path}' not found, starting auto-download...")
-                success, msg = ensure_lm_model(lm_model_path, checkpoint_path)
-                if not success:
-                    return f"❌ Failed to download LM model '{lm_model_path}': {msg}", False
-                logger.info(f"[initialize] {msg}")
-            
+
+            # If lm_model_path is None, use default
+            if lm_model_path is None:
+                lm_model_path = "acestep-5Hz-lm-1.7B"
+                logger.info(f"[initialize] lm_model_path is None, using default: {lm_model_path}")
+
             full_lm_model_path = os.path.join(checkpoint_dir, lm_model_path)
             if not os.path.exists(full_lm_model_path):
                 return f"❌ 5Hz LM model not found at {full_lm_model_path}", False
@@ -467,8 +474,20 @@ class LLMHandler:
             codes_temperature=codes_temperature,
         )
 
+        # Calculate max_tokens based on target_duration if specified
+        # 5 audio codes = 1 second, plus ~500 tokens for CoT metadata and safety margin
+        if target_duration is not None and target_duration > 0:
+            # Ensure duration is within valid range (10-600 seconds)
+            effective_duration = max(10, min(600, target_duration))
+            max_tokens = int(effective_duration * 5) + 500
+            # Cap at model's max length
+            max_tokens = min(max_tokens, self.max_model_len - 64)
+        else:
+            # No duration constraint - use default (model will stop at EOS naturally)
+            max_tokens = self.max_model_len - 64
+
         sampling_params = SamplingParams(
-            max_tokens=self.max_model_len - 64,
+            max_tokens=max_tokens,
             temperature=effective_sampler_temp,
             cfg_scale=cfg_scale,
             top_k=top_k,
@@ -559,7 +578,17 @@ class LLMHandler:
 
         with self._load_model_context():
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            max_new_tokens = getattr(self.llm.config, "max_new_tokens", 4096)
+            
+            # Calculate max_new_tokens based on target_duration if specified
+            # 5 audio codes = 1 second, plus ~500 tokens for CoT metadata and safety margin
+            if target_duration is not None and target_duration > 0:
+                # Ensure duration is within valid range (10-600 seconds)
+                effective_duration = max(10, min(600, target_duration))
+                max_new_tokens = int(effective_duration * 5) + 500
+            else:
+                max_new_tokens = getattr(self.llm.config, "max_new_tokens", 4096)
+            
+            # Cap at model's max length
             if hasattr(self, "max_model_len"):
                 max_new_tokens = min(max_new_tokens, self.max_model_len - 64)
 
@@ -1920,6 +1949,18 @@ class LLMHandler:
             return output_text, f"✅ Generated successfully (pt) | length={len(output_text)}"
 
         except Exception as e:
+            # Reset nano-vllm state on error to prevent stale context from causing
+            # subsequent CUDA illegal memory access errors
+            if self.llm_backend == "vllm":
+                try:
+                    from nanovllm.utils.context import reset_context
+                    reset_context()
+                except ImportError:
+                    pass
+            # Clear CUDA cache to release any corrupted memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
             return "", f"❌ Error generating from formatted prompt: {e}"
     
     def _generate_with_constrained_decoding(

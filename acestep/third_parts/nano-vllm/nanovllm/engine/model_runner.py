@@ -325,6 +325,17 @@ class ModelRunner:
                 # Fall back to eager mode when block_tables is too large for CUDA graph
                 return self.model.compute_logits(self.model(input_ids, positions))
             
+            # Fix: Also check if block_tables row count matches batch size
+            # Dimension mismatch can cause CUDA illegal memory access during graph replay
+            if context.block_tables.size(0) != bs:
+                # Fall back to eager mode when block_tables row count doesn't match batch size
+                return self.model.compute_logits(self.model(input_ids, positions))
+            
+            # Fix: Verify slot_mapping and context_lens dimensions match batch size
+            if context.slot_mapping.size(0) != bs or context.context_lens.size(0) != bs:
+                # Fall back to eager mode when dimensions don't match
+                return self.model.compute_logits(self.model(input_ids, positions))
+            
             graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
             graph_vars = self.graph_vars
             graph_vars["input_ids"][:bs] = input_ids
@@ -416,9 +427,10 @@ class ModelRunner:
                 ).tolist()
                 
                 # Update logits processor state after sampling
-                for i, seq in enumerate(cond_seqs):
-                    if seq.logits_processor_update_state is not None:
-                        seq.logits_processor_update_state(token_ids_cfg[i])
+                # NOTE: Only update for the first sequence since all sequences share the same processor
+                # Updating multiple times would cause duplicate state updates (e.g., codes_count += N instead of += 1)
+                if cond_seqs and cond_seqs[0].logits_processor_update_state is not None:
+                    cond_seqs[0].logits_processor_update_state(token_ids_cfg[0])
                 
                 # Return token_ids (will be applied to both conditional and unconditional sequences)
                 return token_ids_cfg
@@ -483,9 +495,11 @@ class ModelRunner:
                 ).tolist()
                 
                 # Update logits processor state after sampling
-                for i, seq in enumerate(seqs):
-                    if seq.logits_processor_update_state is not None:
-                        seq.logits_processor_update_state(token_ids[i])
+                # NOTE: Only update for the first sequence since all sequences may share the same processor
+                # (when using a single SamplingParams for batch generation)
+                # Updating multiple times would cause duplicate state updates (e.g., codes_count += N instead of += 1)
+                if seqs and seqs[0].logits_processor_update_state is not None:
+                    seqs[0].logits_processor_update_state(token_ids[0])
                 
                 return token_ids
             else:

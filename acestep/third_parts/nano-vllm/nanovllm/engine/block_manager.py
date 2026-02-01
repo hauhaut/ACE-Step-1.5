@@ -86,6 +86,13 @@ class BlockManager:
             block = self.blocks[block_id]
             block.ref_count -= 1
             if block.ref_count == 0:
+                # Fix: Clean up hash_to_block_id mapping to prevent stale references
+                # This prevents CUDA illegal memory access when prefix cache tries to
+                # reuse a block_id that has already been freed
+                if block.hash != -1:
+                    cached_id = self.hash_to_block_id.get(block.hash)
+                    if cached_id == block_id:
+                        del self.hash_to_block_id[block.hash]
                 self._deallocate_block(block_id)
         seq.num_cached_tokens = 0
         seq.block_table.clear()

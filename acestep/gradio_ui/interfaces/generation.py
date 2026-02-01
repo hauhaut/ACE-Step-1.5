@@ -166,6 +166,15 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     info="Enable LoRA adapter for inference",
                     scale=1,
                 )
+                lora_scale_slider = gr.Slider(
+                    minimum=0.0,
+                    maximum=1.0,
+                    value=1.0,
+                    step=0.05,
+                    label="LoRA Scale",
+                    info="LoRA influence strength (0=disabled, 1=full)",
+                    scale=2,
+                )
                 lora_status = gr.Textbox(
                     label="LoRA Status",
                     value="No LoRA loaded",
@@ -693,6 +702,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         "load_lora_btn": load_lora_btn,
         "unload_lora_btn": unload_lora_btn,
         "use_lora_checkbox": use_lora_checkbox,
+        "lora_scale_slider": lora_scale_slider,
         "lora_status": lora_status,
         "task_type": task_type,
         "instruction_display_gen": instruction_display_gen,

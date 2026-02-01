@@ -201,6 +201,20 @@ class Qwen3ForCausalLM(nn.Module):
         if config.tie_word_embeddings:
             self.lm_head.weight.data = self.model.embed_tokens.weight.data
 
+    # Proxy attributes for weight loading compatibility
+    # Some model weights use "embed_tokens" instead of "model.embed_tokens"
+    @property
+    def embed_tokens(self):
+        return self.model.embed_tokens
+
+    @property
+    def layers(self):
+        return self.model.layers
+
+    @property
+    def norm(self):
+        return self.model.norm
+
     def forward(
         self,
         input_ids: torch.Tensor,

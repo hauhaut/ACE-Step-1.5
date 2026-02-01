@@ -96,6 +96,12 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         outputs=[generation_section["lora_status"]]
     )
     
+    generation_section["lora_scale_slider"].change(
+        fn=dit_handler.set_lora_scale,
+        inputs=[generation_section["lora_scale_slider"]],
+        outputs=[generation_section["lora_status"]]
+    )
+    
     # ========== UI Visibility Updates ==========
     generation_section["init_llm_checkbox"].change(
         fn=gen_h.update_negative_prompt_visibility,
