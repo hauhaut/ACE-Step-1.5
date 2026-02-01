@@ -34,6 +34,7 @@ class AudioSample:
         audio_path: Path to the audio file
         filename: Original filename
         caption: Generated or user-provided caption describing the music
+        genre: Generated genre tags (e.g., "pop, electronic, dance")
         lyrics: Lyrics or "[Instrumental]" for instrumental tracks (used for training)
         raw_lyrics: Original user-provided lyrics from .txt file (before formatting)
         formatted_lyrics: LM-formatted lyrics (if format_lyrics was enabled)
@@ -45,11 +46,13 @@ class AudioSample:
         is_instrumental: Whether the track is instrumental
         custom_tag: User-defined activation tag for LoRA
         labeled: Whether the sample has been labeled
+        use_genre_as_prompt: If True, use genre instead of caption for training prompt
     """
     id: str = ""
     audio_path: str = ""
     filename: str = ""
     caption: str = ""
+    genre: str = ""  # Genre tags from LLM
     lyrics: str = "[Instrumental]"
     raw_lyrics: str = ""  # Original user-provided lyrics from .txt file
     formatted_lyrics: str = ""  # LM-formatted lyrics
@@ -61,6 +64,7 @@ class AudioSample:
     is_instrumental: bool = True
     custom_tag: str = ""
     labeled: bool = False
+    use_genre_as_prompt: bool = False  # Whether to use genre instead of caption
 
     def __post_init__(self):
         if not self.id:
@@ -74,7 +78,7 @@ class AudioSample:
     def from_dict(cls, data: Dict[str, Any]) -> "AudioSample":
         """Create from dictionary.
 
-        Handles backward compatibility for datasets without raw_lyrics/formatted_lyrics.
+        Handles backward compatibility for datasets without raw_lyrics/formatted_lyrics/genre.
         """
         # Filter out unknown keys for backward compatibility
         valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
@@ -101,6 +105,41 @@ class AudioSample:
             return self.custom_tag
         else:
             return self.caption
+
+    def get_full_genre(self, tag_position: str = "prepend") -> str:
+        """Get genre with custom tag applied.
+
+        Args:
+            tag_position: Where to place the custom tag ("prepend", "append", "replace")
+
+        Returns:
+            Genre with custom tag applied
+        """
+        if not self.custom_tag:
+            return self.genre
+
+        if tag_position == "prepend":
+            return f"{self.custom_tag}, {self.genre}" if self.genre else self.custom_tag
+        elif tag_position == "append":
+            return f"{self.genre}, {self.custom_tag}" if self.genre else self.custom_tag
+        elif tag_position == "replace":
+            return self.custom_tag
+        else:
+            return self.genre
+
+    def get_training_prompt(self, tag_position: str = "prepend") -> str:
+        """Get the prompt to use for training based on use_genre_as_prompt setting.
+
+        Args:
+            tag_position: Where to place the custom tag
+
+        Returns:
+            Either caption or genre with custom tag applied
+        """
+        if self.use_genre_as_prompt:
+            return self.get_full_genre(tag_position)
+        else:
+            return self.get_full_caption(tag_position)
 
     def has_raw_lyrics(self) -> bool:
         """Check if sample has user-provided raw lyrics from .txt file."""
@@ -401,14 +440,10 @@ class DatasetBuilder:
         llm_handler,
         format_lyrics: bool = False,
         transcribe_lyrics: bool = False,
+        skip_metas: bool = False,
         progress_callback=None,
     ) -> Tuple[AudioSample, str]:
         """Label a single sample using the LLM.
-
-        Lyrics handling modes:
-        - format_lyrics=True: Use LLM to format/structure user-provided lyrics from .txt file
-        - transcribe_lyrics=True: Use LLM to transcribe lyrics from audio (ignores .txt file)
-        - Both False: Keep original lyrics as-is (from .txt file or "[Instrumental]")
 
         Args:
             sample_idx: Index of sample to label
@@ -416,6 +451,7 @@ class DatasetBuilder:
             llm_handler: LLM handler for caption generation
             format_lyrics: If True, use LLM to format user-provided lyrics
             transcribe_lyrics: If True, use LLM to transcribe lyrics from audio
+            skip_metas: If True, skip generating BPM/Key/TimeSig metadata but still generate caption/genre
             progress_callback: Optional callback for progress updates
 
         Returns:
@@ -465,11 +501,12 @@ class DatasetBuilder:
 
                 # Update sample with formatted results (preserve CSV metadata)
                 sample.caption = result.caption or ""
-                if not has_csv_bpm:
-                    sample.bpm = result.bpm
-                if not has_csv_key:
-                    sample.keyscale = result.keyscale or ""
-                sample.timesignature = result.timesignature or ""
+                if not skip_metas:
+                    if not has_csv_bpm:
+                        sample.bpm = result.bpm
+                    if not has_csv_key:
+                        sample.keyscale = result.keyscale or ""
+                    sample.timesignature = result.timesignature or ""
                 sample.language = result.language or "unknown"
                 sample.formatted_lyrics = result.lyrics or ""
                 sample.lyrics = sample.formatted_lyrics if sample.formatted_lyrics else sample.raw_lyrics
@@ -487,13 +524,18 @@ class DatasetBuilder:
                 if not metadata:
                     return sample, f"❌ LLM labeling failed: {status}"
 
-                # Update sample with generated metadata (preserve CSV metadata for BPM/Key)
+                # Update sample with generated caption and genre (always)
                 sample.caption = metadata.get('caption', '')
-                if not has_csv_bpm:
-                    sample.bpm = self._parse_int(metadata.get('bpm'))
-                if not has_csv_key:
-                    sample.keyscale = metadata.get('keyscale', '')
-                sample.timesignature = metadata.get('timesignature', '')
+                sample.genre = metadata.get('genres', '')  # Extract genre from LLM output
+
+                # Update metas only if not skipped and not from CSV
+                if not skip_metas:
+                    if not has_csv_bpm:
+                        sample.bpm = self._parse_int(metadata.get('bpm'))
+                    if not has_csv_key:
+                        sample.keyscale = metadata.get('keyscale', '')
+                    sample.timesignature = metadata.get('timesignature', '')
+
                 sample.language = metadata.get('vocal_language', 'unknown')
 
                 # LLM-generated/transcribed lyrics
@@ -528,6 +570,8 @@ class DatasetBuilder:
             self.samples[sample_idx] = sample
 
             status_msg = f"✅ Labeled: {sample.filename}"
+            if skip_metas:
+                status_msg += " (skip metas)"
             if status_suffix:
                 status_msg += f" {status_suffix}"
 
@@ -543,6 +587,7 @@ class DatasetBuilder:
         llm_handler,
         format_lyrics: bool = False,
         transcribe_lyrics: bool = False,
+        skip_metas: bool = False,
         progress_callback=None,
     ) -> Tuple[List[AudioSample], str]:
         """Label all samples in the dataset.
@@ -552,6 +597,7 @@ class DatasetBuilder:
             llm_handler: LLM handler for caption generation
             format_lyrics: If True, use LLM to format user-provided lyrics
             transcribe_lyrics: If True, use LLM to transcribe lyrics from audio
+            skip_metas: If True, skip generating BPM/Key/TimeSig but still generate caption/genre
             progress_callback: Optional callback for progress updates
 
         Returns:
@@ -568,7 +614,7 @@ class DatasetBuilder:
                 progress_callback(f"Labeling {i+1}/{len(self.samples)}: {sample.filename}")
 
             _, status = self.label_sample(
-                i, dit_handler, llm_handler, format_lyrics, transcribe_lyrics, progress_callback
+                i, dit_handler, llm_handler, format_lyrics, transcribe_lyrics, skip_metas, progress_callback
             )
 
             if "✅" in status:
@@ -657,17 +703,28 @@ class DatasetBuilder:
     
     def set_all_instrumental(self, is_instrumental: bool):
         """Set instrumental flag for all samples.
-        
+
         Args:
             is_instrumental: Whether all tracks are instrumental
+
+        Note:
+            If a sample has raw_lyrics (from .txt file), setting is_instrumental=True
+            will NOT override its lyrics. The raw_lyrics takes precedence.
         """
         self.metadata.all_instrumental = is_instrumental
-        
+
         for sample in self.samples:
-            sample.is_instrumental = is_instrumental
-            if is_instrumental:
-                sample.lyrics = "[Instrumental]"
-                sample.language = "unknown"
+            # If sample has raw lyrics from .txt file, don't treat it as instrumental
+            if sample.has_raw_lyrics():
+                sample.is_instrumental = False
+                # Keep existing lyrics from raw_lyrics
+                if not sample.lyrics or sample.lyrics == "[Instrumental]":
+                    sample.lyrics = sample.raw_lyrics
+            else:
+                sample.is_instrumental = is_instrumental
+                if is_instrumental:
+                    sample.lyrics = "[Instrumental]"
+                    sample.language = "unknown"
     
     def get_sample_count(self) -> int:
         """Get the number of samples in the dataset."""

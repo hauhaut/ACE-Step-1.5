@@ -78,7 +78,7 @@ def auto_label_all(
         dit_handler: DiT handler for audio processing
         llm_handler: LLM handler for caption generation
         builder_state: Dataset builder state
-        skip_metas: If True, skip LLM labeling. BPM/Key/TimeSig = N/A, Language = unknown for instrumental
+        skip_metas: If True, skip generating BPM/Key/TimeSig but still generate caption/genre
         format_lyrics: If True, use LLM to format user-provided lyrics from .txt files
         transcribe_lyrics: If True, use LLM to transcribe lyrics from audio (ignores .txt files)
         progress: Progress callback
@@ -91,28 +91,6 @@ def auto_label_all(
 
     if not builder_state.samples:
         return [], "❌ No samples to label. Please scan a directory first.", builder_state
-
-    # If skip_metas is True, just set default values without LLM
-    if skip_metas:
-        for sample in builder_state.samples:
-            sample.bpm = None  # Will display as N/A
-            sample.keyscale = "N/A"
-            sample.timesignature = "N/A"
-            # For instrumental, language should be "unknown"
-            if sample.is_instrumental:
-                sample.language = "unknown"
-            else:
-                sample.language = "unknown"
-            # Use custom tag as caption if set, otherwise use filename
-            if builder_state.metadata.custom_tag:
-                sample.caption = builder_state.metadata.custom_tag
-            else:
-                sample.caption = sample.filename
-            # Mark as labeled
-            sample.labeled = True
-
-        table_data = builder_state.get_samples_dataframe_data()
-        return table_data, f"✅ Skipped AI labeling. {len(builder_state.samples)} samples set with default values.", builder_state
 
     # Check if handlers are initialized
     if dit_handler is None or dit_handler.model is None:
@@ -128,12 +106,13 @@ def auto_label_all(
             except:
                 pass
 
-    # Label all samples
+    # Label all samples (skip_metas only skips BPM/Key/TimeSig, still generates caption/genre)
     samples, status = builder_state.label_all_samples(
         dit_handler=dit_handler,
         llm_handler=llm_handler,
         format_lyrics=format_lyrics,
         transcribe_lyrics=transcribe_lyrics,
+        skip_metas=skip_metas,
         progress_callback=progress_callback,
     )
 
@@ -150,10 +129,10 @@ def get_sample_preview(
     """Get preview data for a specific sample.
 
     Returns:
-        Tuple of (audio_path, filename, caption, lyrics, bpm, keyscale, timesig,
+        Tuple of (audio_path, filename, caption, genre, use_genre_as_prompt, lyrics, bpm, keyscale, timesig,
                   duration, language, instrumental, raw_lyrics, raw_lyrics_visible)
     """
-    empty = (None, "", "", "", None, "", "", 0.0, "instrumental", True, "", False)
+    empty = (None, "", "", "", "Caption", "", None, "", "", 0.0, "instrumental", True, "", False)
 
     if builder_state is None or not builder_state.samples:
         return empty
@@ -164,17 +143,18 @@ def get_sample_preview(
 
     sample = builder_state.samples[idx]
 
-    # Get caption with custom tag applied based on tag_position setting
-    tag_position = builder_state.metadata.tag_position if builder_state.metadata else "prepend"
-    full_caption = sample.get_full_caption(tag_position)
-
     # Show raw lyrics panel only when raw lyrics exist
     has_raw = sample.has_raw_lyrics()
+
+    # Convert use_genre_as_prompt bool to Radio choice
+    prompt_choice = "Genre" if sample.use_genre_as_prompt else "Caption"
 
     return (
         sample.audio_path,
         sample.filename,
-        full_caption,
+        sample.caption,
+        sample.genre,
+        prompt_choice,
         sample.lyrics,
         sample.bpm,
         sample.keyscale,
@@ -190,6 +170,8 @@ def get_sample_preview(
 def save_sample_edit(
     sample_idx: int,
     caption: str,
+    genre: str,
+    use_genre_as_prompt: str,
     lyrics: str,
     bpm: Optional[int],
     keyscale: str,
@@ -199,19 +181,24 @@ def save_sample_edit(
     builder_state: Optional[DatasetBuilder],
 ) -> Tuple[List[List[Any]], str, DatasetBuilder]:
     """Save edits to a sample.
-    
+
     Returns:
         Tuple of (table_data, status, builder_state)
     """
     if builder_state is None:
         return [], "❌ No dataset loaded", builder_state
-    
+
     idx = int(sample_idx)
-    
+
+    # Convert radio button choice to bool
+    use_genre_bool = use_genre_as_prompt == "Genre"
+
     # Update sample
     sample, status = builder_state.update_sample(
         idx,
         caption=caption,
+        genre=genre,
+        use_genre_as_prompt=use_genre_bool,
         lyrics=lyrics if not is_instrumental else "[Instrumental]",
         bpm=int(bpm) if bpm else None,
         keyscale=keyscale,
@@ -220,10 +207,10 @@ def save_sample_edit(
         is_instrumental=is_instrumental,
         labeled=True,
     )
-    
+
     # Get updated table data
     table_data = builder_state.get_samples_dataframe_data()
-    
+
     return table_data, status, builder_state
 
 
@@ -287,10 +274,12 @@ def load_existing_dataset_for_preprocess(
 
     Returns:
         Tuple of (status, table_data, slider_update, builder_state,
-                  audio_path, filename, caption, lyrics, bpm, keyscale, timesig,
-                  duration, language, instrumental, raw_lyrics, has_raw)
+                  audio_path, filename, caption, genre, use_genre_as_prompt,
+                  lyrics, bpm, keyscale, timesig, duration, language, instrumental,
+                  raw_lyrics, has_raw)
     """
-    empty_preview = (None, "", "", "", None, "", "", 0.0, "instrumental", True, "", False)
+    # Empty preview: (audio_path, filename, caption, genre, prompt_choice, lyrics, bpm, keyscale, timesig, duration, language, instrumental, raw_lyrics, has_raw)
+    empty_preview = (None, "", "", "", "Caption", "", None, "", "", 0.0, "instrumental", True, "", False)
 
     if not dataset_path or not dataset_path.strip():
         return ("❌ Please enter a dataset path", [], gr.Slider(maximum=0, value=0), builder_state) + empty_preview
@@ -325,13 +314,16 @@ def load_existing_dataset_for_preprocess(
     # Get first sample preview
     first_sample = builder.samples[0]
     has_raw = first_sample.has_raw_lyrics()
-    tag_position = builder.metadata.tag_position if builder.metadata else "prepend"
-    full_caption = first_sample.get_full_caption(tag_position)
+
+    # Convert use_genre_as_prompt bool to Radio choice
+    prompt_choice = "Genre" if first_sample.use_genre_as_prompt else "Caption"
 
     preview = (
         first_sample.audio_path,
         first_sample.filename,
-        full_caption,
+        first_sample.caption,  # Raw caption, no custom_tag applied
+        first_sample.genre,
+        prompt_choice,
         first_sample.lyrics,
         first_sample.bpm,
         first_sample.keyscale,
