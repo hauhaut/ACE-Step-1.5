@@ -133,7 +133,16 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                             label="Tag Position",
                             info="Where to place the custom tag in the caption",
                         )
-                
+
+                        genre_ratio = gr.Slider(
+                            minimum=0,
+                            maximum=100,
+                            step=10,
+                            value=0,
+                            label="Genre Ratio (%)",
+                            info="0%=all Caption, 100%=all Genre. Per-sample override takes priority.",
+                        )
+
                 gr.HTML("<hr><h3>🤖 Step 2: Auto-Label with AI</h3>")
                 
                 with gr.Row():
@@ -201,11 +210,11 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
                                 lines=1,
                                 placeholder="pop, electronic, dance...",
                             )
-                            use_genre_as_prompt = gr.Radio(
-                                choices=["Caption", "Genre"],
-                                value="Caption",
-                                label="Use as Training Prompt",
-                                info="Select which field to use as the prompt (with Custom Tag)",
+                            prompt_override = gr.Dropdown(
+                                choices=["Use Global Ratio", "Caption", "Genre"],
+                                value="Use Global Ratio",
+                                label="Prompt Override (this sample)",
+                                info="Override global ratio for this sample",
                             )
 
                         with gr.Row():
@@ -545,7 +554,8 @@ def create_training_section(dit_handler, llm_handler, init_params=None) -> dict:
         "preview_filename": preview_filename,
         "edit_caption": edit_caption,
         "edit_genre": edit_genre,
-        "use_genre_as_prompt": use_genre_as_prompt,
+        "prompt_override": prompt_override,
+        "genre_ratio": genre_ratio,
         "edit_lyrics": edit_lyrics,
         "raw_lyrics_display": raw_lyrics_display,
         "has_raw_lyrics_state": has_raw_lyrics_state,

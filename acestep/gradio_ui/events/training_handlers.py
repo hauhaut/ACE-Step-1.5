@@ -129,10 +129,10 @@ def get_sample_preview(
     """Get preview data for a specific sample.
 
     Returns:
-        Tuple of (audio_path, filename, caption, genre, use_genre_as_prompt, lyrics, bpm, keyscale, timesig,
+        Tuple of (audio_path, filename, caption, genre, prompt_override, lyrics, bpm, keyscale, timesig,
                   duration, language, instrumental, raw_lyrics, raw_lyrics_visible)
     """
-    empty = (None, "", "", "", "Caption", "", None, "", "", 0.0, "instrumental", True, "", False)
+    empty = (None, "", "", "", "Use Global Ratio", "", None, "", "", 0.0, "instrumental", True, "", False)
 
     if builder_state is None or not builder_state.samples:
         return empty
@@ -146,15 +146,20 @@ def get_sample_preview(
     # Show raw lyrics panel only when raw lyrics exist
     has_raw = sample.has_raw_lyrics()
 
-    # Convert use_genre_as_prompt bool to Radio choice
-    prompt_choice = "Genre" if sample.use_genre_as_prompt else "Caption"
+    # Convert prompt_override to dropdown choice
+    if sample.prompt_override == "genre":
+        override_choice = "Genre"
+    elif sample.prompt_override == "caption":
+        override_choice = "Caption"
+    else:
+        override_choice = "Use Global Ratio"
 
     return (
         sample.audio_path,
         sample.filename,
         sample.caption,
         sample.genre,
-        prompt_choice,
+        override_choice,
         sample.lyrics,
         sample.bpm,
         sample.keyscale,
@@ -163,7 +168,7 @@ def get_sample_preview(
         sample.language,
         sample.is_instrumental,
         sample.raw_lyrics if has_raw else "",
-        has_raw,  # Controls raw_lyrics_display visibility
+        has_raw,
     )
 
 
@@ -171,7 +176,7 @@ def save_sample_edit(
     sample_idx: int,
     caption: str,
     genre: str,
-    use_genre_as_prompt: str,
+    prompt_override: str,
     lyrics: str,
     bpm: Optional[int],
     keyscale: str,
@@ -190,15 +195,20 @@ def save_sample_edit(
 
     idx = int(sample_idx)
 
-    # Convert radio button choice to bool
-    use_genre_bool = use_genre_as_prompt == "Genre"
+    # Convert dropdown choice to prompt_override value
+    if prompt_override == "Genre":
+        override_value = "genre"
+    elif prompt_override == "Caption":
+        override_value = "caption"
+    else:
+        override_value = None  # Use Global Ratio
 
     # Update sample
     sample, status = builder_state.update_sample(
         idx,
         caption=caption,
         genre=genre,
-        use_genre_as_prompt=use_genre_bool,
+        prompt_override=override_value,
         lyrics=lyrics if not is_instrumental else "[Instrumental]",
         bpm=int(bpm) if bpm else None,
         keyscale=keyscale,
@@ -218,21 +228,23 @@ def update_settings(
     custom_tag: str,
     tag_position: str,
     all_instrumental: bool,
+    genre_ratio: int,
     builder_state: Optional[DatasetBuilder],
 ) -> DatasetBuilder:
     """Update dataset settings.
-    
+
     Returns:
         Updated builder_state
     """
     if builder_state is None:
         return builder_state
-    
+
     if custom_tag:
         builder_state.set_custom_tag(custom_tag, tag_position)
-    
+
     builder_state.set_all_instrumental(all_instrumental)
-    
+    builder_state.metadata.genre_ratio = int(genre_ratio)
+
     return builder_state
 
 
@@ -274,12 +286,12 @@ def load_existing_dataset_for_preprocess(
 
     Returns:
         Tuple of (status, table_data, slider_update, builder_state,
-                  audio_path, filename, caption, genre, use_genre_as_prompt,
+                  audio_path, filename, caption, genre, prompt_override,
                   lyrics, bpm, keyscale, timesig, duration, language, instrumental,
                   raw_lyrics, has_raw)
     """
-    # Empty preview: (audio_path, filename, caption, genre, prompt_choice, lyrics, bpm, keyscale, timesig, duration, language, instrumental, raw_lyrics, has_raw)
-    empty_preview = (None, "", "", "", "Caption", "", None, "", "", 0.0, "instrumental", True, "", False)
+    # Empty preview: (audio_path, filename, caption, genre, prompt_override, lyrics, bpm, keyscale, timesig, duration, language, instrumental, raw_lyrics, has_raw)
+    empty_preview = (None, "", "", "", "Use Global Ratio", "", None, "", "", 0.0, "instrumental", True, "", False)
 
     if not dataset_path or not dataset_path.strip():
         return ("❌ Please enter a dataset path", [], gr.Slider(maximum=0, value=0), builder_state) + empty_preview
@@ -315,15 +327,20 @@ def load_existing_dataset_for_preprocess(
     first_sample = builder.samples[0]
     has_raw = first_sample.has_raw_lyrics()
 
-    # Convert use_genre_as_prompt bool to Radio choice
-    prompt_choice = "Genre" if first_sample.use_genre_as_prompt else "Caption"
+    # Convert prompt_override to dropdown choice
+    if first_sample.prompt_override == "genre":
+        override_choice = "Genre"
+    elif first_sample.prompt_override == "caption":
+        override_choice = "Caption"
+    else:
+        override_choice = "Use Global Ratio"
 
     preview = (
         first_sample.audio_path,
         first_sample.filename,
-        first_sample.caption,  # Raw caption, no custom_tag applied
+        first_sample.caption,
         first_sample.genre,
-        prompt_choice,
+        override_choice,
         first_sample.lyrics,
         first_sample.bpm,
         first_sample.keyscale,

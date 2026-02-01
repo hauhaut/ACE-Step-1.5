@@ -898,7 +898,7 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
     """Setup event handlers for the training tab (dataset builder and LoRA training)"""
     
     # ========== Load Existing Dataset (Top Section) ==========
-    
+
     # Load existing dataset JSON at the top of Dataset Builder
     training_section["load_json_btn"].click(
         fn=train_h.load_existing_dataset_for_preprocess,
@@ -916,7 +916,7 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
             training_section["preview_filename"],
             training_section["edit_caption"],
             training_section["edit_genre"],
-            training_section["use_genre_as_prompt"],
+            training_section["prompt_override"],
             training_section["edit_lyrics"],
             training_section["edit_bpm"],
             training_section["edit_keyscale"],
@@ -999,7 +999,7 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
             training_section["preview_filename"],
             training_section["edit_caption"],
             training_section["edit_genre"],
-            training_section["use_genre_as_prompt"],
+            training_section["prompt_override"],
             training_section["edit_lyrics"],
             training_section["edit_bpm"],
             training_section["edit_keyscale"],
@@ -1024,7 +1024,7 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
             training_section["sample_selector"],
             training_section["edit_caption"],
             training_section["edit_genre"],
-            training_section["use_genre_as_prompt"],
+            training_section["prompt_override"],
             training_section["edit_lyrics"],
             training_section["edit_bpm"],
             training_section["edit_keyscale"],
@@ -1039,20 +1039,21 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
             training_section["dataset_builder_state"],
         ]
     )
-    
-    # Update settings when changed
-    for trigger in [training_section["custom_tag"], training_section["tag_position"], training_section["all_instrumental"]]:
+
+    # Update settings when changed (including genre_ratio)
+    for trigger in [training_section["custom_tag"], training_section["tag_position"], training_section["all_instrumental"], training_section["genre_ratio"]]:
         trigger.change(
             fn=train_h.update_settings,
             inputs=[
                 training_section["custom_tag"],
                 training_section["tag_position"],
                 training_section["all_instrumental"],
+                training_section["genre_ratio"],
                 training_section["dataset_builder_state"],
             ],
             outputs=[training_section["dataset_builder_state"]]
         )
-    
+
     # Save dataset
     training_section["save_dataset_btn"].click(
         fn=train_h.save_dataset,
@@ -1084,7 +1085,7 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
             training_section["preview_filename"],
             training_section["edit_caption"],
             training_section["edit_genre"],
-            training_section["use_genre_as_prompt"],
+            training_section["prompt_override"],
             training_section["edit_lyrics"],
             training_section["edit_bpm"],
             training_section["edit_keyscale"],

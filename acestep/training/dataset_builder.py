@@ -46,7 +46,7 @@ class AudioSample:
         is_instrumental: Whether the track is instrumental
         custom_tag: User-defined activation tag for LoRA
         labeled: Whether the sample has been labeled
-        use_genre_as_prompt: If True, use genre instead of caption for training prompt
+        prompt_override: Per-sample override for prompt type (None=use global, "caption", "genre")
     """
     id: str = ""
     audio_path: str = ""
@@ -64,7 +64,7 @@ class AudioSample:
     is_instrumental: bool = True
     custom_tag: str = ""
     labeled: bool = False
-    use_genre_as_prompt: bool = False  # Whether to use genre instead of caption
+    prompt_override: Optional[str] = None  # None=use global ratio, "caption" or "genre" for override
 
     def __post_init__(self):
         if not self.id:
@@ -127,16 +127,23 @@ class AudioSample:
         else:
             return self.genre
 
-    def get_training_prompt(self, tag_position: str = "prepend") -> str:
-        """Get the prompt to use for training based on use_genre_as_prompt setting.
+    def get_training_prompt(self, tag_position: str = "prepend", use_genre: bool = False) -> str:
+        """Get the prompt to use for training.
 
         Args:
             tag_position: Where to place the custom tag
+            use_genre: Global setting - whether to use genre (can be overridden by prompt_override)
 
         Returns:
             Either caption or genre with custom tag applied
         """
-        if self.use_genre_as_prompt:
+        # Per-sample override takes priority
+        if self.prompt_override == "genre":
+            return self.get_full_genre(tag_position)
+        elif self.prompt_override == "caption":
+            return self.get_full_caption(tag_position)
+        # Use global setting
+        elif use_genre:
             return self.get_full_genre(tag_position)
         else:
             return self.get_full_caption(tag_position)
@@ -153,7 +160,7 @@ class AudioSample:
 @dataclass
 class DatasetMetadata:
     """Metadata for the entire dataset.
-    
+
     Attributes:
         name: Dataset name
         custom_tag: Default custom tag for all samples
@@ -161,6 +168,7 @@ class DatasetMetadata:
         created_at: Creation timestamp
         num_samples: Number of samples in the dataset
         all_instrumental: Whether all tracks are instrumental
+        genre_ratio: Ratio of samples using genre vs caption (0=all caption, 100=all genre)
     """
     name: str = "untitled_dataset"
     custom_tag: str = ""
@@ -168,7 +176,8 @@ class DatasetMetadata:
     created_at: str = ""
     num_samples: int = 0
     all_instrumental: bool = True
-    
+    genre_ratio: int = 0  # 0-100, percentage of samples using genre
+
     def __post_init__(self):
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
@@ -921,14 +930,29 @@ class DatasetBuilder:
         silence_latent = dit_handler.silence_latent
         device = dit_handler.device
         dtype = dit_handler.dtype
-        
+
         target_sample_rate = 48000
-        
+
+        # Determine which samples use genre based on ratio (for samples without override)
+        # genre_ratio: 0 = all caption, 100 = all genre
+        genre_ratio = self.metadata.genre_ratio
+        num_genre_samples = int(len(labeled_samples) * genre_ratio / 100)
+
+        # Create a list of indices that should use genre (evenly distributed)
+        import random
+        random.seed(42)  # Reproducible
+        all_indices = list(range(len(labeled_samples)))
+        random.shuffle(all_indices)
+        genre_indices = set(all_indices[:num_genre_samples])
+
         for i, sample in enumerate(labeled_samples):
             try:
                 if progress_callback:
                     progress_callback(f"Preprocessing {i+1}/{len(labeled_samples)}: {sample.filename}")
-                
+
+                # Determine if this sample uses genre (per-sample override > global ratio)
+                use_genre = i in genre_indices
+
                 # Step 1: Load and preprocess audio to stereo @ 48kHz
                 audio, sr = torchaudio.load(sample.audio_path)
                 
@@ -961,9 +985,9 @@ class DatasetBuilder:
                 
                 # Step 3: Create attention mask (all ones for valid audio)
                 attention_mask = torch.ones(1, latent_length, device=device, dtype=dtype)
-                
-                # Step 4: Encode caption text
-                caption = sample.get_full_caption(self.metadata.tag_position)
+
+                # Step 4: Encode caption/genre text (per-sample override > global ratio)
+                caption = sample.get_training_prompt(self.metadata.tag_position, use_genre=use_genre)
                 text_inputs = text_tokenizer(
                     caption,
                     padding="max_length",
