@@ -85,6 +85,7 @@ class AceStepHandler:
         # LoRA state
         self.lora_loaded = False
         self.use_lora = False
+        self.lora_scale = 1.0  # LoRA influence scale (0-1)
         self._base_decoder = None  # Backup of original decoder
     
     def get_available_checkpoints(self) -> str:
@@ -213,6 +214,7 @@ class AceStepHandler:
             
             self.lora_loaded = False
             self.use_lora = False
+            self.lora_scale = 1.0  # Reset scale to default
             
             logger.info("LoRA unloaded, base decoder restored")
             return "✅ LoRA unloaded, using base model"
@@ -250,6 +252,46 @@ class AceStepHandler:
         status = "enabled" if use_lora else "disabled"
         return f"✅ LoRA {status}"
     
+    def set_lora_scale(self, scale: float) -> str:
+        """Set LoRA adapter scale/weight (0-1 range).
+        
+        Args:
+            scale: LoRA influence scale (0=disabled, 1=full effect)
+            
+        Returns:
+            Status message
+        """
+        if not self.lora_loaded:
+            return "⚠️ No LoRA loaded"
+        
+        # Clamp scale to 0-1 range
+        self.lora_scale = max(0.0, min(1.0, scale))
+        
+        # Iterate through all LoRA layers and set their scaling
+        try:
+            for name, module in self.model.decoder.named_modules():
+                if hasattr(module, 'scaling'):
+                    scaling = module.scaling
+                    # Handle dict-style scaling (adapter_name -> value)
+                    if isinstance(scaling, dict):
+                        # Save original scaling on first call
+                        if not hasattr(module, '_original_scaling'):
+                            module._original_scaling = {k: v for k, v in scaling.items()}
+                        # Apply new scale
+                        for adapter_name in scaling:
+                            module.scaling[adapter_name] = module._original_scaling[adapter_name] * self.lora_scale
+                    # Handle float-style scaling (single value)
+                    elif isinstance(scaling, (int, float)):
+                        if not hasattr(module, '_original_scaling'):
+                            module._original_scaling = scaling
+                        module.scaling = module._original_scaling * self.lora_scale
+            
+            logger.info(f"LoRA scale set to {self.lora_scale:.2f}")
+            return f"✅ LoRA scale: {self.lora_scale:.2f}"
+        except Exception as e:
+            logger.warning(f"Could not set LoRA scale: {e}")
+            return f"⚠️ Scale set to {self.lora_scale:.2f} (partial)"
+    
     def get_lora_status(self) -> Dict[str, Any]:
         """Get current LoRA status.
         
@@ -259,6 +301,7 @@ class AceStepHandler:
         return {
             "loaded": self.lora_loaded,
             "active": self.use_lora,
+            "scale": self.lora_scale,
         }
     
     def initialize_service(

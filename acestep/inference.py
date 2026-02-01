@@ -2,7 +2,7 @@
 ACE-Step Inference API Module
 
 This module provides a standardized inference interface for music generation,
-designed for third-party integration. It offers both a simplified API and 
+designed for third-party integration. It offers both a simplified API and
 backward-compatible Gradio UI support.
 """
 
@@ -14,6 +14,23 @@ from dataclasses import dataclass, field, asdict
 from loguru import logger
 
 from acestep.audio_utils import AudioSaver, generate_uuid_from_params
+
+# HuggingFace Space environment detection
+IS_HUGGINGFACE_SPACE = os.environ.get("SPACE_ID") is not None
+
+def _get_spaces_gpu_decorator(duration=180):
+    """
+    Get the @spaces.GPU decorator if running in HuggingFace Space environment.
+    Returns identity decorator if not in Space environment.
+    """
+    if IS_HUGGINGFACE_SPACE:
+        try:
+            import spaces
+            return spaces.GPU(duration=duration)
+        except ImportError:
+            logger.warning("spaces package not found, GPU decorator disabled")
+            return lambda func: func
+    return lambda func: func
 
 
 @dataclass
@@ -255,7 +272,7 @@ def _update_metadata_from_lm(
         if time_signature_value != "N/A":
             time_signature = time_signature_value
 
-    if audio_duration is None:
+    if audio_duration is None or audio_duration <= 0:
         audio_duration_value = metadata.get('duration', -1)
         if audio_duration_value not in ["N/A", ""]:
             try:
@@ -272,6 +289,7 @@ def _update_metadata_from_lm(
     return bpm, key_scale, time_signature, audio_duration, vocal_language, caption, lyrics
 
 
+@_get_spaces_gpu_decorator(duration=180)
 def generate_music(
     dit_handler,
     llm_handler,
@@ -429,6 +447,7 @@ def generate_music(
                     negative_prompt=params.lm_negative_prompt,
                     top_k=top_k_value,
                     top_p=top_p_value,
+                    target_duration=audio_duration,  # Pass duration to limit audio codes generation
                     user_metadata=user_metadata_to_pass,
                     use_cot_caption=params.use_cot_caption,
                     use_cot_language=params.use_cot_language,
