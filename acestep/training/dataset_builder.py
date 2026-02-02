@@ -20,6 +20,8 @@ import torch
 import torchaudio
 from loguru import logger
 
+from acestep.constants import SFT_GEN_PROMPT, DEFAULT_DIT_INSTRUCTION
+
 
 # Supported audio formats
 SUPPORTED_AUDIO_FORMATS = {'.wav', '.mp3', '.flac', '.ogg', '.opus'}
@@ -981,9 +983,30 @@ class DatasetBuilder:
                 attention_mask = torch.ones(1, latent_length, device=device, dtype=dtype)
 
                 # Step 4: Encode caption/genre text (per-sample override > global ratio)
+                # Use SFT_GEN_PROMPT format to match inference (handler.py)
                 caption = sample.get_training_prompt(self.metadata.tag_position, use_genre=use_genre)
+
+                # Construct metas string (matches handler.py _dict_to_meta_string format)
+                metas_str = (
+                    f"- bpm: {sample.bpm if sample.bpm else 'N/A'}\n"
+                    f"- timesignature: {sample.timesignature if sample.timesignature else 'N/A'}\n"
+                    f"- keyscale: {sample.keyscale if sample.keyscale else 'N/A'}\n"
+                    f"- duration: {sample.duration} seconds\n"
+                )
+
+                # Use SFT_GEN_PROMPT format (same as inference)
+                text_prompt = SFT_GEN_PROMPT.format(DEFAULT_DIT_INSTRUCTION, caption, metas_str)
+
+                # Debug: Print first sample's text_prompt for verification
+                if i == 0:
+                    logger.info(f"\n{'='*70}")
+                    logger.info("🔍 [DEBUG] DiT TEXT ENCODER INPUT (Training Preprocess)")
+                    logger.info(f"{'='*70}")
+                    logger.info(f"text_prompt:\n{text_prompt}")
+                    logger.info(f"{'='*70}\n")
+
                 text_inputs = text_tokenizer(
-                    caption,
+                    text_prompt,
                     padding="max_length",
                     max_length=256,
                     truncation=True,
@@ -991,7 +1014,7 @@ class DatasetBuilder:
                 )
                 text_input_ids = text_inputs.input_ids.to(device)
                 text_attention_mask = text_inputs.attention_mask.to(device).to(dtype)
-                
+
                 with torch.no_grad():
                     text_outputs = text_encoder(text_input_ids)
                     text_hidden_states = text_outputs.last_hidden_state.to(dtype)
