@@ -41,8 +41,12 @@ class Scheduler:
                 
                 # Calculate tokens for both sequences
                 total_tokens = (len(seq) - seq.num_cached_tokens) + (len(paired_seq) - paired_seq.num_cached_tokens)
-                can_allocate_both = (self.block_manager.can_allocate(seq) and 
-                                    self.block_manager.can_allocate(paired_seq))
+                
+                # FIX: Check if we have enough blocks for BOTH sequences combined
+                # The old check was wrong: it checked each sequence independently,
+                # but didn't account for the total blocks needed by both
+                total_blocks_needed = seq.num_blocks + paired_seq.num_blocks
+                can_allocate_both = len(self.block_manager.free_block_ids) >= total_blocks_needed
                 
                 if num_batched_tokens + total_tokens > self.max_num_batched_tokens or not can_allocate_both:
                     break
@@ -101,9 +105,13 @@ class Scheduler:
                 # Remove paired_seq from temp_running
                 temp_running.remove(paired_seq)
                 
-                # Check if both can append
-                can_append_both = (self.block_manager.can_append(seq) and 
-                                  self.block_manager.can_append(paired_seq))
+                # FIX: Check if we have enough blocks for BOTH sequences to append
+                # Each sequence needs 1 block when at block boundary (len % block_size == 1)
+                block_size = self.block_manager.block_size
+                blocks_needed_seq = 1 if len(seq) % block_size == 1 else 0
+                blocks_needed_paired = 1 if len(paired_seq) % block_size == 1 else 0
+                total_blocks_needed = blocks_needed_seq + blocks_needed_paired
+                can_append_both = len(self.block_manager.free_block_ids) >= total_blocks_needed
                 
                 if not can_append_both:
                     # Try preempting other sequences
@@ -112,8 +120,8 @@ class Scheduler:
                         other_seq = temp_running.pop(0)
                         if other_seq != seq and other_seq != paired_seq:
                             self.preempt(other_seq)
-                            can_append_both = (self.block_manager.can_append(seq) and 
-                                              self.block_manager.can_append(paired_seq))
+                            # Recalculate with the same correct logic
+                            can_append_both = len(self.block_manager.free_block_ids) >= total_blocks_needed
                             preempted = True
                         else:
                             temp_running.append(other_seq)
