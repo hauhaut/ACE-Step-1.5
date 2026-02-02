@@ -1845,7 +1845,15 @@ class AceStepHandler:
             
             # Format text prompt with custom instruction (using LM-generated caption if available)
             text_prompt = SFT_GEN_PROMPT.format(instruction, actual_caption, parsed_metas[i])
-            
+
+            # DEBUG: Print DiT text encoder input for verification
+            if i == 0:
+                logger.info(f"\n{'='*70}")
+                logger.info("🔍 [DEBUG] DiT TEXT ENCODER INPUT (Inference)")
+                logger.info(f"{'='*70}")
+                logger.info(f"text_prompt:\n{text_prompt}")
+                logger.info(f"{'='*70}\n")
+
             # Tokenize text
             text_inputs_dict = self.text_tokenizer(
                 text_prompt,

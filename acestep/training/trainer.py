@@ -25,7 +25,13 @@ except ImportError:
     logger.warning("Lightning Fabric not installed. Training will use basic training loop.")
 
 from acestep.training.configs import LoRAConfig, TrainingConfig
-from acestep.training.lora_utils import inject_lora_into_dit, save_lora_weights, check_peft_available
+from acestep.training.lora_utils import (
+    inject_lora_into_dit,
+    save_lora_weights,
+    save_training_checkpoint,
+    load_training_checkpoint,
+    check_peft_available,
+)
 from acestep.training.data_module import PreprocessedDataModule
 
 
@@ -205,15 +211,17 @@ class LoRATrainer:
         self,
         tensor_dir: str,
         training_state: Optional[Dict] = None,
+        resume_from: Optional[str] = None,
     ) -> Generator[Tuple[int, float, str], None, None]:
         """Train LoRA adapters from preprocessed tensor files.
-        
+
         This is the recommended training method for best performance.
-        
+
         Args:
             tensor_dir: Directory containing preprocessed .pt files
             training_state: Optional state dict for stopping control
-            
+            resume_from: Optional path to checkpoint directory to resume from
+
         Yields:
             Tuples of (step, loss, status_message)
         """
@@ -250,9 +258,9 @@ class LoRATrainer:
                 return
             
             yield 0, 0.0, f"📂 Loaded {len(data_module.train_dataset)} preprocessed samples"
-            
+
             if LIGHTNING_AVAILABLE:
-                yield from self._train_with_fabric(data_module, training_state)
+                yield from self._train_with_fabric(data_module, training_state, resume_from)
             else:
                 yield from self._train_basic(data_module, training_state)
                 
@@ -266,6 +274,7 @@ class LoRATrainer:
         self,
         data_module: PreprocessedDataModule,
         training_state: Optional[Dict],
+        resume_from: Optional[str] = None,
     ) -> Generator[Tuple[int, float, str], None, None]:
         """Train using Lightning Fabric."""
         # Create output directory
@@ -336,19 +345,78 @@ class LoRATrainer:
         
         # Convert model to bfloat16 (entire model for consistent dtype)
         self.module.model = self.module.model.to(torch.bfloat16)
-        
+
         # Setup with Fabric - only the decoder (which has LoRA)
         self.module.model.decoder, optimizer = self.fabric.setup(self.module.model.decoder, optimizer)
         train_loader = self.fabric.setup_dataloaders(train_loader)
-        
-        # Training loop
+
+        # Handle resume from checkpoint (load AFTER Fabric setup)
+        start_epoch = 0
         global_step = 0
+        checkpoint_info = None
+
+        if resume_from and os.path.exists(resume_from):
+            try:
+                yield 0, 0.0, f"🔄 Loading checkpoint from {resume_from}..."
+
+                # Load checkpoint using utility function
+                checkpoint_info = load_training_checkpoint(
+                    resume_from,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    device=self.module.device,
+                )
+
+                if checkpoint_info["adapter_path"]:
+                    adapter_path = checkpoint_info["adapter_path"]
+                    adapter_weights_path = os.path.join(adapter_path, "adapter_model.safetensors")
+                    if not os.path.exists(adapter_weights_path):
+                        adapter_weights_path = os.path.join(adapter_path, "adapter_model.bin")
+
+                    if os.path.exists(adapter_weights_path):
+                        # Load adapter weights
+                        from safetensors.torch import load_file
+                        if adapter_weights_path.endswith(".safetensors"):
+                            state_dict = load_file(adapter_weights_path)
+                        else:
+                            state_dict = torch.load(adapter_weights_path, map_location=self.module.device)
+
+                        # Get the decoder (might be wrapped by Fabric)
+                        decoder = self.module.model.decoder
+                        if hasattr(decoder, '_forward_module'):
+                            decoder = decoder._forward_module
+
+                        decoder.load_state_dict(state_dict, strict=False)
+
+                        start_epoch = checkpoint_info["epoch"]
+                        global_step = checkpoint_info["global_step"]
+
+                        status_parts = [f"✅ Resumed from epoch {start_epoch}, step {global_step}"]
+                        if checkpoint_info["loaded_optimizer"]:
+                            status_parts.append("optimizer ✓")
+                        if checkpoint_info["loaded_scheduler"]:
+                            status_parts.append("scheduler ✓")
+                        yield 0, 0.0, ", ".join(status_parts)
+                    else:
+                        yield 0, 0.0, f"⚠️ Adapter weights not found in {adapter_path}"
+                else:
+                    yield 0, 0.0, f"⚠️ No valid checkpoint found in {resume_from}"
+
+            except Exception as e:
+                logger.exception("Failed to load checkpoint")
+                yield 0, 0.0, f"⚠️ Failed to load checkpoint: {e}, starting fresh"
+                start_epoch = 0
+                global_step = 0
+        elif resume_from:
+            yield 0, 0.0, f"⚠️ Checkpoint path not found: {resume_from}, starting fresh"
+
+        # Training loop
         accumulation_step = 0
         accumulated_loss = 0.0
-        
+
         self.module.model.decoder.train()
-        
-        for epoch in range(self.training_config.max_epochs):
+
+        for epoch in range(start_epoch, self.training_config.max_epochs):
             epoch_loss = 0.0
             num_batches = 0
             epoch_start_time = time.time()
@@ -405,9 +473,16 @@ class LoRATrainer:
             # Save checkpoint
             if (epoch + 1) % self.training_config.save_every_n_epochs == 0:
                 checkpoint_dir = os.path.join(self.training_config.output_dir, "checkpoints", f"epoch_{epoch+1}")
-                save_lora_weights(self.module.model, checkpoint_dir)
+                save_training_checkpoint(
+                    self.module.model,
+                    optimizer,
+                    scheduler,
+                    epoch + 1,
+                    global_step,
+                    checkpoint_dir,
+                )
                 yield global_step, avg_epoch_loss, f"💾 Checkpoint saved at epoch {epoch+1}"
-        
+
         # Save final model
         final_path = os.path.join(self.training_config.output_dir, "final")
         save_lora_weights(self.module.model, final_path)

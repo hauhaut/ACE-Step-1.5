@@ -243,9 +243,126 @@ def load_lora_weights(
     return model
 
 
+def save_training_checkpoint(
+    model,
+    optimizer,
+    scheduler,
+    epoch: int,
+    global_step: int,
+    output_dir: str,
+) -> str:
+    """Save a training checkpoint including LoRA weights and training state.
+
+    Args:
+        model: Model with LoRA adapters
+        optimizer: Optimizer state
+        scheduler: Scheduler state
+        epoch: Current epoch number
+        global_step: Current global step
+        output_dir: Directory to save checkpoint
+
+    Returns:
+        Path to saved checkpoint directory
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Save LoRA adapter weights
+    adapter_path = save_lora_weights(model, output_dir)
+
+    # Save training state (optimizer, scheduler, epoch, step)
+    training_state = {
+        "epoch": epoch,
+        "global_step": global_step,
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+    }
+
+    state_path = os.path.join(output_dir, "training_state.pt")
+    torch.save(training_state, state_path)
+
+    logger.info(f"Training checkpoint saved to {output_dir} (epoch {epoch}, step {global_step})")
+    return output_dir
+
+
+def load_training_checkpoint(
+    checkpoint_dir: str,
+    optimizer=None,
+    scheduler=None,
+    device: torch.device = None,
+) -> Dict[str, Any]:
+    """Load training checkpoint.
+
+    Args:
+        checkpoint_dir: Directory containing checkpoint files
+        optimizer: Optimizer instance to load state into (optional)
+        scheduler: Scheduler instance to load state into (optional)
+        device: Device to load tensors to
+
+    Returns:
+        Dictionary with checkpoint info:
+        - epoch: Saved epoch number
+        - global_step: Saved global step
+        - adapter_path: Path to adapter weights
+        - loaded_optimizer: Whether optimizer state was loaded
+        - loaded_scheduler: Whether scheduler state was loaded
+    """
+    result = {
+        "epoch": 0,
+        "global_step": 0,
+        "adapter_path": None,
+        "loaded_optimizer": False,
+        "loaded_scheduler": False,
+    }
+
+    # Find adapter path
+    adapter_path = os.path.join(checkpoint_dir, "adapter")
+    if os.path.exists(adapter_path):
+        result["adapter_path"] = adapter_path
+    elif os.path.exists(checkpoint_dir):
+        result["adapter_path"] = checkpoint_dir
+
+    # Load training state
+    state_path = os.path.join(checkpoint_dir, "training_state.pt")
+    if os.path.exists(state_path):
+        map_location = device if device else "cpu"
+        training_state = torch.load(state_path, map_location=map_location)
+
+        result["epoch"] = training_state.get("epoch", 0)
+        result["global_step"] = training_state.get("global_step", 0)
+
+        # Load optimizer state if provided
+        if optimizer is not None and "optimizer_state_dict" in training_state:
+            try:
+                optimizer.load_state_dict(training_state["optimizer_state_dict"])
+                result["loaded_optimizer"] = True
+                logger.info("Optimizer state loaded from checkpoint")
+            except Exception as e:
+                logger.warning(f"Failed to load optimizer state: {e}")
+
+        # Load scheduler state if provided
+        if scheduler is not None and "scheduler_state_dict" in training_state:
+            try:
+                scheduler.load_state_dict(training_state["scheduler_state_dict"])
+                result["loaded_scheduler"] = True
+                logger.info("Scheduler state loaded from checkpoint")
+            except Exception as e:
+                logger.warning(f"Failed to load scheduler state: {e}")
+
+        logger.info(f"Loaded checkpoint from epoch {result['epoch']}, step {result['global_step']}")
+    else:
+        # Fallback: extract epoch from path
+        import re
+        match = re.search(r'epoch_(\d+)', checkpoint_dir)
+        if match:
+            result["epoch"] = int(match.group(1))
+            logger.info(f"No training_state.pt found, extracted epoch {result['epoch']} from path")
+
+    return result
+
+
 def merge_lora_weights(model) -> Any:
     """Merge LoRA weights into the base model.
-    
+
     This permanently integrates the LoRA adaptations into the model weights.
     After merging, the model can be used without PEFT.
     
