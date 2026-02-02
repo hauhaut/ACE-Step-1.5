@@ -70,6 +70,7 @@ def auto_label_all(
     skip_metas: bool = False,
     format_lyrics: bool = False,
     transcribe_lyrics: bool = False,
+    only_unlabeled: bool = False,
     progress=None,
 ) -> Tuple[List[List[Any]], str, DatasetBuilder]:
     """Auto-label all samples in the dataset.
@@ -81,6 +82,7 @@ def auto_label_all(
         skip_metas: If True, skip generating BPM/Key/TimeSig but still generate caption/genre
         format_lyrics: If True, use LLM to format user-provided lyrics from .txt files
         transcribe_lyrics: If True, use LLM to transcribe lyrics from audio (ignores .txt files)
+        only_unlabeled: If True, only label samples without caption
         progress: Progress callback
 
     Returns:
@@ -113,6 +115,7 @@ def auto_label_all(
         format_lyrics=format_lyrics,
         transcribe_lyrics=transcribe_lyrics,
         skip_metas=skip_metas,
+        only_unlabeled=only_unlabeled,
         progress_callback=progress_callback,
     )
 

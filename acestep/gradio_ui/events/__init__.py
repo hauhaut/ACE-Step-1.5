@@ -958,14 +958,15 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
     
     # Auto-label all samples
     training_section["auto_label_btn"].click(
-        fn=lambda state, skip, fmt_lyrics, trans_lyrics: train_h.auto_label_all(
-            dit_handler, llm_handler, state, skip, fmt_lyrics, trans_lyrics
+        fn=lambda state, skip, fmt_lyrics, trans_lyrics, only_unlab: train_h.auto_label_all(
+            dit_handler, llm_handler, state, skip, fmt_lyrics, trans_lyrics, only_unlab
         ),
         inputs=[
             training_section["dataset_builder_state"],
             training_section["skip_metas"],
             training_section["format_lyrics"],
             training_section["transcribe_lyrics"],
+            training_section["only_unlabeled"],
         ],
         outputs=[
             training_section["audio_files_table"],
