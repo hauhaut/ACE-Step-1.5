@@ -84,6 +84,24 @@ class LLMEngine:
     def is_finished(self):
         return self.scheduler.is_finished()
 
+    def reset(self):
+        """
+        Reset the scheduler state and release all allocated blocks.
+        This should be called when an exception occurs during generation to prevent
+        KV cache block leaks that can cause 'deque index out of range' errors.
+        """
+        # Deallocate all running sequences
+        while self.scheduler.running:
+            seq = self.scheduler.running.popleft()
+            if seq.block_table:  # Only deallocate if blocks are allocated
+                self.scheduler.block_manager.deallocate(seq)
+        
+        # Deallocate all waiting sequences (they might have blocks from preemption)
+        while self.scheduler.waiting:
+            seq = self.scheduler.waiting.popleft()
+            if seq.block_table:
+                self.scheduler.block_manager.deallocate(seq)
+
     def generate(
         self,
         prompts: list[str] | list[list[int]],
@@ -91,6 +109,11 @@ class LLMEngine:
         use_tqdm: bool = True,
         unconditional_prompts: list[str] | list[list[int]] | None = None,
     ) -> list[str]:
+        # Clean up any residual state from previous interrupted generations
+        # This prevents 'deque index out of range' errors from accumulated block leaks
+        if not self.is_finished():
+            self.reset()
+        
         if use_tqdm:
             pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True)
         if not isinstance(sampling_params, list):
@@ -101,24 +124,31 @@ class LLMEngine:
             self.add_request(prompt, sp, uncond_prompt)
         outputs = {}
         prefill_throughput = decode_throughput = 0.
-        while not self.is_finished():
-            t = perf_counter()
-            output, num_tokens = self.step()
-            if use_tqdm:
-                if num_tokens > 0:
-                    prefill_throughput = num_tokens / (perf_counter() - t)
-                else:
-                    decode_throughput = -num_tokens / (perf_counter() - t)
-                pbar.set_postfix({
-                    "Prefill": f"{int(prefill_throughput)}tok/s",
-                    "Decode": f"{int(decode_throughput)}tok/s",
-                })
-            for seq_id, token_ids in output:
-                outputs[seq_id] = token_ids
+        try:
+            while not self.is_finished():
+                t = perf_counter()
+                output, num_tokens = self.step()
                 if use_tqdm:
-                    pbar.update(1)
+                    if num_tokens > 0:
+                        prefill_throughput = num_tokens / (perf_counter() - t)
+                    else:
+                        decode_throughput = -num_tokens / (perf_counter() - t)
+                    pbar.set_postfix({
+                        "Prefill": f"{int(prefill_throughput)}tok/s",
+                        "Decode": f"{int(decode_throughput)}tok/s",
+                    })
+                for seq_id, token_ids in output:
+                    outputs[seq_id] = token_ids
+                    if use_tqdm:
+                        pbar.update(1)
+        except Exception:
+            # Clean up on exception to prevent block leaks
+            self.reset()
+            raise
+        finally:
+            if use_tqdm:
+                pbar.close()
+        
         outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
         outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
-        if use_tqdm:
-            pbar.close()
         return outputs

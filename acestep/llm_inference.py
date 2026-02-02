@@ -1957,6 +1957,13 @@ class LLMHandler:
                     reset_context()
                 except ImportError:
                     pass
+                # Also reset the LLM scheduler to release allocated KV cache blocks
+                # This prevents 'deque index out of range' errors from block leaks
+                try:
+                    if hasattr(self.llm, 'reset'):
+                        self.llm.reset()
+                except Exception:
+                    pass  # Ignore errors during cleanup
             # Clear CUDA cache to release any corrupted memory
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()

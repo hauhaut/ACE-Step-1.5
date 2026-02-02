@@ -17,7 +17,7 @@ Behavior:
 EOF
 }
 
-PORT="8001"
+PORT="8002"
 PID=""
 FORCE="0"
 
