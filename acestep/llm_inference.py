@@ -390,7 +390,7 @@ class LLMHandler:
             torch.cuda.empty_cache()
             gpu_memory_utilization, low_gpu_memory_mode = self.get_gpu_memory_utilization(
                 minimal_gpu=8, 
-                min_ratio=0.2, 
+                min_ratio=0.4,
                 max_ratio=0.9
             )
             if low_gpu_memory_mode:
@@ -411,7 +411,7 @@ class LLMHandler:
             logger.info(f"5Hz LM initialized successfully in {time.time() - start_time:.2f} seconds")
             self.llm_initialized = True
             self.llm_backend = "vllm"
-            return f"✅ 5Hz LM initialized successfully\nModel: {model_path}\nDevice: {device_name}\nGPU Memory Utilization: {gpu_memory_utilization:.2f}"
+            return f"✅ 5Hz LM initialized successfully\nModel: {model_path}\nDevice: {device_name}\nGPU Memory Utilization: {gpu_memory_utilization:.2f}\n low_gpu_memory_mode: {low_gpu_memory_mode}"
         except Exception as e:
             self.llm_initialized = False
             return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
