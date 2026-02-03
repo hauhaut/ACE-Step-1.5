@@ -351,7 +351,8 @@ class AceStepHandler:
             self.dtype = torch.bfloat16 if device in ["cuda","xpu"] else torch.float32
             self.quantization = quantization
             if self.quantization is not None:
-                assert compile_model, "Quantization requires compile_model to be True"
+                if not compile_model:
+                    raise ValueError("Quantization requires compile_model to be True")
                 try:
                     import torchao
                 except ImportError:
@@ -451,7 +452,7 @@ class AceStepHandler:
                     
                 silence_latent_path = os.path.join(acestep_v15_checkpoint_path, "silence_latent.pt")
                 if os.path.exists(silence_latent_path):
-                    self.silence_latent = torch.load(silence_latent_path).transpose(1, 2)
+                    self.silence_latent = torch.load(silence_latent_path, weights_only=True).transpose(1, 2)
                     # Always keep silence_latent on GPU - it's used in many places outside model context
                     # and is small enough that it won't significantly impact VRAM
                     self.silence_latent = self.silence_latent.to(device).to(self.dtype)

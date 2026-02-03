@@ -1010,7 +1010,7 @@ class LLMHandler:
                 logger.info("Batch Phase 1: Using user-provided metadata (skipping generation)")
             else:
                 logger.info("Phase 1: Using user-provided metadata (skipping generation)")
-            metadata = {k: v for k, v in user_metadata.items() if v is not None}
+            metadata = {k: v for k, v in user_metadata.items() if v is not None} if user_metadata else {}
         
         # If infer_type is 'dit', stop here and return only metadata
         if infer_type == "dit":
@@ -2290,7 +2290,7 @@ class LLMHandler:
                     if current_key == 'bpm':
                         try:
                             metadata['bpm'] = int(value.strip())
-                        except:
+                        except (ValueError, TypeError):
                             metadata['bpm'] = value.strip()
                     elif current_key == 'caption':
                         # Post-process caption to remove YAML multi-line formatting
@@ -2298,7 +2298,7 @@ class LLMHandler:
                     elif current_key == 'duration':
                         try:
                             metadata['duration'] = int(value.strip())
-                        except:
+                        except (ValueError, TypeError):
                             metadata['duration'] = value.strip()
                     elif current_key == 'genres':
                         metadata['genres'] = value.strip()

@@ -1018,7 +1018,7 @@ def calculate_score_handler(
                 if bpm is not None and 'bpm' not in metadata:
                     try:
                         metadata['bpm'] = int(bpm)
-                    except:
+                    except (ValueError, TypeError):
                         pass
                 
                 if caption and 'caption' not in metadata:
@@ -1027,7 +1027,7 @@ def calculate_score_handler(
                 if audio_duration is not None and audio_duration > 0 and 'duration' not in metadata:
                     try:
                         metadata['duration'] = int(audio_duration)
-                    except:
+                    except (ValueError, TypeError):
                         pass
                 
                 if key_scale and key_scale.strip() and 'keyscale' not in metadata:
