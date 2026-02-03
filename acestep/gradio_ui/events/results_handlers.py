@@ -18,6 +18,11 @@ from acestep.gradio_ui.i18n import t
 from acestep.gradio_ui.events.generation_handlers import parse_and_validate_timesteps
 from acestep.inference import generate_music, GenerationParams, GenerationConfig
 from acestep.audio_utils import save_audio
+from acestep.gpu_config import (
+    get_global_gpu_config,
+    check_duration_limit,
+    check_batch_size_limit,
+)
 
 
 def parse_lrc_to_subtitles(lrc_text: str, total_duration: Optional[float] = None) -> List[Dict[str, Any]]:
@@ -476,6 +481,31 @@ def generate_with_progress(
     progress=gr.Progress(track_tqdm=True),
 ):
     """Generate audio with progress tracking"""
+    
+    # ========== GPU Memory Validation ==========
+    # Check if duration and batch size are within GPU memory limits
+    gpu_config = get_global_gpu_config()
+    lm_initialized = llm_handler.llm_initialized if llm_handler else False
+    
+    # Validate duration
+    if audio_duration is not None and audio_duration > 0:
+        is_valid, warning_msg = check_duration_limit(audio_duration, gpu_config, lm_initialized)
+        if not is_valid:
+            gr.Warning(warning_msg)
+            # Clamp duration to max allowed
+            max_duration = gpu_config.max_duration_with_lm if lm_initialized else gpu_config.max_duration_without_lm
+            audio_duration = min(audio_duration, max_duration)
+            logger.warning(f"Duration clamped to {audio_duration}s due to GPU memory limits")
+    
+    # Validate batch size
+    if batch_size_input is not None and batch_size_input > 0:
+        is_valid, warning_msg = check_batch_size_limit(int(batch_size_input), gpu_config, lm_initialized)
+        if not is_valid:
+            gr.Warning(warning_msg)
+            # Clamp batch size to max allowed
+            max_batch_size = gpu_config.max_batch_size_with_lm if lm_initialized else gpu_config.max_batch_size_without_lm
+            batch_size_input = min(int(batch_size_input), max_batch_size)
+            logger.warning(f"Batch size clamped to {batch_size_input} due to GPU memory limits")
     
     # Skip Phase 1 metas COT if sample is already formatted (from LLM/file/random)
     # This avoids redundant LLM calls since metas (bpm, keyscale, etc.) are already generated

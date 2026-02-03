@@ -218,6 +218,20 @@ huggingface-cli download ACE-Step/acestep-v15-turbo-continuous --local-dir ./che
 | acestep-v15-turbo-shift3 | [ACE-Step/acestep-v15-turbo-shift3](https://huggingface.co/ACE-Step/acestep-v15-turbo-shift3) | Turbo DiT with shift3 |
 | acestep-v15-turbo-continuous | [ACE-Step/acestep-v15-turbo-continuous](https://huggingface.co/ACE-Step/acestep-v15-turbo-continuous) | Turbo DiT with continuous shift (1-5) |
 
+### 💡 Which Model Should I Choose?
+
+ACE-Step automatically adapts to your GPU's VRAM. Here's a quick guide:
+
+| Your GPU VRAM | Recommended LM Model | Notes |
+|---------------|---------------------|-------|
+| **≤6GB** | None (DiT only) | LM disabled by default to save memory |
+| **6-12GB** | `acestep-5Hz-lm-0.6B` | Lightweight, good balance |
+| **12-16GB** | `acestep-5Hz-lm-1.7B` | Better quality |
+| **≥16GB** | `acestep-5Hz-lm-4B` | Best quality and audio understanding |
+
+> 📖 **For detailed GPU compatibility information** (duration limits, batch sizes, memory optimization), see GPU Compatibility Guide: [English](./docs/en/GPU_COMPATIBILITY.md) | [中文](./docs/zh/GPU_COMPATIBILITY.md) | [日本語](./docs/ja/GPU_COMPATIBILITY.md)
+
+
 ## 🚀 Usage
 
 We provide multiple ways to use ACE-Step:

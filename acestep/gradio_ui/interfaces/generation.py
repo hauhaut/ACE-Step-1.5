@@ -11,6 +11,7 @@ from acestep.constants import (
     DEFAULT_DIT_INSTRUCTION,
 )
 from acestep.gradio_ui.i18n import t
+from acestep.gpu_config import get_global_gpu_config, GPUConfig
 
 
 def create_generation_section(dit_handler, llm_handler, init_params=None, language='en') -> dict:
@@ -31,6 +32,20 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
     
     # Get current language from init_params if available
     current_language = init_params.get('language', language) if init_params else language
+    
+    # Get GPU configuration
+    gpu_config: GPUConfig = init_params.get('gpu_config') if init_params else None
+    if gpu_config is None:
+        gpu_config = get_global_gpu_config()
+    
+    # Determine if LM is initialized (for setting appropriate limits)
+    lm_initialized = init_params.get('init_llm', False) if init_params else False
+    
+    # Calculate UI limits based on GPU config and LM state
+    max_duration = gpu_config.max_duration_with_lm if lm_initialized else gpu_config.max_duration_without_lm
+    max_batch_size = gpu_config.max_batch_size_with_lm if lm_initialized else gpu_config.max_batch_size_without_lm
+    default_batch_size = min(2, max_batch_size)  # Default to 2 or max if lower
+    init_lm_default = gpu_config.init_lm_default
     
     with gr.Group():
         # Service Configuration - collapse if pre-initialized, hide if in service mode
@@ -111,8 +126,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
             
             # Checkbox options section - all checkboxes grouped together
             with gr.Row():
-                # Set init_llm value from init_params if pre-initialized
-                init_llm_value = init_params.get('init_llm', True) if service_pre_initialized else True
+                # Set init_llm value from init_params if pre-initialized, otherwise use GPU config default
+                init_llm_value = init_params.get('init_llm', init_lm_default) if service_pre_initialized else init_lm_default
                 init_llm_checkbox = gr.Checkbox(
                     label=t("service.init_llm_label"),
                     value=init_llm_value,
@@ -128,19 +143,33 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     interactive=flash_attn_available,
                     info=t("service.flash_attention_info_enabled") if flash_attn_available else t("service.flash_attention_info_disabled")
                 )
-                # Set offload_to_cpu value from init_params if pre-initialized
-                offload_to_cpu_value = init_params.get('offload_to_cpu', False) if service_pre_initialized else False
+                # Set offload_to_cpu value from init_params if pre-initialized (default True)
+                offload_to_cpu_value = init_params.get('offload_to_cpu', True) if service_pre_initialized else True
                 offload_to_cpu_checkbox = gr.Checkbox(
                     label=t("service.offload_cpu_label"),
                     value=offload_to_cpu_value,
                     info=t("service.offload_cpu_info")
                 )
-                # Set offload_dit_to_cpu value from init_params if pre-initialized
-                offload_dit_to_cpu_value = init_params.get('offload_dit_to_cpu', False) if service_pre_initialized else False
+                # Set offload_dit_to_cpu value from init_params if pre-initialized (default True)
+                offload_dit_to_cpu_value = init_params.get('offload_dit_to_cpu', True) if service_pre_initialized else True
                 offload_dit_to_cpu_checkbox = gr.Checkbox(
                     label=t("service.offload_dit_cpu_label"),
                     value=offload_dit_to_cpu_value,
                     info=t("service.offload_dit_cpu_info")
+                )
+                # Set compile_model value from init_params if pre-initialized (default True)
+                compile_model_value = init_params.get('compile_model', True) if service_pre_initialized else True
+                compile_model_checkbox = gr.Checkbox(
+                    label=t("service.compile_model_label"),
+                    value=compile_model_value,
+                    info=t("service.compile_model_info")
+                )
+                # Set quantization value from init_params if pre-initialized (default True for int8_weight_only)
+                quantization_value = init_params.get('quantization', True) if service_pre_initialized else True
+                quantization_checkbox = gr.Checkbox(
+                    label=t("service.quantization_label"),
+                    value=quantization_value,
+                    info=t("service.quantization_info")
                 )
             
             init_btn = gr.Button(t("service.init_btn"), variant="primary", size="lg")
@@ -431,17 +460,17 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                             label=t("generation.duration_label"),
                             value=-1,
                             minimum=-1,
-                            maximum=600.0,
+                            maximum=float(max_duration),
                             step=0.1,
-                            info=t("generation.duration_info")
+                            info=t("generation.duration_info") + f" (Max: {max_duration}s / {max_duration // 60} min)"
                         )
                         batch_size_input = gr.Number(
                             label=t("generation.batch_size_label"),
-                            value=2,
+                            value=default_batch_size,
                             minimum=1,
-                            maximum=8,
+                            maximum=max_batch_size,
                             step=1,
-                            info=t("generation.batch_size_info"),
+                            info=t("generation.batch_size_info") + f" (Max: {max_batch_size})",
                             interactive=not service_mode  # Fixed in service mode
                         )
         
@@ -697,6 +726,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         "use_flash_attention_checkbox": use_flash_attention_checkbox,
         "offload_to_cpu_checkbox": offload_to_cpu_checkbox,
         "offload_dit_to_cpu_checkbox": offload_dit_to_cpu_checkbox,
+        "compile_model_checkbox": compile_model_checkbox,
+        "quantization_checkbox": quantization_checkbox,
         # LoRA components
         "lora_path": lora_path,
         "load_lora_btn": load_lora_btn,
@@ -772,5 +803,9 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         "auto_score": auto_score,
         "auto_lrc": auto_lrc,
         "lm_batch_chunk_size": lm_batch_chunk_size,
+        # GPU config values for validation
+        "gpu_config": gpu_config,
+        "max_duration": max_duration,
+        "max_batch_size": max_batch_size,
     }
 
