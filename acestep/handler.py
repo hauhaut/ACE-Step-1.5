@@ -2004,6 +2004,9 @@ class AceStepHandler:
                         refer_audio_latent = self.tiled_encode(refer_audio, offload_latent_to_cpu=True)
                     # Move to device and cast to model dtype
                     refer_audio_latent = refer_audio_latent.to(self.device).to(self.dtype)
+                    # Ensure 3D before transpose: [C, T] -> [1, C, T] -> [1, T, C]
+                    if refer_audio_latent.dim() == 2:
+                        refer_audio_latent = refer_audio_latent.unsqueeze(0)
                     refer_audio_latents.append(_ensure_latent_3d(refer_audio_latent.transpose(1, 2)))
                     refer_audio_order_mask.append(batch_idx)
 
