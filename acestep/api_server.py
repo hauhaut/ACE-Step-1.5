@@ -5,7 +5,6 @@ Endpoints:
 - POST /query_result          Batch query task results
 - POST /create_random_sample  Generate random music parameters via LLM
 - POST /format_input          Format and enhance lyrics/caption via LLM
-- POST /random_sample         Get random sample from examples directory
 - GET  /v1/models             List available models
 - GET  /v1/audio              Download audio file
 - GET  /health                Health check
@@ -203,6 +202,18 @@ LM_DEFAULT_TEMPERATURE = 0.85
 LM_DEFAULT_CFG_SCALE = 2.5
 LM_DEFAULT_TOP_P = 0.9
 
+
+def _wrap_response(data: Any, code: int = 200, error: Optional[str] = None) -> Dict[str, Any]:
+    """Wrap response data in standard format."""
+    return {
+        "data": data,
+        "code": code,
+        "error": error,
+        "timestamp": int(time.time() * 1000),
+        "extra": None,
+    }
+
+
 # =============================================================================
 # Example Data for Random Sample
 # =============================================================================
@@ -245,8 +256,37 @@ def set_api_key(key: Optional[str]):
     _api_key = key
 
 
+def verify_token_from_request(body: dict, authorization: Optional[str] = None) -> Optional[str]:
+    """
+    Verify API key from request body (ai_token) or Authorization header.
+    Returns the token if valid, None if no auth required.
+    """
+    if _api_key is None:
+        return None  # No auth required
+
+    # Try ai_token from body first
+    ai_token = body.get("ai_token") if body else None
+    if ai_token:
+        if ai_token == _api_key:
+            return ai_token
+        raise HTTPException(status_code=401, detail="Invalid ai_token")
+
+    # Fallback to Authorization header
+    if authorization:
+        if authorization.startswith("Bearer "):
+            token = authorization[7:]
+        else:
+            token = authorization
+        if token == _api_key:
+            return token
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # No token provided but auth is required
+    raise HTTPException(status_code=401, detail="Missing ai_token or Authorization header")
+
+
 async def verify_api_key(authorization: Optional[str] = Header(None)):
-    """Verify API key from Authorization header"""
+    """Verify API key from Authorization header (legacy, for non-body endpoints)"""
     if _api_key is None:
         return  # No auth required
 
@@ -264,18 +304,21 @@ async def verify_api_key(authorization: Optional[str] = Header(None)):
 
 # Parameter aliases for request parsing
 PARAM_ALIASES = {
-    "prompt": ["prompt"],
+    "prompt": ["prompt", "caption"],
+    "lyrics": ["lyrics"],
     "sample_mode": ["sample_mode", "sampleMode"],
     "sample_query": ["sample_query", "sampleQuery", "description", "desc"],
     "use_format": ["use_format", "useFormat", "format"],
-    "model": ["model", "dit_model", "ditModel"],
-    "key_scale": ["key_scale", "keyscale", "keyScale"],
+    "model": ["model", "model_name", "modelName", "dit_model", "ditModel"],
+    "key_scale": ["key_scale", "keyscale", "keyScale", "key"],
     "time_signature": ["time_signature", "timesignature", "timeSignature"],
     "audio_duration": ["audio_duration", "duration", "audioDuration", "target_duration", "targetDuration"],
-    "vocal_language": ["vocal_language", "vocalLanguage"],
+    "vocal_language": ["vocal_language", "vocalLanguage", "language"],
+    "bpm": ["bpm"],
     "inference_steps": ["inference_steps", "inferenceSteps"],
     "guidance_scale": ["guidance_scale", "guidanceScale"],
     "use_random_seed": ["use_random_seed", "useRandomSeed"],
+    "seed": ["seed"],
     "audio_code_string": ["audio_code_string", "audioCodeString"],
     "audio_cover_strength": ["audio_cover_strength", "audioCoverStrength"],
     "task_type": ["task_type", "taskType"],
@@ -1604,7 +1647,7 @@ def create_app() -> FastAPI:
         return pos * avg
 
     @app.post("/release_task", response_model=CreateJobResponse)
-    async def create_music_generate_job(request: Request, _: None = Depends(verify_api_key)) -> CreateJobResponse:
+    async def create_music_generate_job(request: Request, authorization: Optional[str] = Header(None)) -> CreateJobResponse:
         content_type = (request.headers.get("content-type") or "").lower()
         temp_files: list[str] = []
 
@@ -1662,34 +1705,39 @@ def create_app() -> FastAPI:
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(status_code=400, detail="JSON payload must be an object")
+            verify_token_from_request(body, authorization)
             req = _build_request(RequestParser(body))
 
         elif content_type.endswith("+json"):
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(status_code=400, detail="JSON payload must be an object")
+            verify_token_from_request(body, authorization)
             req = _build_request(RequestParser(body))
 
         elif content_type.startswith("multipart/form-data"):
             form = await request.form()
+            form_dict = {k: v for k, v in form.items() if not hasattr(v, 'read')}
+            verify_token_from_request(form_dict, authorization)
 
-            ref_up = form.get("reference_audio")
-            src_up = form.get("src_audio")
+            # Support both naming conventions: ref_audio/reference_audio, ctx_audio/src_audio
+            ref_up = form.get("ref_audio") or form.get("reference_audio")
+            ctx_up = form.get("ctx_audio") or form.get("src_audio")
 
             reference_audio_path = None
             src_audio_path = None
 
             if isinstance(ref_up, StarletteUploadFile):
-                reference_audio_path = await _save_upload_to_temp(ref_up, prefix="reference_audio")
+                reference_audio_path = await _save_upload_to_temp(ref_up, prefix="ref_audio")
                 temp_files.append(reference_audio_path)
             else:
-                reference_audio_path = str(form.get("reference_audio_path") or "").strip() or None
+                reference_audio_path = str(form.get("ref_audio_path") or form.get("reference_audio_path") or "").strip() or None
 
-            if isinstance(src_up, StarletteUploadFile):
-                src_audio_path = await _save_upload_to_temp(src_up, prefix="src_audio")
+            if isinstance(ctx_up, StarletteUploadFile):
+                src_audio_path = await _save_upload_to_temp(ctx_up, prefix="ctx_audio")
                 temp_files.append(src_audio_path)
             else:
-                src_audio_path = str(form.get("src_audio_path") or "").strip() or None
+                src_audio_path = str(form.get("ctx_audio_path") or form.get("src_audio_path") or "").strip() or None
 
             req = _build_request(
                 RequestParser(dict(form)),
@@ -1699,10 +1747,12 @@ def create_app() -> FastAPI:
 
         elif content_type.startswith("application/x-www-form-urlencoded"):
             form = await request.form()
-            reference_audio_path = str(form.get("reference_audio_path") or "").strip() or None
-            src_audio_path = str(form.get("src_audio_path") or "").strip() or None
+            form_dict = dict(form)
+            verify_token_from_request(form_dict, authorization)
+            reference_audio_path = str(form.get("ref_audio_path") or form.get("reference_audio_path") or "").strip() or None
+            src_audio_path = str(form.get("ctx_audio_path") or form.get("src_audio_path") or "").strip() or None
             req = _build_request(
-                RequestParser(dict(form)),
+                RequestParser(form_dict),
                 reference_audio_path=reference_audio_path,
                 src_audio_path=src_audio_path,
             )
@@ -1715,6 +1765,7 @@ def create_app() -> FastAPI:
                 try:
                     body = json.loads(raw.decode("utf-8"))
                     if isinstance(body, dict):
+                        verify_token_from_request(body, authorization)
                         req = _build_request(RequestParser(body))
                     else:
                         raise HTTPException(status_code=400, detail="JSON payload must be an object")
@@ -1729,8 +1780,9 @@ def create_app() -> FastAPI:
             elif raw_stripped and b"=" in raw:
                 parsed = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
                 flat = {k: (v[0] if isinstance(v, list) and v else v) for k, v in parsed.items()}
-                reference_audio_path = str(flat.get("reference_audio_path") or "").strip() or None
-                src_audio_path = str(flat.get("src_audio_path") or "").strip() or None
+                verify_token_from_request(flat, authorization)
+                reference_audio_path = str(flat.get("ref_audio_path") or flat.get("reference_audio_path") or "").strip() or None
+                src_audio_path = str(flat.get("ctx_audio_path") or flat.get("src_audio_path") or "").strip() or None
                 req = _build_request(
                     RequestParser(flat),
                     reference_audio_path=reference_audio_path,
@@ -1768,7 +1820,7 @@ def create_app() -> FastAPI:
         return CreateJobResponse(task_id=rec.job_id, status="queued", queue_position=position)
 
     @app.post("/query_result")
-    async def query_result(request: Request, _: None = Depends(verify_api_key)) -> List[Dict[str, Any]]:
+    async def query_result(request: Request, authorization: Optional[str] = Header(None)) -> List[Dict[str, Any]]:
         """Batch query job results"""
         content_type = (request.headers.get("content-type") or "").lower()
 
@@ -1778,6 +1830,7 @@ def create_app() -> FastAPI:
             form = await request.form()
             body = {k: v for k, v in form.items()}
 
+        verify_token_from_request(body, authorization)
         task_id_list_str = body.get("task_id_list", "[]")
 
         # Parse task ID list
@@ -1936,12 +1989,11 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/create_random_sample")
-    async def create_random_sample_endpoint(request: Request, _: None = Depends(verify_api_key)):
+    async def create_random_sample_endpoint(request: Request, authorization: Optional[str] = Header(None)):
         """
-        Create random sample parameters via LLM.
+        Get random sample parameters from pre-loaded example data.
 
-        Generates random music parameters (caption, lyrics, bpm, etc.) using the LLM,
-        which can be used to fill in the form for music generation.
+        Returns a random example from the examples directory for form filling.
         """
         content_type = (request.headers.get("content-type") or "").lower()
 
@@ -1951,92 +2003,22 @@ def create_app() -> FastAPI:
             form = await request.form()
             body = {k: v for k, v in form.items()}
 
-        llm: LLMHandler = app.state.llm_handler
+        verify_token_from_request(body, authorization)
+        sample_type = body.get("sample_type", "simple_mode") or "simple_mode"
 
-        # Initialize LLM if needed
-        with app.state._llm_init_lock:
-            if not getattr(app.state, "_llm_initialized", False):
-                if getattr(app.state, "_llm_init_error", None):
-                    raise HTTPException(status_code=500, detail=f"LLM init failed: {app.state._llm_init_error}")
-
-                project_root = _get_project_root()
-                checkpoint_dir = os.path.join(project_root, "checkpoints")
-                lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B").strip()
-                backend = os.getenv("ACESTEP_LM_BACKEND", "vllm").strip().lower()
-                if backend not in {"vllm", "pt"}:
-                    backend = "vllm"
-
-                # Auto-download LM model if not present
-                lm_model_name = _get_model_name(lm_model_path)
-                if lm_model_name:
-                    try:
-                        _ensure_model_downloaded(lm_model_name, checkpoint_dir)
-                    except Exception as e:
-                        print(f"[API Server] Warning: Failed to download LM model {lm_model_name}: {e}")
-
-                lm_device = os.getenv("ACESTEP_LM_DEVICE", os.getenv("ACESTEP_DEVICE", "auto"))
-                lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
-
-                h: AceStepHandler = app.state.handler
-                status, ok = llm.initialize(
-                    checkpoint_dir=checkpoint_dir,
-                    lm_model_path=lm_model_path,
-                    backend=backend,
-                    device=lm_device,
-                    offload_to_cpu=lm_offload,
-                    dtype=h.dtype,
-                )
-                if not ok:
-                    app.state._llm_init_error = status
-                    raise HTTPException(status_code=500, detail=f"LLM init failed: {status}")
-                app.state._llm_initialized = True
-
-        # Parse parameters
-        sample_query = body.get("query", "NO USER INPUT") or "NO USER INPUT"
-        temperature = _to_float(body.get("temperature"), 0.85)
-
-        # Parse description hints
-        parsed_language, parsed_instrumental = _parse_description_hints(sample_query)
-
-        # Get language from request or parsed
-        language = body.get("language", "") or ""
-        if language and language not in ("en", "unknown", ""):
-            sample_language = language
+        if sample_type == "simple_mode":
+            example_data = SIMPLE_EXAMPLE_DATA
         else:
-            sample_language = parsed_language
+            example_data = CUSTOM_EXAMPLE_DATA
 
-        # Call create_sample
-        try:
-            sample_result = create_sample(
-                llm_handler=llm,
-                query=sample_query,
-                instrumental=parsed_instrumental,
-                vocal_language=sample_language,
-                temperature=temperature,
-                use_constrained_decoding=True,
-            )
+        if not example_data:
+            return _wrap_response(None, code=500, error="No example data available")
 
-            if not sample_result.success:
-                error_msg = sample_result.error or sample_result.status_message
-                raise HTTPException(status_code=500, detail=f"create_sample failed: {error_msg}")
-
-            return {
-                "caption": sample_result.caption,
-                "lyrics": sample_result.lyrics,
-                "bpm": sample_result.bpm,
-                "key_scale": sample_result.keyscale,
-                "time_signature": sample_result.timesignature,
-                "duration": sample_result.duration,
-                "vocal_language": sample_result.language or sample_language or "unknown",
-                "instrumental": sample_result.instrumental,
-            }
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"create_sample error: {str(e)}")
+        random_example = random.choice(example_data)
+        return _wrap_response(random_example)
 
     @app.post("/format_input")
-    async def format_input_endpoint(request: Request, _: None = Depends(verify_api_key)):
+    async def format_input_endpoint(request: Request, authorization: Optional[str] = Header(None)):
         """
         Format and enhance lyrics/caption via LLM.
 
@@ -2051,6 +2033,7 @@ def create_app() -> FastAPI:
             form = await request.form()
             body = {k: v for k, v in form.items()}
 
+        verify_token_from_request(body, authorization)
         llm: LLMHandler = app.state.llm_handler
 
         # Initialize LLM if needed
@@ -2139,7 +2122,7 @@ def create_app() -> FastAPI:
 
             if not format_result.success:
                 error_msg = format_result.error or format_result.status_message
-                raise HTTPException(status_code=500, detail=f"format_sample failed: {error_msg}")
+                return _wrap_response(None, code=500, error=f"format_sample failed: {error_msg}")
 
             # Use formatted results or fallback to original
             result_caption = format_result.caption or prompt
@@ -2149,7 +2132,7 @@ def create_app() -> FastAPI:
             result_key_scale = format_result.keyscale or key_scale
             result_time_signature = format_result.timesignature or time_signature
 
-            return {
+            return _wrap_response({
                 "caption": result_caption,
                 "lyrics": result_lyrics,
                 "bpm": result_bpm,
@@ -2157,39 +2140,9 @@ def create_app() -> FastAPI:
                 "time_signature": result_time_signature,
                 "duration": result_duration,
                 "vocal_language": format_result.language or language or "unknown",
-            }
-        except HTTPException:
-            raise
+            })
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"format_sample error: {str(e)}")
-
-    @app.post("/random_sample")
-    async def random_sample_endpoint(request: Request, _: None = Depends(verify_api_key)):
-        """
-        Get random sample parameters from pre-loaded example data.
-
-        Returns a random example from the examples directory for form filling.
-        """
-        content_type = (request.headers.get("content-type") or "").lower()
-
-        if "json" in content_type:
-            body = await request.json()
-        else:
-            form = await request.form()
-            body = {k: v for k, v in form.items()}
-
-        sample_type = body.get("sample_type", "simple_mode") or "simple_mode"
-
-        if sample_type == "simple_mode":
-            example_data = SIMPLE_EXAMPLE_DATA
-        else:
-            example_data = CUSTOM_EXAMPLE_DATA
-
-        if not example_data:
-            raise HTTPException(status_code=500, detail="No example data available")
-
-        random_example = random.choice(example_data)
-        return random_example
+            return _wrap_response(None, code=500, error=f"format_sample error: {str(e)}")
 
     @app.get("/v1/audio")
     async def get_audio(path: str, _: None = Depends(verify_api_key)):
