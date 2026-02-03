@@ -933,6 +933,9 @@ def calculate_score_handler(
     PMI (Pointwise Mutual Information) removes condition bias:
     score = log P(condition|codes) - log P(condition)
     
+    For Cover/Repaint modes where audio_codes may not be available,
+    falls back to DiT alignment scoring only.
+    
     Args:
         llm_handler: LLM handler instance
         audio_codes_str: Generated audio codes string
@@ -954,63 +957,74 @@ def calculate_score_handler(
     """
     from acestep.test_time_scaling import calculate_pmi_score_per_condition
     
-    if not llm_handler.llm_initialized:
-        return t("messages.lm_not_initialized")
+    has_audio_codes = audio_codes_str and audio_codes_str.strip()
+    has_dit_alignment_data = dit_handler and extra_tensor_data and lyrics and lyrics.strip()
     
-    if not audio_codes_str or not audio_codes_str.strip():
+    # Check if we can compute any scores
+    if not has_audio_codes and not has_dit_alignment_data:
+        # No audio codes and no DiT alignment data - can't compute any score
         return t("messages.no_codes")
     
     try:
-        # Build metadata dictionary from both LM metadata and user inputs
-        metadata = {}
-        
-        # Priority 1: Use LM-generated metadata if available
-        if lm_metadata and isinstance(lm_metadata, dict):
-            metadata.update(lm_metadata)
-        
-        # Priority 2: Add user-provided metadata (if not already in LM metadata)
-        if bpm is not None and 'bpm' not in metadata:
-            try:
-                metadata['bpm'] = int(bpm)
-            except:
-                pass
-        
-        if caption and 'caption' not in metadata:
-            metadata['caption'] = caption
-        
-        if audio_duration is not None and float(audio_duration) > 0 and 'duration' not in metadata:
-            try:
-                metadata['duration'] = float(audio_duration)
-            except:
-                pass
-        
-        if key_scale and key_scale.strip() and 'keyscale' not in metadata:
-            metadata['keyscale'] = key_scale.strip()
-        
-        if vocal_language and vocal_language.strip() and 'language' not in metadata:
-            metadata['language'] = vocal_language.strip()
-        
-        if time_signature and time_signature.strip() and 'timesignature' not in metadata:
-            metadata['timesignature'] = time_signature.strip()
-        
-        # Calculate per-condition scores with appropriate metrics
-        # - Metadata fields (bpm, duration, etc.): Top-k recall
-        # - Caption and lyrics: PMI (normalized)
-        scores_per_condition, global_score, status = calculate_pmi_score_per_condition(
-            llm_handler=llm_handler,
-            audio_codes=audio_codes_str,
-            caption=caption or "",
-            lyrics=lyrics or "",
-            metadata=metadata if metadata else None,
-            temperature=1.0,
-            topk=10,
-            score_scale=score_scale
-        )
-
+        scores_per_condition = {}
+        global_score = 0.0
         alignment_report = ""
+        
+        # PMI-based scoring (requires audio codes and LLM)
+        if has_audio_codes:
+            if not llm_handler.llm_initialized:
+                # Can still try DiT alignment if available
+                if not has_dit_alignment_data:
+                    return t("messages.lm_not_initialized")
+            else:
+                # Build metadata dictionary from both LM metadata and user inputs
+                metadata = {}
+                
+                # Priority 1: Use LM-generated metadata if available
+                if lm_metadata and isinstance(lm_metadata, dict):
+                    metadata.update(lm_metadata)
+                
+                # Priority 2: Add user-provided metadata (if not already in LM metadata)
+                if bpm is not None and 'bpm' not in metadata:
+                    try:
+                        metadata['bpm'] = int(bpm)
+                    except:
+                        pass
+                
+                if caption and 'caption' not in metadata:
+                    metadata['caption'] = caption
+                
+                if audio_duration is not None and audio_duration > 0 and 'duration' not in metadata:
+                    try:
+                        metadata['duration'] = int(audio_duration)
+                    except:
+                        pass
+                
+                if key_scale and key_scale.strip() and 'keyscale' not in metadata:
+                    metadata['keyscale'] = key_scale.strip()
+                
+                if vocal_language and vocal_language.strip() and 'language' not in metadata:
+                    metadata['language'] = vocal_language.strip()
+                
+                if time_signature and time_signature.strip() and 'timesignature' not in metadata:
+                    metadata['timesignature'] = time_signature.strip()
+                
+                # Calculate per-condition scores with appropriate metrics
+                # - Metadata fields (bpm, duration, etc.): Top-k recall
+                # - Caption and lyrics: PMI (normalized)
+                scores_per_condition, global_score, status = calculate_pmi_score_per_condition(
+                    llm_handler=llm_handler,
+                    audio_codes=audio_codes_str,
+                    caption=caption or "",
+                    lyrics=lyrics or "",
+                    metadata=metadata if metadata else None,
+                    temperature=1.0,
+                    topk=10,
+                    score_scale=score_scale
+                )
 
-        # Only calculate if we have the handler, tensor data, and actual lyrics
-        if dit_handler and extra_tensor_data and lyrics and lyrics.strip():
+        # DiT alignment scoring (works even without audio codes - for Cover/Repaint modes)
+        if has_dit_alignment_data:
             try:
                 align_result = dit_handler.get_lyric_score(
                     pred_latent=extra_tensor_data.get('pred_latent'),
@@ -1037,29 +1051,46 @@ def calculate_score_handler(
             except Exception as e:
                 alignment_report = f"\n⚠️ Alignment Score Error: {str(e)}"
 
-        # Format display string with per-condition breakdown
-        if global_score == 0.0 and not scores_per_condition:
-            return t("messages.score_failed", error=status)
-        else:
-            # Build per-condition scores display
-            condition_lines = []
-            for condition_name, score_value in sorted(scores_per_condition.items()):
-                condition_lines.append(
-                    f"  • {condition_name}: {score_value:.4f}"
+        # Format display string
+        if has_audio_codes and llm_handler.llm_initialized:
+            # Full scoring with PMI + alignment
+            if global_score == 0.0 and not scores_per_condition:
+                # PMI scoring failed but we might have alignment
+                if alignment_report and not alignment_report.startswith("\n⚠️"):
+                    final_output = "📊 DiT Alignment Scores (LM codes not available):\n"
+                    final_output += alignment_report
+                    return final_output
+                return t("messages.score_failed", error="PMI scoring returned no results")
+            else:
+                # Build per-condition scores display
+                condition_lines = []
+                for condition_name, score_value in sorted(scores_per_condition.items()):
+                    condition_lines.append(
+                        f"  • {condition_name}: {score_value:.4f}"
+                    )
+                
+                conditions_display = "\n".join(condition_lines) if condition_lines else "  (no conditions)"
+
+                final_output = (
+                    f"✅ Global Quality Score: {global_score:.4f} (0-1, higher=better)\n\n"
+                    f"📊 Per-Condition Scores (0-1):\n{conditions_display}\n"
                 )
-            
-            conditions_display = "\n".join(condition_lines) if condition_lines else "  (no conditions)"
 
-            final_output = (
-                f"✅ Global Quality Score: {global_score:.4f} (0-1, higher=better)\n\n"
-                f"📊 Per-Condition Scores (0-1):\n{conditions_display}\n"
-            )
+                if alignment_report:
+                    final_output += alignment_report + "\n"
 
-            if alignment_report:
-                final_output += alignment_report + "\n"
-
-            final_output += "Note: Metadata uses Top-k Recall, Caption/Lyrics use PMI"
-            return final_output
+                final_output += "Note: Metadata uses Top-k Recall, Caption/Lyrics use PMI"
+                return final_output
+        else:
+            # Only DiT alignment available (Cover/Repaint mode fallback)
+            if alignment_report and not alignment_report.startswith("\n⚠️"):
+                final_output = "📊 DiT Alignment Scores (LM codes not available for Cover/Repaint mode):\n"
+                final_output += alignment_report
+                return final_output
+            elif alignment_report:
+                return alignment_report
+            else:
+                return "⚠️ No scoring data available"
             
     except Exception as e:
         import traceback

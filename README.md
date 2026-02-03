@@ -6,7 +6,7 @@
     <a href="https://modelscope.cn/models/ACE-Step/ACE-Step-v1-5">ModelScope</a> |
     <a href="https://huggingface.co/spaces/ACE-Step/Ace-Step-v1.5">Space Demo</a> |
     <a href="https://discord.gg/PeWDxrkdj7">Discord</a> |
-    <a href="https://arxiv.org/abs/2506.00045">Technical Report</a>
+    <a href="https://arxiv.org/abs/2602.00744">Technical Report</a>
 </p>
 
 <p align="center">

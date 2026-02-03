@@ -347,8 +347,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     simple_sample_created = gr.State(value=False)
                 
                 # Music Caption - wrapped in accordion that can be collapsed in Simple mode
-                # In service mode: auto-expand
-                with gr.Accordion(t("generation.caption_title"), open=service_mode) as caption_accordion:
+                # Default to expanded for better UX
+                with gr.Accordion(t("generation.caption_title"), open=True) as caption_accordion:
                     with gr.Row(equal_height=True):
                         captions = gr.Textbox(
                             label=t("generation.caption_label"),
@@ -365,8 +365,8 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                                 scale=2,
                             )
                 # Lyrics - wrapped in accordion that can be collapsed in Simple mode
-                # In service mode: auto-expand
-                with gr.Accordion(t("generation.lyrics_title"), open=service_mode) as lyrics_accordion:
+                # Default to expanded for better UX
+                with gr.Accordion(t("generation.lyrics_title"), open=True) as lyrics_accordion:
                     lyrics = gr.Textbox(
                         label=t("generation.lyrics_label"),
                         placeholder=t("generation.lyrics_placeholder"),
