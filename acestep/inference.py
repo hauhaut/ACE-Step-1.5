@@ -536,11 +536,12 @@ def generate_music(
                 if not params.lyrics:
                     params.cot_lyrics = lyrics
 
-            # set cot caption and language if needed
-            if params.use_cot_caption:
-                dit_input_caption = lm_generated_metadata.get("caption", dit_input_caption)
-            if params.use_cot_language:
-                dit_input_vocal_language = lm_generated_metadata.get("vocal_language", dit_input_vocal_language)
+            # set cot caption and language if needed (only if LM generated metadata)
+            if lm_generated_metadata:
+                if params.use_cot_caption:
+                    dit_input_caption = lm_generated_metadata.get("caption", dit_input_caption)
+                if params.use_cot_language:
+                    dit_input_vocal_language = lm_generated_metadata.get("vocal_language", dit_input_vocal_language)
 
         # Phase 2: DiT music generation
         # Use seed_for_generation (from config.seed or params.seed) instead of params.seed for actual generation

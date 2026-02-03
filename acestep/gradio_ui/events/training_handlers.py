@@ -105,7 +105,7 @@ def auto_label_all(
         if progress:
             try:
                 progress(msg)
-            except:
+            except Exception:
                 pass
 
     # Label all samples (skip_metas only skips BPM/Key/TimeSig, still generates caption/genre)
@@ -386,14 +386,14 @@ def preprocess_dataset(
     
     if dit_handler is None or dit_handler.model is None:
         return "❌ Model not initialized. Please initialize the service first."
-    
+
     def progress_callback(msg):
         if progress:
             try:
                 progress(msg)
-            except:
+            except Exception:
                 pass
-    
+
     # Run preprocessing
     output_paths, status = builder_state.preprocess_to_tensors(
         dit_handler=dit_handler,
@@ -427,7 +427,7 @@ def load_training_dataset(
     manifest_path = os.path.join(tensor_dir, "manifest.json")
     if os.path.exists(manifest_path):
         try:
-            with open(manifest_path, 'r') as f:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
             
             num_samples = manifest.get("num_samples", 0)

@@ -123,7 +123,7 @@ def load_metadata(file_obj, llm_handler=None):
         if bpm_value is not None and bpm_value != "N/A":
             try:
                 bpm = int(bpm_value) if bpm_value else None
-            except:
+            except (ValueError, TypeError):
                 bpm = None
         else:
             bpm = None
@@ -138,7 +138,7 @@ def load_metadata(file_obj, llm_handler=None):
                 audio_duration = float(duration_value)
                 # Clamp duration to GPU memory limit
                 audio_duration = clamp_duration_to_gpu_limit(audio_duration, llm_handler)
-            except:
+            except (ValueError, TypeError):
                 audio_duration = -1
         else:
             audio_duration = -1
@@ -820,6 +820,7 @@ def handle_create_sample(
             gr.update(),  # audio_duration - no change
             gr.update(),  # key_scale - no change
             gr.update(),  # vocal_language - no change
+            gr.update(),  # simple_vocal_language - no change
             gr.update(),  # time_signature - no change
             gr.update(),  # instrumental_checkbox - no change
             gr.update(),  # caption_accordion - no change

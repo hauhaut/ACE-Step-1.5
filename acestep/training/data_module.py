@@ -55,7 +55,7 @@ class PreprocessedTensorDataset(Dataset):
         # Load manifest if exists
         manifest_path = os.path.join(tensor_dir, "manifest.json")
         if os.path.exists(manifest_path):
-            with open(manifest_path, 'r') as f:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
             self.sample_paths = manifest.get("samples", [])
         else:
@@ -82,7 +82,7 @@ class PreprocessedTensorDataset(Dataset):
             Dictionary containing all pre-computed tensors for training
         """
         tensor_path = self.valid_paths[idx]
-        data = torch.load(tensor_path, map_location='cpu')
+        data = torch.load(tensor_path, map_location='cpu', weights_only=True)
         
         return {
             "target_latents": data["target_latents"],  # [T, 64]
