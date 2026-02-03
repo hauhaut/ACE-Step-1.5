@@ -20,6 +20,7 @@ from transformers.generation.logits_process import (
 )
 from acestep.constrained_logits_processor import MetadataConstrainedLogitsProcessor
 from acestep.constants import DEFAULT_LM_INSTRUCTION, DEFAULT_LM_UNDERSTAND_INSTRUCTION, DEFAULT_LM_INSPIRED_INSTRUCTION, DEFAULT_LM_REWRITE_INSTRUCTION
+from acestep.gpu_config import get_lm_gpu_memory_ratio, get_gpu_memory_gb, get_lm_model_size, get_global_gpu_config
 
 
 class LLMHandler:
@@ -74,22 +75,45 @@ class LLMHandler:
         models.sort()
         return models
     
-    def get_gpu_memory_utilization(self, minimal_gpu: float = 8, min_ratio: float = 0.2, max_ratio: float = 0.9) -> Tuple[float, bool]:
-        """Get GPU memory utilization ratio"""
+    def get_gpu_memory_utilization(self, model_path: str = None, minimal_gpu: float = 8, min_ratio: float = 0.2, max_ratio: float = 0.9) -> Tuple[float, bool]:
+        """
+        Get GPU memory utilization ratio based on LM model size and available GPU memory.
+        
+        Args:
+            model_path: LM model path (e.g., "acestep-5Hz-lm-0.6B"). Used to determine target memory.
+            minimal_gpu: Minimum GPU memory requirement in GB (fallback)
+            min_ratio: Minimum memory utilization ratio
+            max_ratio: Maximum memory utilization ratio
+            
+        Returns:
+            Tuple of (gpu_memory_utilization_ratio, low_gpu_memory_mode)
+        """
         try:
             device = torch.device("cuda:0")
             total_gpu_mem_bytes = torch.cuda.get_device_properties(device).total_memory
-            allocated_mem_bytes = torch.cuda.memory_allocated(device)
-            reserved_mem_bytes = torch.cuda.memory_reserved(device)
-            
             total_gpu = total_gpu_mem_bytes / 1024**3
+            
             low_gpu_memory_mode = False
+            
+            # Use adaptive GPU memory ratio based on model size
+            if model_path:
+                ratio, target_memory_gb = get_lm_gpu_memory_ratio(model_path, total_gpu)
+                logger.info(f"Adaptive LM memory allocation: model={model_path}, target={target_memory_gb}GB, ratio={ratio:.3f}, total_gpu={total_gpu:.1f}GB")
+                
+                # Enable low memory mode for small GPUs
+                if total_gpu < 8:
+                    low_gpu_memory_mode = True
+                    
+                return ratio, low_gpu_memory_mode
+            
+            # Fallback to original logic if no model_path provided
+            reserved_mem_bytes = torch.cuda.memory_reserved(device)
+            reserved_gpu = reserved_mem_bytes / 1024**3
+            available_gpu = total_gpu - reserved_gpu
+            
             if total_gpu < minimal_gpu:
                 minimal_gpu = 0.5 * total_gpu
                 low_gpu_memory_mode = True
-            allocated_gpu = allocated_mem_bytes / 1024**3
-            reserved_gpu = reserved_mem_bytes / 1024**3
-            available_gpu = total_gpu - reserved_gpu
             
             if available_gpu >= minimal_gpu:
                 ratio = min(max_ratio, max(min_ratio, minimal_gpu / total_gpu))
@@ -98,6 +122,7 @@ class LLMHandler:
             
             return ratio, low_gpu_memory_mode
         except Exception as e:
+            logger.warning(f"Failed to calculate GPU memory utilization: {e}")
             return 0.9, False
     
     def _has_meaningful_negative_prompt(self, negative_prompt: str) -> bool:
@@ -335,12 +360,20 @@ class LLMHandler:
             self.llm_tokenizer = llm_tokenizer
             
             # Initialize shared constrained decoding processor (one-time initialization)
+            # Use GPU-based max_duration to limit duration values in constrained decoding
             logger.info("Initializing constrained decoding processor...")
             processor_start = time.time()
+            
+            gpu_config = get_global_gpu_config()
+            # Use max_duration_with_lm since LM is being initialized
+            max_duration_for_constraint = gpu_config.max_duration_with_lm
+            logger.info(f"Setting constrained decoding max_duration to {max_duration_for_constraint}s based on GPU config (tier: {gpu_config.tier})")
+            
             self.constrained_processor = MetadataConstrainedLogitsProcessor(
                 tokenizer=self.llm_tokenizer,
                 enabled=True,
                 debug=False,
+                max_duration=max_duration_for_constraint,
             )
             logger.info(f"Constrained processor initialized in {time.time() - processor_start:.2f} seconds")
             
@@ -388,17 +421,21 @@ class LLMHandler:
             device_name = torch.cuda.get_device_name(current_device)
             
             torch.cuda.empty_cache()
+            
+            # Use adaptive GPU memory utilization based on model size
             gpu_memory_utilization, low_gpu_memory_mode = self.get_gpu_memory_utilization(
-                minimal_gpu=8, 
-                min_ratio=0.4,
+                model_path=model_path,
+                minimal_gpu=3,
+                min_ratio=0.1,
                 max_ratio=0.9
             )
+            
             if low_gpu_memory_mode:
                 self.max_model_len = 2048
             else:
                 self.max_model_len = 4096
             
-            logger.info(f"Initializing 5Hz LM with model: {model_path}, enforce_eager: False, tensor_parallel_size: 1, max_model_len: {self.max_model_len}, gpu_memory_utilization: {gpu_memory_utilization}")
+            logger.info(f"Initializing 5Hz LM with model: {model_path}, enforce_eager: False, tensor_parallel_size: 1, max_model_len: {self.max_model_len}, gpu_memory_utilization: {gpu_memory_utilization:.3f}")
             start_time = time.time()
             self.llm = LLM(
                 model=model_path,
@@ -411,7 +448,7 @@ class LLMHandler:
             logger.info(f"5Hz LM initialized successfully in {time.time() - start_time:.2f} seconds")
             self.llm_initialized = True
             self.llm_backend = "vllm"
-            return f"✅ 5Hz LM initialized successfully\nModel: {model_path}\nDevice: {device_name}\nGPU Memory Utilization: {gpu_memory_utilization:.2f}\n low_gpu_memory_mode: {low_gpu_memory_mode}"
+            return f"✅ 5Hz LM initialized successfully\nModel: {model_path}\nDevice: {device_name}\nGPU Memory Utilization: {gpu_memory_utilization:.3f}\nLow GPU Memory Mode: {low_gpu_memory_mode}"
         except Exception as e:
             self.llm_initialized = False
             return f"❌ Error initializing 5Hz LM: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"

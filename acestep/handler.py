@@ -43,6 +43,7 @@ from acestep.constants import (
     DEFAULT_DIT_INSTRUCTION,
 )
 from acestep.dit_alignment_score import MusicStampsAligner, MusicLyricScorer
+from acestep.gpu_config import get_gpu_memory_gb
 
 
 warnings.filterwarnings("ignore")
@@ -2505,9 +2506,13 @@ class AceStepHandler:
         Returns:
             Latents tensor [Batch, Channels, T] (same format as vae.encode output)
         """
-        # Default values for 48kHz audio
+        # Default values for 48kHz audio, adaptive to GPU memory
         if chunk_size is None:
-            chunk_size = 48000 * 30  # 30 seconds
+            gpu_memory = get_gpu_memory_gb()
+            if gpu_memory <= 8:
+                chunk_size = 48000 * 15  # 15 seconds for low VRAM (<4GB)
+            else:
+                chunk_size = 48000 * 30  # 30 seconds for normal VRAM
         if overlap is None:
             overlap = 48000 * 2  # 2 seconds overlap
         

@@ -79,6 +79,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         debug: bool = False,
         genres_vocab_path: Optional[str] = None,
         skip_genres: bool = True,
+        max_duration: Optional[int] = None,
     ):
         """
         Initialize the constrained logits processor.
@@ -89,11 +90,17 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             tokenizer: The tokenizer to use for encoding/decoding
             enabled: Whether to enable constrained decoding
             debug: Whether to print debug information
+            genres_vocab_path: Path to genres vocabulary file
+            skip_genres: Whether to skip genres field generation
+            max_duration: Maximum duration in seconds (default: DURATION_MAX from constants)
         """
         self.tokenizer = tokenizer
         self.enabled = enabled
         self.debug = debug
         self.skip_genres = skip_genres
+        
+        # Maximum duration limit (can be dynamically updated based on GPU config)
+        self.max_duration = max_duration if max_duration is not None else DURATION_MAX
         self.skip_caption = False  # Set to True to skip caption field generation
         self.skip_language = False  # Set to True to skip language field generation
         self.caption: Optional[str] = None  # Set via update_caption() before each generation
@@ -165,9 +172,10 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self._precompute_char_token_mapping()
         
         # Field definitions (needed before building prefix trees)
+        # Note: duration max uses self.max_duration which can be dynamically updated based on GPU config
         self.field_specs = {
             "bpm": {"min": BPM_MIN, "max": BPM_MAX},
-            "duration": {"min": DURATION_MIN, "max": DURATION_MAX},
+            "duration": {"min": DURATION_MIN, "max": self.max_duration},
             "timesignature": {"valid_values": VALID_TIME_SIGNATURES},
         }
         
@@ -1224,6 +1232,38 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             self.target_codes = None
             if self.debug:
                 logger.debug("Target duration cleared, no duration constraint")
+    
+    def set_max_duration(self, max_duration: int):
+        """
+        Dynamically update the maximum allowed duration for constrained decoding.
+        
+        This method should be called when GPU configuration changes (e.g., LM initialization state changes).
+        It rebuilds the duration prefix tree to constrain duration values to the new maximum.
+        
+        Args:
+            max_duration: Maximum duration in seconds (e.g., 120 for 2 minutes, 360 for 6 minutes)
+        """
+        if max_duration == self.max_duration:
+            return  # No change needed
+        
+        old_max = self.max_duration
+        self.max_duration = max_duration
+        
+        # Update field specs
+        self.field_specs["duration"]["max"] = max_duration
+        
+        # Rebuild valid duration values
+        self.valid_duration_values = [str(v) for v in range(self.field_specs["duration"]["min"], self.field_specs["duration"]["max"] + 1)]
+        
+        # Rebuild duration prefix tree
+        self.duration_prefix_tree = self._build_numeric_prefix_tree(
+            self.valid_duration_values,
+            context_prefix_for_matching="duration:",
+            context_prefix_for_tokenization="duration: "
+        )
+        
+        if self.debug:
+            logger.debug(f"Updated max duration: {old_max}s -> {max_duration}s, rebuilt prefix tree with {len(self.valid_duration_values)} values")
     
     def _get_allowed_tokens_for_fixed_string(self, fixed_str: str) -> List[int]:
         """

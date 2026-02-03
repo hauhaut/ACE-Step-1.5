@@ -36,6 +36,7 @@ try:
     from .llm_inference import LLMHandler
     from .dataset_handler import DatasetHandler
     from .gradio_ui import create_gradio_interface
+    from .gpu_config import get_gpu_config, get_gpu_memory_gb, print_gpu_config_info, set_global_gpu_config
 except ImportError:
     # When executed as a script: `python acestep/acestep_v15_pipeline.py`
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,6 +46,7 @@ except ImportError:
     from acestep.llm_inference import LLMHandler
     from acestep.dataset_handler import DatasetHandler
     from acestep.gradio_ui import create_gradio_interface
+    from acestep.gpu_config import get_gpu_config, get_gpu_memory_gb, print_gpu_config_info, set_global_gpu_config
 
 
 def create_demo(init_params=None, language='en'):
@@ -80,38 +82,35 @@ def create_demo(init_params=None, language='en'):
     return demo
 
 
-def get_gpu_memory_gb():
-    """
-    Get GPU memory in GB. Returns 0 if no GPU is available.
-    """
-    try:
-        import torch
-        if torch.cuda.is_available():
-            # Get total memory of the first GPU in GB
-            total_memory = torch.cuda.get_device_properties(0).total_memory
-            memory_gb = total_memory / (1024**3)  # Convert bytes to GB
-            return memory_gb
-        else:
-            return 0
-    except Exception as e:
-        print(f"Warning: Failed to detect GPU memory: {e}", file=sys.stderr)
-        return 0
-
-
 def main():
     """Main entry function"""
     import argparse
     
-    # Detect GPU memory to auto-configure offload settings
-    gpu_memory_gb = get_gpu_memory_gb()
+    # Detect GPU memory and get configuration
+    gpu_config = get_gpu_config()
+    set_global_gpu_config(gpu_config)  # Set global config for use across modules
+    
+    gpu_memory_gb = gpu_config.gpu_memory_gb
     auto_offload = gpu_memory_gb > 0 and gpu_memory_gb < 16
     
+    # Print GPU configuration info
+    print(f"\n{'='*60}")
+    print("GPU Configuration Detected:")
+    print(f"{'='*60}")
+    print(f"  GPU Memory: {gpu_memory_gb:.2f} GB")
+    print(f"  Configuration Tier: {gpu_config.tier}")
+    print(f"  Max Duration (with LM): {gpu_config.max_duration_with_lm}s ({gpu_config.max_duration_with_lm // 60} min)")
+    print(f"  Max Duration (without LM): {gpu_config.max_duration_without_lm}s ({gpu_config.max_duration_without_lm // 60} min)")
+    print(f"  Max Batch Size (with LM): {gpu_config.max_batch_size_with_lm}")
+    print(f"  Max Batch Size (without LM): {gpu_config.max_batch_size_without_lm}")
+    print(f"  Default LM Init: {gpu_config.init_lm_default}")
+    print(f"  Available LM Models: {gpu_config.available_lm_models or 'None'}")
+    print(f"{'='*60}\n")
+    
     if auto_offload:
-        print(f"Detected GPU memory: {gpu_memory_gb:.2f} GB (< 16GB)")
-        print("Auto-enabling CPU offload to reduce GPU memory usage")
+        print(f"Auto-enabling CPU offload (GPU < 16GB)")
     elif gpu_memory_gb > 0:
-        print(f"Detected GPU memory: {gpu_memory_gb:.2f} GB (>= 16GB)")
-        print("CPU offload disabled by default")
+        print(f"CPU offload disabled by default (GPU >= 16GB)")
     else:
         print("No GPU detected, running on CPU")
     
@@ -131,7 +130,7 @@ def main():
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file path (optional, for display purposes)")
     parser.add_argument("--config_path", type=str, default=None, help="Main model path (e.g., 'acestep-v15-turbo')")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"], help="Processing device (default: auto)")
-    parser.add_argument("--init_llm", type=lambda x: x.lower() in ['true', '1', 'yes'], default=True, help="Initialize 5Hz LM (default: True)")
+    parser.add_argument("--init_llm", type=lambda x: x.lower() in ['true', '1', 'yes'], default=None, help="Initialize 5Hz LM (default: auto based on GPU memory)")
     parser.add_argument("--lm_model_path", type=str, default=None, help="5Hz LM model path (e.g., 'acestep-5Hz-lm-0.6B')")
     parser.add_argument("--backend", type=str, default="vllm", choices=["vllm", "pt"], help="5Hz LM backend (default: vllm)")
     parser.add_argument("--use_flash_attention", type=lambda x: x.lower() in ['true', '1', 'yes'], default=None, help="Use flash attention (default: auto-detect)")
@@ -233,6 +232,11 @@ def main():
             print(f"DiT model initialized successfully")
             
             # Initialize LM handler if requested
+            # Auto-determine init_llm based on GPU config if not explicitly set
+            if args.init_llm is None:
+                args.init_llm = gpu_config.init_lm_default
+                print(f"Auto-setting init_llm to {args.init_llm} based on GPU configuration")
+            
             lm_status = ""
             if args.init_llm:
                 if args.lm_model_path is None:
@@ -281,13 +285,22 @@ def main():
                 'enable_generate': enable_generate,
                 'dit_handler': dit_handler,
                 'llm_handler': llm_handler,
-                'language': args.language
+                'language': args.language,
+                'gpu_config': gpu_config,  # Pass GPU config to UI
             }
             
             print("Service initialization completed successfully!")
         
         # Create and launch demo
         print(f"Creating Gradio interface with language: {args.language}...")
+        
+        # If not using init_service, still pass gpu_config to init_params
+        if init_params is None:
+            init_params = {
+                'gpu_config': gpu_config,
+                'language': args.language,
+            }
+        
         demo = create_demo(init_params=init_params, language=args.language)
         
         # Enable queue for multi-user support
