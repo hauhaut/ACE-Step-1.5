@@ -429,6 +429,15 @@ class AceStepHandler:
                 self.model.eval()
                 
                 if compile_model:
+                    # Add __len__ method to model to support torch.compile
+                    # torch.compile's dynamo requires this method for introspection
+                    # Note: This modifies the model class, affecting all instances
+                    if not hasattr(self.model.__class__, '__len__'):
+                        def _model_len(model_self):
+                            """Return 0 as default length for torch.compile compatibility"""
+                            return 0
+                        self.model.__class__.__len__ = _model_len
+                    
                     self.model = torch.compile(self.model)
                     
                     if self.quantization is not None:
@@ -475,6 +484,14 @@ class AceStepHandler:
                 raise FileNotFoundError(f"VAE checkpoint not found at {vae_checkpoint_path}")
 
             if compile_model:
+                # Add __len__ method to VAE to support torch.compile if needed
+                # Note: This modifies the VAE class, affecting all instances
+                if not hasattr(self.vae.__class__, '__len__'):
+                    def _vae_len(vae_self):
+                        """Return 0 as default length for torch.compile compatibility"""
+                        return 0
+                    self.vae.__class__.__len__ = _vae_len
+                
                 self.vae = torch.compile(self.vae)
             
             # 3. Load text encoder and tokenizer
