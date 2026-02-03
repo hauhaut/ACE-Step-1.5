@@ -35,7 +35,8 @@ dependencies = [
     "vector-quantize-pytorch>=1.27.15",
     "torchcodec>=0.9.1; sys_platform != 'darwin'",
     # Local third-party packages
-    "nano-vllm; sys_platform != 'darwin'"
+    "nano-vllm; sys_platform != 'darwin'",
+    "modelscope"
 ]
 
 [[tool.uv.index]]
