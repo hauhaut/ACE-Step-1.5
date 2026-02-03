@@ -1740,8 +1740,8 @@ def create_app() -> FastAPI:
             avg = float(getattr(app.state, "avg_job_seconds", INITIAL_AVG_JOB_SECONDS))
         return pos * avg
 
-    @app.post("/release_task", response_model=CreateJobResponse)
-    async def create_music_generate_job(request: Request, authorization: Optional[str] = Header(None)) -> CreateJobResponse:
+    @app.post("/release_task")
+    async def create_music_generate_job(request: Request, authorization: Optional[str] = Header(None)):
         content_type = (request.headers.get("content-type") or "").lower()
         temp_files: list[str] = []
 

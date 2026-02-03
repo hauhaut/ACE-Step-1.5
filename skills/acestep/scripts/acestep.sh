@@ -314,16 +314,17 @@ query_job_result() {
 }
 
 # Parse query_result response to extract status (0=processing, 1=success, 2=failed)
+# Response is wrapped: {"data": [...], "code": 200, ...}
 parse_query_status() {
     local response="$1"
-    echo "$response" | jq -r '.[0].status // 0'
+    echo "$response" | jq -r '.data[0].status // .[0].status // 0'
 }
 
 # Parse result JSON string from query_result response
 # The result field is a JSON string that needs to be parsed
 parse_query_result() {
     local response="$1"
-    echo "$response" | jq -r '.[0].result // "[]"'
+    echo "$response" | jq -r '.data[0].result // .[0].result // "[]"'
 }
 
 # Extract audio file paths from result (returns newline-separated paths)
@@ -605,7 +606,8 @@ cmd_generate() {
 
     rm -f "$temp_payload"
 
-    local job_id=$(echo "$response" | jq -r '.task_id // empty')
+    # Response is wrapped: {"data": {"task_id": ...}, "code": 200, ...}
+    local job_id=$(echo "$response" | jq -r '.data.task_id // .task_id // empty')
 
     [ -z "$job_id" ] && { echo -e "${RED}Error: Failed to create job${NC}"; echo "$response"; exit 1; }
 
@@ -668,7 +670,8 @@ cmd_random() {
 
     rm -f "$temp_payload"
 
-    local job_id=$(echo "$response" | jq -r '.task_id // empty')
+    # Response is wrapped: {"data": {"task_id": ...}, "code": 200, ...}
+    local job_id=$(echo "$response" | jq -r '.data.task_id // .task_id // empty')
 
     [ -z "$job_id" ] && { echo -e "${RED}Error: Failed to create job${NC}"; echo "$response"; exit 1; }
 
