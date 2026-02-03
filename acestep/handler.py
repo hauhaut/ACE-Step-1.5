@@ -722,7 +722,7 @@ class AceStepHandler:
         """
         Convert serialized audio code string into 25Hz latents using model quantizer/detokenizer.
         """
-        if not self.model or not hasattr(self.model, 'tokenizer') or not hasattr(self.model, 'detokenizer'):
+        if self.model is None or not hasattr(self.model, 'tokenizer') or not hasattr(self.model, 'detokenizer'):
             return None
         
         code_ids = self._parse_audio_code_string(code_str)
