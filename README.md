@@ -19,6 +19,7 @@
 - [📦 Installation](#-installation)
 - [📥 Model Download](#-model-download)
 - [🚀 Usage](#-usage)
+- [📖 Tutorial](#-tutorial)
 - [🔨 Train](#-train)
 - [🏗️ Architecture](#️-architecture)
 - [🦁 Model Zoo](#-model-zoo)
@@ -244,6 +245,22 @@ We provide multiple ways to use ACE-Step:
 
 **📚 Documentation available in:** [English](./docs/en/) | [中文](./docs/zh/) | [日本語](./docs/ja/)
 
+## 📖 Tutorial
+
+**🎯 Must Read:** Comprehensive guide to ACE-Step 1.5's design philosophy and usage methods.
+
+| Language | Link |
+|----------|------|
+| 🇺🇸 English | [English Tutorial](./docs/en/Tutorial.md) |
+| 🇨🇳 中文 | [中文教程](./docs/zh/Tutorial.md) |
+| 🇯🇵 日本語 | [日本語チュートリアル](./docs/ja/Tutorial.md) |
+
+This tutorial covers:
+- Mental models and design philosophy
+- Model architecture and selection
+- Input control (text and audio)
+- Inference hyperparameters
+- Random factors and optimization strategies
 
 ## 🔨 Train
 
