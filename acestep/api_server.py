@@ -58,6 +58,15 @@ from acestep.inference import (
     format_sample,
 )
 from acestep.gradio_ui.events.results_handlers import _build_generation_info
+from acestep.gpu_config import (
+    get_gpu_config,
+    get_gpu_memory_gb,
+    print_gpu_config_info,
+    set_global_gpu_config,
+    get_recommended_lm_model,
+    is_lm_model_supported,
+    GPUConfig,
+)
 
 
 # =============================================================================
@@ -306,6 +315,7 @@ async def verify_api_key(authorization: Optional[str] = Header(None)):
 PARAM_ALIASES = {
     "prompt": ["prompt", "caption"],
     "lyrics": ["lyrics"],
+    "thinking": ["thinking"],
     "sample_mode": ["sample_mode", "sampleMode"],
     "sample_query": ["sample_query", "sampleQuery", "description", "desc"],
     "use_format": ["use_format", "useFormat", "format"],
@@ -1491,11 +1501,49 @@ def create_app() -> FastAPI:
         # =================================================================
         print("[API Server] Initializing models at startup...")
 
+        # Detect GPU memory and get configuration
+        gpu_config = get_gpu_config()
+        set_global_gpu_config(gpu_config)
+        app.state.gpu_config = gpu_config
+
+        gpu_memory_gb = gpu_config.gpu_memory_gb
+        auto_offload = gpu_memory_gb > 0 and gpu_memory_gb < 16
+
+        # Print GPU configuration info
+        print(f"\n{'='*60}")
+        print("[API Server] GPU Configuration Detected:")
+        print(f"{'='*60}")
+        print(f"  GPU Memory: {gpu_memory_gb:.2f} GB")
+        print(f"  Configuration Tier: {gpu_config.tier}")
+        print(f"  Max Duration (with LM): {gpu_config.max_duration_with_lm}s")
+        print(f"  Max Duration (without LM): {gpu_config.max_duration_without_lm}s")
+        print(f"  Max Batch Size (with LM): {gpu_config.max_batch_size_with_lm}")
+        print(f"  Max Batch Size (without LM): {gpu_config.max_batch_size_without_lm}")
+        print(f"  Default LM Init: {gpu_config.init_lm_default}")
+        print(f"  Available LM Models: {gpu_config.available_lm_models or 'None'}")
+        print(f"{'='*60}\n")
+
+        if auto_offload:
+            print(f"[API Server] Auto-enabling CPU offload (GPU < 16GB)")
+        elif gpu_memory_gb > 0:
+            print(f"[API Server] CPU offload disabled by default (GPU >= 16GB)")
+        else:
+            print("[API Server] No GPU detected, running on CPU")
+
         project_root = _get_project_root()
         config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
         device = os.getenv("ACESTEP_DEVICE", "auto")
         use_flash_attention = _env_bool("ACESTEP_USE_FLASH_ATTENTION", True)
-        offload_to_cpu = _env_bool("ACESTEP_OFFLOAD_TO_CPU", False)
+
+        # Auto-determine offload settings based on GPU config if not explicitly set
+        offload_to_cpu_env = os.getenv("ACESTEP_OFFLOAD_TO_CPU")
+        if offload_to_cpu_env is not None:
+            offload_to_cpu = _env_bool("ACESTEP_OFFLOAD_TO_CPU", False)
+        else:
+            offload_to_cpu = auto_offload
+            if auto_offload:
+                print(f"[API Server] Auto-setting offload_to_cpu=True based on GPU memory")
+
         offload_dit_to_cpu = _env_bool("ACESTEP_OFFLOAD_DIT_TO_CPU", False)
 
         # Checkpoint directory
@@ -1591,34 +1639,80 @@ def create_app() -> FastAPI:
                 print(f"[API Server] Warning: Failed to initialize third model: {e}")
                 app.state._initialized3 = False
 
-        # Initialize LLM model
-        print("[API Server] Loading LLM model...")
-        lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B").strip()
-        lm_backend = os.getenv("ACESTEP_LM_BACKEND", "vllm").strip().lower()
-        if lm_backend not in {"vllm", "pt"}:
-            lm_backend = "vllm"
-        lm_device = os.getenv("ACESTEP_LM_DEVICE", device)
-        lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
-
-        try:
-            _ensure_model_downloaded(lm_model_path, checkpoint_dir)
-        except Exception as e:
-            print(f"[API Server] Warning: Failed to download LLM model: {e}")
-
-        llm_status, llm_ok = llm_handler.initialize(
-            checkpoint_dir=checkpoint_dir,
-            lm_model_path=lm_model_path,
-            backend=lm_backend,
-            device=lm_device,
-            offload_to_cpu=lm_offload,
-            dtype=handler.dtype,
-        )
-        if llm_ok:
-            app.state._llm_initialized = True
-            print(f"[API Server] LLM model loaded: {lm_model_path}")
+        # Initialize LLM model based on GPU configuration
+        # Auto-determine whether to initialize LM based on GPU config
+        init_llm_env = os.getenv("ACESTEP_INIT_LLM")
+        if init_llm_env is not None:
+            init_llm = _env_bool("ACESTEP_INIT_LLM", True)
         else:
-            app.state._llm_init_error = llm_status
-            print(f"[API Server] Warning: LLM model failed to load: {llm_status}")
+            init_llm = gpu_config.init_lm_default
+            print(f"[API Server] Auto-setting init_llm={init_llm} based on GPU configuration")
+
+        if init_llm:
+            print("[API Server] Loading LLM model...")
+
+            # Auto-select LM model based on GPU config if not explicitly set
+            lm_model_path_env = os.getenv("ACESTEP_LM_MODEL_PATH", "").strip()
+            if lm_model_path_env:
+                lm_model_path = lm_model_path_env
+            else:
+                # Get recommended LM model for this GPU tier
+                recommended_lm = get_recommended_lm_model(gpu_config)
+                if recommended_lm:
+                    lm_model_path = recommended_lm
+                    print(f"[API Server] Auto-selected LM model: {lm_model_path} based on GPU tier")
+                else:
+                    lm_model_path = "acestep-5Hz-lm-0.6B"
+                    print(f"[API Server] Using default LM model: {lm_model_path}")
+
+            # Validate LM model is supported for this GPU
+            is_supported, warning_msg = is_lm_model_supported(lm_model_path, gpu_config)
+            if not is_supported:
+                print(f"[API Server] Warning: {warning_msg}")
+                # Try to use a supported model instead
+                recommended_lm = get_recommended_lm_model(gpu_config)
+                if recommended_lm:
+                    lm_model_path = recommended_lm
+                    print(f"[API Server] Falling back to supported LM model: {lm_model_path}")
+                else:
+                    print("[API Server] No supported LM models for this GPU, skipping LM initialization")
+                    init_llm = False
+
+        if init_llm:
+            lm_backend = os.getenv("ACESTEP_LM_BACKEND", "vllm").strip().lower()
+            if lm_backend not in {"vllm", "pt"}:
+                lm_backend = "vllm"
+            lm_device = os.getenv("ACESTEP_LM_DEVICE", device)
+
+            # Auto-determine LM offload based on GPU config
+            lm_offload_env = os.getenv("ACESTEP_LM_OFFLOAD_TO_CPU")
+            if lm_offload_env is not None:
+                lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
+            else:
+                lm_offload = offload_to_cpu
+
+            try:
+                _ensure_model_downloaded(lm_model_path, checkpoint_dir)
+            except Exception as e:
+                print(f"[API Server] Warning: Failed to download LLM model: {e}")
+
+            llm_status, llm_ok = llm_handler.initialize(
+                checkpoint_dir=checkpoint_dir,
+                lm_model_path=lm_model_path,
+                backend=lm_backend,
+                device=lm_device,
+                offload_to_cpu=lm_offload,
+                dtype=handler.dtype,
+            )
+            if llm_ok:
+                app.state._llm_initialized = True
+                print(f"[API Server] LLM model loaded: {lm_model_path}")
+            else:
+                app.state._llm_init_error = llm_status
+                print(f"[API Server] Warning: LLM model failed to load: {llm_status}")
+        else:
+            print("[API Server] Skipping LLM initialization (disabled or not supported for this GPU)")
+            app.state._llm_initialized = False
 
         print("[API Server] All models initialized successfully!")
 
@@ -1817,7 +1911,7 @@ def create_app() -> FastAPI:
             position = len(app.state.pending_ids)
 
         await q.put((rec.job_id, req))
-        return CreateJobResponse(task_id=rec.job_id, status="queued", queue_position=position)
+        return _wrap_response({"task_id": rec.job_id, "status": "queued", "queue_position": position})
 
     @app.post("/query_result")
     async def query_result(request: Request, authorization: Optional[str] = Header(None)) -> List[Dict[str, Any]]:
@@ -1927,16 +2021,16 @@ def create_app() -> FastAPI:
             else:
                 data_list.append({"task_id": task_id, "result": "[]", "status": 0})
 
-        return data_list
+        return _wrap_response(data_list)
 
     @app.get("/health")
     async def health_check():
         """Health check endpoint for service status."""
-        return {
+        return _wrap_response({
             "status": "ok",
             "service": "ACE-Step API",
             "version": "1.0",
-        }
+        })
 
     @app.get("/v1/stats")
     async def get_stats(_: None = Depends(verify_api_key)):
@@ -1944,12 +2038,12 @@ def create_app() -> FastAPI:
         job_stats = store.get_stats()
         async with app.state.stats_lock:
             avg_job_seconds = getattr(app.state, "avg_job_seconds", INITIAL_AVG_JOB_SECONDS)
-        return {
+        return _wrap_response({
             "jobs": job_stats,
             "queue_size": app.state.job_queue.qsize(),
             "queue_maxsize": QUEUE_MAXSIZE,
             "avg_job_seconds": avg_job_seconds,
-        }
+        })
 
     @app.get("/v1/models")
     async def list_models(_: None = Depends(verify_api_key)):
@@ -1983,10 +2077,10 @@ def create_app() -> FastAPI:
                     "is_default": False,
                 })
         
-        return {
+        return _wrap_response({
             "models": models,
             "default_model": models[0]["name"] if models else None,
-        }
+        })
 
     @app.post("/create_random_sample")
     async def create_random_sample_endpoint(request: Request, authorization: Optional[str] = Header(None)):
