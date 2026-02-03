@@ -1914,7 +1914,7 @@ def create_app() -> FastAPI:
         return _wrap_response({"task_id": rec.job_id, "status": "queued", "queue_position": position})
 
     @app.post("/query_result")
-    async def query_result(request: Request, authorization: Optional[str] = Header(None)) -> List[Dict[str, Any]]:
+    async def query_result(request: Request, authorization: Optional[str] = Header(None)):
         """Batch query job results"""
         content_type = (request.headers.get("content-type") or "").lower()
 
