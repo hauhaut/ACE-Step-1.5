@@ -1107,7 +1107,7 @@ class AceStepHandler:
     
     def _encode_audio_to_latents(self, audio: torch.Tensor) -> torch.Tensor:
         """
-        Encode audio to latents using VAE.
+        Encode audio to latents using VAE with tiled encoding for long audio.
         
         Args:
             audio: Audio tensor [channels, samples] or [batch, channels, samples]
@@ -1122,15 +1122,13 @@ class AceStepHandler:
         if input_was_2d:
             audio = audio.unsqueeze(0)
         
-        # Ensure input is in VAE's dtype
-        vae_input = audio.to(self.device).to(self.vae.dtype)
-        
-        # Encode to latents
+        # Use tiled_encode for memory-efficient encoding
+        # tiled_encode handles device transfer and dtype conversion internally
         with torch.no_grad():
-            latents = self.vae.encode(vae_input).latent_dist.sample()
+            latents = self.tiled_encode(audio, offload_latent_to_cpu=True)
         
-        # Cast back to model dtype
-        latents = latents.to(self.dtype)
+        # Move back to device and cast to model dtype
+        latents = latents.to(self.device).to(self.dtype)
         
         # Transpose: [batch, d, T] -> [batch, T, d]
         latents = latents.transpose(1, 2)
@@ -2001,11 +1999,11 @@ class AceStepHandler:
             else:
                 for refer_audio in refer_audios:
                     refer_audio = _normalize_audio_2d(refer_audio)
-                    # Ensure input is in VAE's dtype
-                    vae_input = refer_audio.unsqueeze(0).to(self.vae.dtype)
-                    refer_audio_latent = self.vae.encode(vae_input).latent_dist.sample()
-                    # Cast back to model dtype
-                    refer_audio_latent = refer_audio_latent.to(self.dtype)
+                    # Use tiled_encode for memory-efficient encoding of long audio
+                    with torch.no_grad():
+                        refer_audio_latent = self.tiled_encode(refer_audio, offload_latent_to_cpu=True)
+                    # Move to device and cast to model dtype
+                    refer_audio_latent = refer_audio_latent.to(self.device).to(self.dtype)
                     refer_audio_latents.append(_ensure_latent_3d(refer_audio_latent.transpose(1, 2)))
                     refer_audio_order_mask.append(batch_idx)
 
@@ -2328,7 +2326,7 @@ class AceStepHandler:
         
         return outputs
 
-    def tiled_decode(self, latents, chunk_size=512, overlap=64, offload_wav_to_cpu=False):
+    def tiled_decode(self, latents, chunk_size=512, overlap=64, offload_wav_to_cpu=True):
         """
         Decode latents using tiling to reduce VRAM usage.
         Uses overlap-discard strategy to avoid boundary artifacts.
@@ -2478,6 +2476,181 @@ class AceStepHandler:
         final_audio = final_audio[:, :, :audio_write_pos]
         
         return final_audio
+    
+    def tiled_encode(self, audio, chunk_size=None, overlap=None, offload_latent_to_cpu=True):
+        """
+        Encode audio to latents using tiling to reduce VRAM usage.
+        Uses overlap-discard strategy to avoid boundary artifacts.
+        
+        Args:
+            audio: Audio tensor [Batch, Channels, Samples] or [Channels, Samples]
+            chunk_size: Size of audio chunk to process at once (in samples). 
+                       Default: 48000 * 30 = 1440000 (30 seconds at 48kHz)
+            overlap: Overlap size in audio samples. Default: 48000 * 2 = 96000 (2 seconds)
+            offload_latent_to_cpu: If True, offload encoded latents to CPU immediately to save VRAM
+            
+        Returns:
+            Latents tensor [Batch, Channels, T] (same format as vae.encode output)
+        """
+        # Default values for 48kHz audio
+        if chunk_size is None:
+            chunk_size = 48000 * 30  # 30 seconds
+        if overlap is None:
+            overlap = 48000 * 2  # 2 seconds overlap
+        
+        # Handle 2D input [Channels, Samples]
+        input_was_2d = (audio.dim() == 2)
+        if input_was_2d:
+            audio = audio.unsqueeze(0)
+        
+        B, C, S = audio.shape  # Batch, Channels, Samples
+        
+        # If short enough, encode directly
+        if S <= chunk_size:
+            vae_input = audio.to(self.device).to(self.vae.dtype)
+            with torch.no_grad():
+                latents = self.vae.encode(vae_input).latent_dist.sample()
+            if input_was_2d:
+                latents = latents.squeeze(0)
+            return latents
+        
+        # Calculate stride (core size)
+        stride = chunk_size - 2 * overlap
+        if stride <= 0:
+            raise ValueError(f"chunk_size {chunk_size} must be > 2 * overlap {overlap}")
+        
+        num_steps = math.ceil(S / stride)
+        
+        if offload_latent_to_cpu:
+            result = self._tiled_encode_offload_cpu(audio, B, S, stride, overlap, num_steps, chunk_size)
+        else:
+            result = self._tiled_encode_gpu(audio, B, S, stride, overlap, num_steps, chunk_size)
+        
+        if input_was_2d:
+            result = result.squeeze(0)
+        
+        return result
+    
+    def _tiled_encode_gpu(self, audio, B, S, stride, overlap, num_steps, chunk_size):
+        """Standard tiled encode keeping all data on GPU."""
+        encoded_latent_list = []
+        downsample_factor = None
+        
+        for i in tqdm(range(num_steps), desc="Encoding audio chunks"):
+            # Core range in audio samples
+            core_start = i * stride
+            core_end = min(core_start + stride, S)
+            
+            # Window range (with overlap)
+            win_start = max(0, core_start - overlap)
+            win_end = min(S, core_end + overlap)
+            
+            # Extract chunk and move to GPU
+            audio_chunk = audio[:, :, win_start:win_end].to(self.device).to(self.vae.dtype)
+            
+            # Encode
+            with torch.no_grad():
+                latent_chunk = self.vae.encode(audio_chunk).latent_dist.sample()
+            
+            # Determine downsample factor from the first chunk
+            if downsample_factor is None:
+                downsample_factor = audio_chunk.shape[-1] / latent_chunk.shape[-1]
+            
+            # Calculate trim amounts in latent frames
+            added_start = core_start - win_start  # audio samples
+            trim_start = int(round(added_start / downsample_factor))
+            
+            added_end = win_end - core_end  # audio samples
+            trim_end = int(round(added_end / downsample_factor))
+            
+            # Trim latent
+            latent_len = latent_chunk.shape[-1]
+            end_idx = latent_len - trim_end if trim_end > 0 else latent_len
+            
+            latent_core = latent_chunk[:, :, trim_start:end_idx]
+            encoded_latent_list.append(latent_core)
+            
+            del audio_chunk
+        
+        # Concatenate
+        final_latents = torch.cat(encoded_latent_list, dim=-1)
+        return final_latents
+    
+    def _tiled_encode_offload_cpu(self, audio, B, S, stride, overlap, num_steps, chunk_size):
+        """Optimized tiled encode that offloads latents to CPU immediately to save VRAM."""
+        # First pass: encode first chunk to get downsample_factor and latent channels
+        first_core_start = 0
+        first_core_end = min(stride, S)
+        first_win_start = 0
+        first_win_end = min(S, first_core_end + overlap)
+        
+        first_audio_chunk = audio[:, :, first_win_start:first_win_end].to(self.device).to(self.vae.dtype)
+        with torch.no_grad():
+            first_latent_chunk = self.vae.encode(first_audio_chunk).latent_dist.sample()
+        
+        downsample_factor = first_audio_chunk.shape[-1] / first_latent_chunk.shape[-1]
+        latent_channels = first_latent_chunk.shape[1]
+        
+        # Calculate total latent length and pre-allocate CPU tensor
+        total_latent_length = int(round(S / downsample_factor))
+        final_latents = torch.zeros(B, latent_channels, total_latent_length, 
+                                   dtype=first_latent_chunk.dtype, device='cpu')
+        
+        # Process first chunk: trim and copy to CPU
+        first_added_end = first_win_end - first_core_end
+        first_trim_end = int(round(first_added_end / downsample_factor))
+        first_latent_len = first_latent_chunk.shape[-1]
+        first_end_idx = first_latent_len - first_trim_end if first_trim_end > 0 else first_latent_len
+        
+        first_latent_core = first_latent_chunk[:, :, :first_end_idx]
+        latent_write_pos = first_latent_core.shape[-1]
+        final_latents[:, :, :latent_write_pos] = first_latent_core.cpu()
+        
+        # Free GPU memory
+        del first_audio_chunk, first_latent_chunk, first_latent_core
+        
+        # Process remaining chunks
+        for i in tqdm(range(1, num_steps), desc="Encoding audio chunks"):
+            # Core range in audio samples
+            core_start = i * stride
+            core_end = min(core_start + stride, S)
+            
+            # Window range (with overlap)
+            win_start = max(0, core_start - overlap)
+            win_end = min(S, core_end + overlap)
+            
+            # Extract chunk and move to GPU
+            audio_chunk = audio[:, :, win_start:win_end].to(self.device).to(self.vae.dtype)
+            
+            # Encode on GPU
+            with torch.no_grad():
+                latent_chunk = self.vae.encode(audio_chunk).latent_dist.sample()
+            
+            # Calculate trim amounts in latent frames
+            added_start = core_start - win_start  # audio samples
+            trim_start = int(round(added_start / downsample_factor))
+            
+            added_end = win_end - core_end  # audio samples
+            trim_end = int(round(added_end / downsample_factor))
+            
+            # Trim latent
+            latent_len = latent_chunk.shape[-1]
+            end_idx = latent_len - trim_end if trim_end > 0 else latent_len
+            
+            latent_core = latent_chunk[:, :, trim_start:end_idx]
+            
+            # Copy to pre-allocated CPU tensor
+            core_len = latent_core.shape[-1]
+            final_latents[:, :, latent_write_pos:latent_write_pos + core_len] = latent_core.cpu()
+            latent_write_pos += core_len
+            
+            # Free GPU memory immediately
+            del audio_chunk, latent_chunk, latent_core
+        
+        # Trim to actual length (in case of rounding differences)
+        final_latents = final_latents[:, :, :latent_write_pos]
+        
+        return final_latents
 
     def generate_music(
         self,
