@@ -54,6 +54,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["use_flash_attention_checkbox"],
             generation_section["offload_to_cpu_checkbox"],
             generation_section["offload_dit_to_cpu_checkbox"],
+            generation_section["compile_model_checkbox"],
+            generation_section["quantization_checkbox"],
         ],
         outputs=[
             generation_section["init_status"], 
@@ -168,7 +170,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     # ========== Sample/Transcribe Handlers ==========
     # Load random example from ./examples/text2music directory
     generation_section["sample_btn"].click(
-        fn=lambda task: gen_h.load_random_example(task) + (True,),
+        fn=lambda task: gen_h.load_random_example(task, llm_handler) + (True,),
         inputs=[
             generation_section["task_type"],
         ],
@@ -336,7 +338,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     
     # ========== Load/Save Metadata ==========
     generation_section["load_file"].upload(
-        fn=gen_h.load_metadata,
+        fn=lambda file_obj: gen_h.load_metadata(file_obj, llm_handler),
         inputs=[generation_section["load_file"]],
         outputs=[
             generation_section["task_type"],

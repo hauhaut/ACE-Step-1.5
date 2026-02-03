@@ -107,3 +107,33 @@ SFT_GEN_PROMPT = """# Instruction
 # Metas
 {}<|endoftext|>
 """
+
+
+# ==============================================================================
+# GPU Memory Configuration Constants
+# ==============================================================================
+
+# GPU tier thresholds (in GB)
+GPU_TIER_THRESHOLDS = {
+    "tier1": 4,    # <= 4GB
+    "tier2": 6,    # 4-6GB
+    "tier3": 8,    # 6-8GB
+    "tier4": 12,   # 8-12GB
+    "tier5": 16,   # 12-16GB
+    "tier6": 24,   # 16-24GB
+    # "unlimited" for >= 24GB
+}
+
+# LM model memory requirements (in GB)
+LM_MODEL_MEMORY_GB = {
+    "0.6B": 3.0,
+    "1.7B": 8.0,
+    "4B": 12.0,
+}
+
+# LM model names mapping
+LM_MODEL_NAMES = {
+    "0.6B": "acestep-5Hz-lm-0.6B",
+    "1.7B": "acestep-5Hz-lm-1.7B",
+    "4B": "acestep-5Hz-lm-4B",
+}

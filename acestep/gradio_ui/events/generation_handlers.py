@@ -14,6 +14,31 @@ from acestep.constants import (
 )
 from acestep.gradio_ui.i18n import t
 from acestep.inference import understand_music, create_sample, format_sample
+from acestep.gpu_config import get_global_gpu_config
+
+
+def clamp_duration_to_gpu_limit(duration_value: Optional[float], llm_handler=None) -> Optional[float]:
+    """
+    Clamp duration value to GPU memory limit.
+    
+    Args:
+        duration_value: Duration in seconds (can be None or -1 for no limit)
+        llm_handler: LLM handler instance (to check if LM is initialized)
+        
+    Returns:
+        Clamped duration value, or original value if within limits
+    """
+    if duration_value is None or duration_value <= 0:
+        return duration_value
+    
+    gpu_config = get_global_gpu_config()
+    lm_initialized = llm_handler.llm_initialized if llm_handler else False
+    max_duration = gpu_config.max_duration_with_lm if lm_initialized else gpu_config.max_duration_without_lm
+    
+    if duration_value > max_duration:
+        return float(max_duration)
+    
+    return duration_value
 
 
 def parse_and_validate_timesteps(
@@ -66,8 +91,13 @@ def parse_and_validate_timesteps(
     return timesteps, False, ""
 
 
-def load_metadata(file_obj):
-    """Load generation parameters from a JSON file"""
+def load_metadata(file_obj, llm_handler=None):
+    """Load generation parameters from a JSON file
+    
+    Args:
+        file_obj: Uploaded file object
+        llm_handler: LLM handler instance (optional, for GPU duration limit check)
+    """
     if file_obj is None:
         gr.Warning(t("messages.no_file_selected"))
         return [None] * 36 + [False]  # Return None for all fields, False for is_format_caption
@@ -106,6 +136,8 @@ def load_metadata(file_obj):
         if duration_value is not None and duration_value != "N/A":
             try:
                 audio_duration = float(duration_value)
+                # Clamp duration to GPU memory limit
+                audio_duration = clamp_duration_to_gpu_limit(audio_duration, llm_handler)
             except:
                 audio_duration = -1
         else:
@@ -164,11 +196,12 @@ def load_metadata(file_obj):
         return [None] * 36 + [False]
 
 
-def load_random_example(task_type: str):
+def load_random_example(task_type: str, llm_handler=None):
     """Load a random example from the task-specific examples directory
     
     Args:
         task_type: The task type (e.g., "text2music")
+        llm_handler: LLM handler instance (optional, for GPU duration limit check)
         
     Returns:
         Tuple of (caption, lyrics, think, bpm, duration, keyscale, language, timesignature) for updating UI components
@@ -229,6 +262,8 @@ def load_random_example(task_type: str):
             if 'duration' in data and data['duration'] not in [None, "N/A", ""]:
                 try:
                     duration_value = float(data['duration'])
+                    # Clamp duration to GPU memory limit
+                    duration_value = clamp_duration_to_gpu_limit(duration_value, llm_handler)
                 except (ValueError, TypeError):
                     pass
             
@@ -287,12 +322,14 @@ def sample_example_smart(llm_handler, task_type: str, constrained_decoding_debug
             
             if result.success:
                 gr.Info(t("messages.lm_generated"))
+                # Clamp duration to GPU memory limit
+                clamped_duration = clamp_duration_to_gpu_limit(result.duration, llm_handler)
                 return (
                     result.caption,
                     result.lyrics,
                     True,  # Always enable think when using LM-generated examples
                     result.bpm,
-                    result.duration,
+                    clamped_duration,
                     result.keyscale,
                     result.language,
                     result.timesignature,
@@ -398,13 +435,17 @@ def update_model_type_settings(config_path):
     return get_model_type_ui_settings(is_turbo)
 
 
-def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, device, init_llm, lm_model_path, backend, use_flash_attention, offload_to_cpu, offload_dit_to_cpu):
+def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, device, init_llm, lm_model_path, backend, use_flash_attention, offload_to_cpu, offload_dit_to_cpu, compile_model, quantization):
     """Wrapper for service initialization, returns status, button state, accordion state, and model type settings"""
+    # Convert quantization checkbox to value (int8_weight_only if checked, None if not)
+    quant_value = "int8_weight_only" if quantization else None
+    
     # Initialize DiT handler
     status, enable = dit_handler.initialize_service(
         checkpoint, config_path, device,
-        use_flash_attention=use_flash_attention, compile_model=False, 
-        offload_to_cpu=offload_to_cpu, offload_dit_to_cpu=offload_dit_to_cpu
+        use_flash_attention=use_flash_attention, compile_model=compile_model, 
+        offload_to_cpu=offload_to_cpu, offload_dit_to_cpu=offload_dit_to_cpu,
+        quantization=quant_value
     )
     
     # Initialize LM handler if requested
@@ -574,12 +615,15 @@ def transcribe_audio_codes(llm_handler, audio_code_string, constrained_decoding_
             return t("messages.lm_not_initialized"), "", "", None, None, "", "", "", False
         return result.status_message, "", "", None, None, "", "", "", False
     
+    # Clamp duration to GPU memory limit
+    clamped_duration = clamp_duration_to_gpu_limit(result.duration, llm_handler)
+    
     return (
         result.status_message,
         result.caption,
         result.lyrics,
         result.bpm,
-        result.duration,
+        clamped_duration,
         result.keyscale,
         result.language,
         result.timesignature,
@@ -830,11 +874,15 @@ def handle_create_sample(
     # Success - populate fields
     gr.Info(t("messages.sample_created"))
     
+    # Clamp duration to GPU memory limit
+    clamped_duration = clamp_duration_to_gpu_limit(result.duration, llm_handler)
+    audio_duration_value = clamped_duration if clamped_duration and clamped_duration > 0 else -1
+    
     return (
         result.caption,  # captions
         result.lyrics,  # lyrics
         result.bpm,  # bpm
-        result.duration if result.duration and result.duration > 0 else -1,  # audio_duration
+        audio_duration_value,  # audio_duration
         result.keyscale,  # key_scale
         result.language,  # vocal_language
         result.language,  # simple vocal_language
@@ -960,11 +1008,15 @@ def handle_format_sample(
     # Success - populate fields
     gr.Info(t("messages.format_success"))
     
+    # Clamp duration to GPU memory limit
+    clamped_duration = clamp_duration_to_gpu_limit(result.duration, llm_handler)
+    audio_duration_value = clamped_duration if clamped_duration and clamped_duration > 0 else -1
+    
     return (
         result.caption,  # captions
         result.lyrics,  # lyrics
         result.bpm,  # bpm
-        result.duration if result.duration and result.duration > 0 else -1,  # audio_duration
+        audio_duration_value,  # audio_duration
         result.keyscale,  # key_scale
         result.language,  # vocal_language
         result.timesignature,  # time_signature

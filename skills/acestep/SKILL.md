@@ -8,6 +8,22 @@ allowed-tools: Read, Write, Bash
 
 Use ACE-Step V1.5 API for music generation and editing.
 
+## GPU Memory Auto-Configuration
+
+The API server automatically adapts to your GPU's VRAM:
+
+| GPU VRAM | Recommended LM Model | CPU Offload | Notes |
+|----------|---------------------|-------------|-------|
+| ≤6GB | None (DiT only) | Auto | LM disabled by default |
+| 6-12GB | `acestep-5Hz-lm-0.6B` | Auto | Lightweight, good balance |
+| 12-16GB | `acestep-5Hz-lm-1.7B` | Auto | Better quality |
+| ≥16GB | `acestep-5Hz-lm-4B` | Off | Best quality |
+
+Environment variables to override auto-detection:
+- `ACESTEP_INIT_LLM`: Force enable/disable LM initialization
+- `ACESTEP_OFFLOAD_TO_CPU`: Force CPU offload on/off
+- `ACESTEP_LM_MODEL_PATH`: Specify LM model path
+
 ## Output Files
 
 After generation, the script automatically saves results to the `acestep_output` folder in the project root (same level as `.claude`):
@@ -185,13 +201,18 @@ Install jq:
 
 ## API Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/release_task` | POST | Create music generation task |
-| `/query_result` | POST | Batch query task results |
-| `/v1/models` | GET | List available models |
-| `/v1/audio?path={path}` | GET | Download generated audio file |
+| Endpoint | Method | Description | Wrapped |
+|----------|--------|-------------|---------|
+| `/health` | GET | Health check | Yes |
+| `/release_task` | POST | Create music generation task | Yes |
+| `/query_result` | POST | Batch query task results | Yes |
+| `/v1/models` | GET | List available DiT models | Yes |
+| `/v1/stats` | GET | Get server statistics | Yes |
+| `/v1/audio?path={path}` | GET | Download generated audio file | No |
+| `/create_random_sample` | POST | Get random sample parameters | Yes |
+| `/format_input` | POST | Format and enhance lyrics/caption via LLM | Yes |
+
+**Wrapped**: Response wrapped in `{"data": ..., "code": 200, "error": null, "timestamp": ..., "extra": null}`
 
 ## Main Parameters
 
@@ -200,12 +221,13 @@ Install jq:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `prompt` | string | "" | Music description text (Caption mode) |
-| `sample_query` | string | "" | Simple description, LM auto-generates caption/lyrics (Simple mode) |
+| `sample_query` | string | "" | Simple description, LM auto-generates caption/lyrics |
 | `lyrics` | string | "" | Lyrics content |
-| `thinking` | bool | false | Enable 5Hz LM model for audio code generation (high quality) |
-| `sample_mode` | bool | false | Random sampling mode (LM auto-generates) |
+| `thinking` | bool | false | Enable 5Hz LM for audio code generation |
+| `sample_mode` | bool | false | Random sampling mode |
 | `use_format` | bool | false | Use LM to enhance caption/lyrics |
 | `model` | string | - | Specify DiT model name |
+| `batch_size` | int | 1 | Number of audio files to generate |
 
 ### Music Attributes
 
@@ -216,13 +238,44 @@ Install jq:
 | `time_signature` | string | "" | Time signature (e.g. "4/4") |
 | `vocal_language` | string | "en" | Vocal language |
 | `audio_duration` | float | - | Audio duration (seconds) |
+| `audio_format` | string | "mp3" | Output format (mp3/wav/flac) |
+
+### Generation Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `inference_steps` | int | 8 | Number of diffusion steps |
+| `guidance_scale` | float | 7.0 | Classifier-free guidance scale |
+| `seed` | int | -1 | Random seed (-1 for random) |
+| `use_random_seed` | bool | true | Use random seed |
+| `infer_method` | string | "ode" | Diffusion method (ode/sde) |
+| `shift` | float | 3.0 | Timestep shift (1.0~5.0, base models only) |
+| `timesteps` | string | - | Custom timesteps (comma-separated) |
 
 ### LM Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `use_cot_caption` | bool | true | Use CoT to enhance caption |
-| `use_cot_language` | bool | true | Use CoT to enhance language detection |
+| `use_cot_language` | bool | true | Use CoT for language detection |
+| `lm_model_path` | string | - | LM model path (auto-selected by GPU) |
+| `lm_backend` | string | "vllm" | LM backend (vllm/pt) |
+| `lm_temperature` | float | 0.85 | LM sampling temperature |
+| `lm_top_p` | float | 0.9 | LM top-p sampling |
+| `constrained_decoding` | bool | true | Use constrained decoding |
+| `allow_lm_batch` | bool | true | Allow LM batch processing |
+
+### Audio Task Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `task_type` | string | "text2music" | Task type |
+| `reference_audio_path` | string | - | Reference audio for style |
+| `src_audio_path` | string | - | Source audio for continuation |
+| `audio_code_string` | string | "" | Pre-generated audio codes |
+| `repainting_start` | float | 0.0 | Repainting start position |
+| `repainting_end` | float | - | Repainting end position |
+| `audio_cover_strength` | float | 1.0 | Audio cover strength |
 
 ### Task Types
 
@@ -243,13 +296,35 @@ Install jq:
 
 ## Response Examples
 
-### Create Task Response (`/release_task`)
+### Standard Response Format
+
+All API responses are wrapped in a standard format:
 
 ```json
 {
-  "task_id": "abc123-def456",
-  "status": "queued",
-  "queue_position": 1
+  "data": <actual_response_data>,
+  "code": 200,
+  "error": null,
+  "timestamp": 1704067200000,
+  "extra": null
+}
+```
+
+### Create Task Response (`/release_task`)
+
+Uses `_wrap_response` wrapper:
+
+```json
+{
+  "data": {
+    "task_id": "abc123-def456",
+    "status": "queued",
+    "queue_position": 1
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1704067200000,
+  "extra": null
 }
 ```
 
@@ -257,32 +332,147 @@ Install jq:
 
 ```json
 {
-  "task_id_list": ["abc123-def456", "xyz789"]
+  "task_id_list": ["abc123-def456"]
 }
 ```
 
-### Query Result Response
+### Query Result Response (Success)
+
+Response is wrapped with `_wrap_response`:
 
 ```json
-[
-  {
-    "task_id": "abc123-def456",
-    "status": 1,
-    "result": "[{\"file\":\"/v1/audio?path=...\",\"status\":1,\"metas\":{\"bpm\":120,\"duration\":60,\"keyscale\":\"C Major\"}}]"
-  }
-]
+{
+  "data": [
+    {
+      "task_id": "abc123-def456",
+      "status": 1,
+      "result": "[{\"file\":\"/v1/audio?path=...\",\"status\":1,\"metas\":{\"bpm\":120,\"duration\":60,\"keyscale\":\"C Major\",\"timesignature\":\"4/4\"}}]"
+    }
+  ],
+  "code": 200,
+  "error": null,
+  "timestamp": 1704067200000,
+  "extra": null
+}
 ```
+
+### Models Response (`/v1/models`)
+
+Uses `_wrap_response` wrapper:
+
+```json
+{
+  "data": {
+    "models": [
+      {"name": "acestep-v15-turbo", "is_default": true},
+      {"name": "acestep-v15-base", "is_default": false}
+    ],
+    "default_model": "acestep-v15-turbo"
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1704067200000,
+  "extra": null
+}
+```
+
+### Stats Response (`/v1/stats`)
+
+Uses `_wrap_response` wrapper:
+
+```json
+{
+  "data": {
+    "jobs": {"total": 10, "queued": 2, "running": 1, "succeeded": 6, "failed": 1},
+    "queue_size": 2,
+    "queue_maxsize": 200,
+    "avg_job_seconds": 45.5
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1704067200000,
+  "extra": null
+}
+```
+
+### Health Response (`/health`)
+
+Uses `_wrap_response` wrapper:
+
+```json
+{
+  "data": {
+    "status": "ok",
+    "service": "ACE-Step API",
+    "version": "1.0"
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1704067200000,
+  "extra": null
+}
+```
+
+### Create Random Sample Response (`/create_random_sample`)
+
+Uses `_wrap_response` wrapper:
+
+```json
+{
+  "data": {
+    "description": "a soft Bengali love song for a quiet evening",
+    "instrumental": false,
+    "vocal_language": "bn"
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1704067200000,
+  "extra": null
+}
+```
+
+Input parameters:
+- `sample_type`: "simple_mode" (default) or "custom_mode"
+
+### Format Input Response (`/format_input`)
+
+Uses `_wrap_response` wrapper:
+
+```json
+{
+  "data": {
+    "caption": "Enhanced caption...",
+    "lyrics": "Formatted lyrics...",
+    "bpm": 120,
+    "key_scale": "C Major",
+    "time_signature": "4/4",
+    "duration": 60,
+    "vocal_language": "en"
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1704067200000,
+  "extra": null
+}
+```
+
+Input parameters:
+- `prompt`: Caption text
+- `lyrics`: Lyrics text
+- `temperature`: LM temperature (default: 0.85)
+- `param_obj`: JSON object with metadata (bpm, duration, key, time_signature, language)
 
 Status codes: `0` = processing, `1` = success, `2` = failed
 
 ## Notes
 
-1. **Config priority**: Command line args > config.json defaults. User-specified params take effect temporarily without modifying config file
-2. **Modify default config**: Only `config --set` command permanently modifies config.json
-3. **Thinking mode**: When enabled, uses 5Hz LM to generate audio code, higher quality but slower
-4. **Async tasks**: All generation tasks are async, poll results via `POST /query_result`
-5. **Auto download**: After completion, auto-saves JSON results and downloads audio files to `acestep_output/` directory
-6. **Status codes**: Status in query results is integer: 0=processing, 1=success, 2=failed
+1. **GPU Auto-Config**: Server auto-detects GPU VRAM and selects appropriate LM model and offload settings
+2. **Config priority**: Command line args > config.json defaults
+3. **Thinking mode**: Uses 5Hz LM for audio codes, higher quality but slower
+4. **Async tasks**: All generation tasks are async, poll via `POST /query_result`
+5. **Auto download**: Script auto-saves JSON and downloads audio to `acestep_output/`
+6. **Status codes**: 0=processing, 1=success, 2=failed
+7. **LM Model Selection**: Auto-selected based on GPU tier (0.6B/1.7B/4B)
 
 ## References
 - Shell script: [scripts/acestep.sh](scripts/acestep.sh) (Linux/macOS/Git Bash)

@@ -6,7 +6,7 @@
     <a href="https://modelscope.cn/models/ACE-Step/Ace-Step1.5">ModelScope</a> |
     <a href="https://huggingface.co/spaces/ACE-Step/Ace-Step-v1.5">Space Demo</a> |
     <a href="https://discord.gg/PeWDxrkdj7">Discord</a> |
-    <a href="https://arxiv.org/abs/2506.00045">Technical Report</a>
+    <a href="https://arxiv.org/abs/2602.00744">Technical Report</a>
 </p>
 
 <p align="center">
@@ -19,6 +19,7 @@
 - [📦 Installation](#-installation)
 - [📥 Model Download](#-model-download)
 - [🚀 Usage](#-usage)
+- [📖 Tutorial](#-tutorial)
 - [🔨 Train](#-train)
 - [🏗️ Architecture](#️-architecture)
 - [🦁 Model Zoo](#-model-zoo)
@@ -218,6 +219,20 @@ huggingface-cli download ACE-Step/acestep-v15-turbo-continuous --local-dir ./che
 | acestep-v15-turbo-shift3 | [ACE-Step/acestep-v15-turbo-shift3](https://huggingface.co/ACE-Step/acestep-v15-turbo-shift3) | Turbo DiT with shift3 |
 | acestep-v15-turbo-continuous | [ACE-Step/acestep-v15-turbo-continuous](https://huggingface.co/ACE-Step/acestep-v15-turbo-continuous) | Turbo DiT with continuous shift (1-5) |
 
+### 💡 Which Model Should I Choose?
+
+ACE-Step automatically adapts to your GPU's VRAM. Here's a quick guide:
+
+| Your GPU VRAM | Recommended LM Model | Notes |
+|---------------|---------------------|-------|
+| **≤6GB** | None (DiT only) | LM disabled by default to save memory |
+| **6-12GB** | `acestep-5Hz-lm-0.6B` | Lightweight, good balance |
+| **12-16GB** | `acestep-5Hz-lm-1.7B` | Better quality |
+| **≥16GB** | `acestep-5Hz-lm-4B` | Best quality and audio understanding |
+
+> 📖 **For detailed GPU compatibility information** (duration limits, batch sizes, memory optimization), see GPU Compatibility Guide: [English](./docs/en/GPU_COMPATIBILITY.md) | [中文](./docs/zh/GPU_COMPATIBILITY.md) | [日本語](./docs/ja/GPU_COMPATIBILITY.md)
+
+
 ## 🚀 Usage
 
 We provide multiple ways to use ACE-Step:
@@ -230,6 +245,22 @@ We provide multiple ways to use ACE-Step:
 
 **📚 Documentation available in:** [English](./docs/en/) | [中文](./docs/zh/) | [日本語](./docs/ja/)
 
+## 📖 Tutorial
+
+**🎯 Must Read:** Comprehensive guide to ACE-Step 1.5's design philosophy and usage methods.
+
+| Language | Link |
+|----------|------|
+| 🇺🇸 English | [English Tutorial](./docs/en/Tutorial.md) |
+| 🇨🇳 中文 | [中文教程](./docs/zh/Tutorial.md) |
+| 🇯🇵 日本語 | [日本語チュートリアル](./docs/ja/Tutorial.md) |
+
+This tutorial covers:
+- Mental models and design philosophy
+- Model architecture and selection
+- Input control (text and audio)
+- Inference hyperparameters
+- Random factors and optimization strategies
 
 ## 🔨 Train
 
