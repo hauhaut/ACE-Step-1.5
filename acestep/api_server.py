@@ -107,6 +107,44 @@ def _validate_audio_path(path: str) -> str:
     return abs_path
 
 
+def _validate_input_audio_path(path: str) -> str:
+    """Validate user-provided audio input paths (ref_audio_path, src_audio_path).
+
+    Allows access to:
+    - System temp directory
+    - ACESTEP_TMPDIR (custom temp directory)
+    - Project directory (for sample files)
+
+    Raises HTTPException(403) if path is outside allowed directories.
+    """
+    # Allowed directories
+    cache_root = os.path.expanduser("~/.cache/acestep")
+    acestep_tmp = (os.getenv("ACESTEP_TMPDIR") or os.path.join(cache_root, "tmp")).strip()
+    system_temp = tempfile.gettempdir()
+    project_root = _get_project_root()
+
+    # Normalize input path
+    abs_path = os.path.abspath(os.path.normpath(path))
+
+    # Check against allowed directories
+    allowed_dirs = [
+        os.path.abspath(os.path.normpath(acestep_tmp)),
+        os.path.abspath(os.path.normpath(system_temp)),
+        os.path.abspath(os.path.normpath(project_root)),
+    ]
+
+    for allowed in allowed_dirs:
+        if abs_path.startswith(allowed + os.sep) or abs_path == allowed:
+            if not os.path.isfile(abs_path):
+                raise HTTPException(status_code=404, detail="Audio file not found")
+            return abs_path
+
+    raise HTTPException(
+        status_code=403,
+        detail="Access denied: audio path outside allowed directories"
+    )
+
+
 # =============================================================================
 # Model Auto-Download Support
 # =============================================================================
@@ -1369,6 +1407,25 @@ def create_app() -> FastAPI:
 
                 # Build GenerationConfig - default to 2 audios like gradio_ui
                 batch_size = req.batch_size if req.batch_size is not None else 2
+
+                # SEC-003: Enforce GPU-tier resource limits
+                gpu_config: GPUConfig = getattr(app.state, "gpu_config", None)
+                if gpu_config:
+                    lm_active = getattr(app.state, "_llm_initialized", False)
+                    max_batch = gpu_config.max_batch_size_with_lm if lm_active else gpu_config.max_batch_size_without_lm
+                    max_dur = gpu_config.max_duration_with_lm if lm_active else gpu_config.max_duration_without_lm
+
+                    if batch_size > max_batch:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"batch_size {batch_size} exceeds limit {max_batch} for GPU tier {gpu_config.tier}"
+                        )
+                    if audio_duration and audio_duration > max_dur:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"audio_duration {audio_duration}s exceeds limit {max_dur}s for GPU tier {gpu_config.tier}"
+                        )
+
                 config = GenerationConfig(
                     batch_size=batch_size,
                     allow_lm_batch=req.allow_lm_batch,
@@ -1866,13 +1923,15 @@ def create_app() -> FastAPI:
                 reference_audio_path = await _save_upload_to_temp(ref_up, prefix="ref_audio")
                 temp_files.append(reference_audio_path)
             else:
-                reference_audio_path = str(form.get("ref_audio_path") or form.get("reference_audio_path") or "").strip() or None
+                raw_ref = str(form.get("ref_audio_path") or form.get("reference_audio_path") or "").strip()
+                reference_audio_path = _validate_input_audio_path(raw_ref) if raw_ref else None
 
             if isinstance(ctx_up, StarletteUploadFile):
                 src_audio_path = await _save_upload_to_temp(ctx_up, prefix="ctx_audio")
                 temp_files.append(src_audio_path)
             else:
-                src_audio_path = str(form.get("ctx_audio_path") or form.get("src_audio_path") or "").strip() or None
+                raw_src = str(form.get("ctx_audio_path") or form.get("src_audio_path") or "").strip()
+                src_audio_path = _validate_input_audio_path(raw_src) if raw_src else None
 
             req = _build_request(
                 RequestParser(dict(form)),
@@ -1884,8 +1943,10 @@ def create_app() -> FastAPI:
             form = await request.form()
             form_dict = dict(form)
             verify_token_from_request(form_dict, authorization)
-            reference_audio_path = str(form.get("ref_audio_path") or form.get("reference_audio_path") or "").strip() or None
-            src_audio_path = str(form.get("ctx_audio_path") or form.get("src_audio_path") or "").strip() or None
+            raw_ref = str(form.get("ref_audio_path") or form.get("reference_audio_path") or "").strip()
+            raw_src = str(form.get("ctx_audio_path") or form.get("src_audio_path") or "").strip()
+            reference_audio_path = _validate_input_audio_path(raw_ref) if raw_ref else None
+            src_audio_path = _validate_input_audio_path(raw_src) if raw_src else None
             req = _build_request(
                 RequestParser(form_dict),
                 reference_audio_path=reference_audio_path,
@@ -1916,8 +1977,10 @@ def create_app() -> FastAPI:
                 parsed = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
                 flat = {k: (v[0] if isinstance(v, list) and v else v) for k, v in parsed.items()}
                 verify_token_from_request(flat, authorization)
-                reference_audio_path = str(flat.get("ref_audio_path") or flat.get("reference_audio_path") or "").strip() or None
-                src_audio_path = str(flat.get("ctx_audio_path") or flat.get("src_audio_path") or "").strip() or None
+                raw_ref = str(flat.get("ref_audio_path") or flat.get("reference_audio_path") or "").strip()
+                raw_src = str(flat.get("ctx_audio_path") or flat.get("src_audio_path") or "").strip()
+                reference_audio_path = _validate_input_audio_path(raw_ref) if raw_ref else None
+                src_audio_path = _validate_input_audio_path(raw_src) if raw_src else None
                 req = _build_request(
                     RequestParser(flat),
                     reference_audio_path=reference_audio_path,
