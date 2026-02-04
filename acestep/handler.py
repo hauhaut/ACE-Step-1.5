@@ -8,14 +8,11 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import math
-from copy import deepcopy
+import copy
 import tempfile
 import traceback
 import re
 import random
-import uuid
-import hashlib
-import json
 from contextlib import contextmanager
 from typing import Optional, Dict, Any, Tuple, List, Union
 
@@ -27,15 +24,13 @@ from tqdm import tqdm
 from loguru import logger
 import warnings
 
-from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
-from transformers.generation.streamers import BaseStreamer
+from transformers import AutoTokenizer, AutoModel
 from diffusers.models import AutoencoderOobleck
 from acestep.model_downloader import (
     ensure_main_model,
     ensure_dit_model,
     check_main_model_exists,
     check_model_exists,
-    get_checkpoints_dir,
 )
 from acestep.constants import (
     TASK_INSTRUCTIONS,
@@ -3149,11 +3144,12 @@ class AceStepHandler:
             start_idx = len(header_ids)
             
             # Find end of lyrics (before endoftext token)
+            eos_token_id = self.text_tokenizer.eos_token_id
             try:
-                end_idx = raw_lyric_ids.index(151643)  # <|endoftext|> token
+                end_idx = raw_lyric_ids.index(eos_token_id)  # <|endoftext|> token
             except ValueError:
                 end_idx = len(raw_lyric_ids)
-            
+
             pure_lyric_ids = raw_lyric_ids[start_idx:end_idx]
             pure_lyric_matrix = all_layers_matrix[:, :, start_idx:end_idx, :]
             
@@ -3371,8 +3367,9 @@ class AceStepHandler:
             start_idx = len(header_ids)
 
             # Find end of lyrics (before endoftext token)
+            eos_token_id = self.text_tokenizer.eos_token_id
             try:
-                end_idx = raw_lyric_ids.index(151643)  # <|endoftext|> token
+                end_idx = raw_lyric_ids.index(eos_token_id)  # <|endoftext|> token
             except ValueError:
                 end_idx = len(raw_lyric_ids)
 

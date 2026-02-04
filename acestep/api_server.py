@@ -48,7 +48,6 @@ from acestep.handler import AceStepHandler
 from acestep.llm_inference import LLMHandler
 from acestep.constants import (
     DEFAULT_DIT_INSTRUCTION,
-    DEFAULT_LM_INSTRUCTION,
     TASK_INSTRUCTIONS,
 )
 from acestep.inference import (
@@ -61,8 +60,6 @@ from acestep.inference import (
 from acestep.gradio_ui.events.results_handlers import _build_generation_info
 from acestep.gpu_config import (
     get_gpu_config,
-    get_gpu_memory_gb,
-    print_gpu_config_info,
     set_global_gpu_config,
     get_recommended_lm_model,
     is_lm_model_supported,
