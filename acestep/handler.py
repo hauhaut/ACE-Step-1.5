@@ -682,7 +682,8 @@ class AceStepHandler:
             # silence_latent is used in many places outside of model context,
             # so it should stay on GPU to avoid device mismatch errors.
             
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             offload_time = time.time() - start_time
             self.current_offload_cost += offload_time
             logger.info(f"[_load_model_context] Offloaded {model_name} to CPU in {offload_time:.4f}s")
@@ -1610,9 +1611,13 @@ class AceStepHandler:
             target_latents_list = []
             latent_lengths = []
             # Use per-item wavs (may be adjusted if audio_code_hints are provided)
-            target_wavs_list = [target_wavs[i].clone() for i in range(batch_size)]
-            if target_wavs.device != self.device:
-                target_wavs = target_wavs.to(self.device)
+            if target_wavs is not None:
+                if target_wavs.device != self.device:
+                    target_wavs = target_wavs.to(self.device)
+                target_wavs_list = [target_wavs[i].clone() for i in range(batch_size)]
+            else:
+                # Create silent placeholder wavs for batch
+                target_wavs_list = [torch.zeros(2, 48000 * 30, device=self.device) for _ in range(batch_size)]
             
             with self._load_model_context("vae"):
                 for i in range(batch_size):
@@ -2877,7 +2882,8 @@ class AceStepHandler:
                     
                     # Release original pred_latents to free VRAM before VAE decode
                     del pred_latents
-                    torch.cuda.empty_cache()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     
                     logger.debug(f"[generate_music] Before VAE decode: allocated={torch.cuda.memory_allocated()/1024**3:.2f}GB, max={torch.cuda.max_memory_allocated()/1024**3:.2f}GB")
                     
@@ -2897,8 +2903,9 @@ class AceStepHandler:
                     # Cast output to float32 for audio processing/saving (in-place if possible)
                     if pred_wavs.dtype != torch.float32:
                         pred_wavs = pred_wavs.float()
-                    
-                    torch.cuda.empty_cache()
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
             end_time = time.time()
             time_costs["vae_decode_time_cost"] = end_time - start_time
             time_costs["total_time_cost"] = time_costs["total_time_cost"] + time_costs["vae_decode_time_cost"]

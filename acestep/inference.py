@@ -368,7 +368,7 @@ def generate_music(
         # 3. use_cot_language=True: detect vocal language via CoT
         # 4. use_cot_metas=True: fill missing metadata via CoT
         need_lm_for_cot = params.use_cot_caption or params.use_cot_language or params.use_cot_metas
-        use_lm = (params.thinking or need_lm_for_cot) and llm_handler.llm_initialized and params.task_type not in skip_lm_tasks
+        use_lm = (params.thinking or need_lm_for_cot) and getattr(llm_handler, 'llm_initialized', False) and params.task_type not in skip_lm_tasks
         lm_status = []
         
         if params.task_type in skip_lm_tasks:
@@ -749,7 +749,7 @@ def understand_music(
         ...     print(f"Lyrics: {result.lyrics}")
     """
     # Check if LLM is initialized
-    if not llm_handler.llm_initialized:
+    if not getattr(llm_handler, 'llm_initialized', False):
         return UnderstandResult(
             status_message="5Hz LM not initialized. Please initialize it first.",
             success=False,
@@ -926,7 +926,7 @@ def create_sample(
         ...     print(f"BPM: {result.bpm}")
     """
     # Check if LLM is initialized
-    if not llm_handler.llm_initialized:
+    if not getattr(llm_handler, 'llm_initialized', False):
         return CreateSampleResult(
             status_message="5Hz LM not initialized. Please initialize it first.",
             success=False,
@@ -1100,7 +1100,7 @@ def format_sample(
         ...     print(f"Lyrics: {result.lyrics}")
     """
     # Check if LLM is initialized
-    if not llm_handler.llm_initialized:
+    if not getattr(llm_handler, 'llm_initialized', False):
         return FormatSampleResult(
             status_message="5Hz LM not initialized. Please initialize it first.",
             success=False,

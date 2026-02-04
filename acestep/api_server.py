@@ -172,7 +172,8 @@ def _can_access_google(timeout: float = 3.0) -> bool:
     import socket
     try:
         socket.setdefaulttimeout(timeout)
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("www.google.com", 443))
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect(("www.google.com", 443))
         return True
     except (socket.timeout, socket.error, OSError):
         return False
@@ -663,13 +664,17 @@ class _JobStore:
 
     def mark_running(self, job_id: str) -> None:
         with self._lock:
-            rec = self._jobs[job_id]
+            rec = self._jobs.get(job_id)
+            if rec is None:
+                return  # Job was cleaned up
             rec.status = "running"
             rec.started_at = time.time()
 
     def mark_succeeded(self, job_id: str, result: Dict[str, Any]) -> None:
         with self._lock:
-            rec = self._jobs[job_id]
+            rec = self._jobs.get(job_id)
+            if rec is None:
+                return  # Job was cleaned up
             rec.status = "succeeded"
             rec.finished_at = time.time()
             rec.result = result
@@ -677,7 +682,9 @@ class _JobStore:
 
     def mark_failed(self, job_id: str, error: str) -> None:
         with self._lock:
-            rec = self._jobs[job_id]
+            rec = self._jobs.get(job_id)
+            if rec is None:
+                return  # Job was cleaned up
             rec.status = "failed"
             rec.finished_at = time.time()
             rec.result = None
