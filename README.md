@@ -179,7 +179,21 @@ uv add --dev package-name
 uv sync --upgrade
 ```
 
-## 📥 Model Download
+## � Other GPU Support
+
+### Intel GPU
+Currently, we support Intel GPUs.
+- **Tested Device**: Windows laptop with Ultra 9 285H integrated graphics.
+- **Settings**:
+  - `offload` is disabled by default.
+  - `compile` and `quantization` are enabled by default.
+- **Capabilities**: LLM inference is supported (tested with `acestep-5Hz-lm-0.6B`).
+  - *Note*: LLM inference speed might decrease when generating audio longer than 2 minutes.
+  - *Note*: `nanovllm` acceleration for LLM inference is currently NOT supported on Intel GPUs.
+- **Test Environment**: PyTorch 2.8.0 from [Intel Extension for PyTorch](https://pytorch-extension.intel.com/?request=platform).
+- **Intel Discrete GPUs**: Expected to work, but not tested yet as the developer does not have available devices. Waiting for community feedback.
+
+## �📥 Model Download
 
 Models are automatically downloaded from [HuggingFace]https://huggingface.co/ACE-Step/Ace-Step1.5) or [ModelScope](https://modelscope.cn/organization/ACE-Step) on first run. You can also manually download models using the CLI or `huggingface-cli`.
 
