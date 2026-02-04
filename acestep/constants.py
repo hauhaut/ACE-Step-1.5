@@ -48,9 +48,6 @@ DURATION_MAX = 600
 # Valid time signatures
 VALID_TIME_SIGNATURES = [2, 3, 4, 6]
 
-# Audio code range (DIT quantizer codebook size = 64000, valid indices: 0-63999)
-MAX_AUDIO_CODE = 63999
-
 
 # ==============================================================================
 # Task Type Constants
