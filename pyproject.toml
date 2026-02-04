@@ -34,6 +34,7 @@ dependencies = [
     "numba>=0.63.1",
     "vector-quantize-pytorch>=1.27.15",
     "torchcodec>=0.9.1; sys_platform != 'darwin'",
+    "torchao",
     # Local third-party packages
     "nano-vllm; sys_platform != 'darwin'",
     "modelscope"
