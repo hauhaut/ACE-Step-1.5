@@ -251,7 +251,7 @@ def _update_metadata_from_lm(
     vocal_language: str,
     caption: str,
     lyrics: str,
-) -> Tuple[Optional[int], str, str, Optional[float]]:
+) -> Tuple[Optional[int], str, str, Optional[float], str, str, str]:
     """Update metadata fields from LM output if not provided by user."""
 
     if bpm is None and metadata.get('bpm'):
