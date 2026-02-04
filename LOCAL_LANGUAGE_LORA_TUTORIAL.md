@@ -1,14 +1,14 @@
-# Romanian Pronunciation LoRA Training Tutorial
+# Local Language LoRA Training Tutorial
 
-Train a custom LoRA adapter to improve ACE-Step's Romanian pronunciation and musical style.
+Train a custom LoRA adapter to improve ACE-Step's pronunciation and musical style for your native language.
 
 ## What is This?
 
-LoRA (Low-Rank Adaptation) allows you to fine-tune ACE-Step's music generation on a specific style, voice, or language with minimal data and compute. For Romanian music, this means:
+LoRA (Low-Rank Adaptation) allows you to fine-tune ACE-Step's music generation on a specific style, voice, or language with minimal data and compute. For local language music, this means:
 
-- Better pronunciation of Romanian lyrics
-- Capturing specific vocal timbres
-- Learning traditional Romanian musical patterns
+- Better pronunciation of lyrics in your language
+- Capturing specific vocal timbres and accents
+- Learning traditional musical patterns from your culture
 - Maintaining consistent style across generations
 
 **Why LoRA?** Training takes ~1 hour on an RTX 3090 with just 8 songs and uses only 12GB VRAM.
@@ -25,7 +25,7 @@ LoRA (Low-Rank Adaptation) allows you to fine-tune ACE-Step's music generation o
 - CUDA-compatible GPU drivers
 
 ### Data Requirements
-- **8-20 audio files** with clear Romanian vocals
+- **8-20 audio files** with clear vocals in your target language
 - Audio format: MP3, WAV, FLAC (16-bit or 24-bit, any sample rate)
 - **Lyrics files** (.txt) with same name as audio files
 - Each song: 30s to 4 minutes (recommended: 2-3 minutes)
@@ -36,16 +36,16 @@ LoRA (Low-Rank Adaptation) allows you to fine-tune ACE-Step's music generation o
 
 ### Directory Structure
 
-Organize your Romanian music like this:
+Organize your music like this:
 
 ```
-romanian_music/
-├── cântec_popular.mp3
-├── cântec_popular.txt
-├── doina.wav
-├── doina.txt
-├── hora.mp3
-├── hora.txt
+my_language_music/
+├── song_one.mp3
+├── song_one.txt
+├── song_two.wav
+├── song_two.txt
+├── traditional_song.mp3
+├── traditional_song.txt
 └── ...
 ```
 
@@ -61,7 +61,7 @@ romanian_music/
 | **Format** | MP3, WAV, FLAC |
 | **Quality** | 16kHz+ sample rate, clear vocals |
 | **Duration** | 30s - 240s (2-3 min recommended) |
-| **Vocals** | Clean, intelligible Romanian pronunciation |
+| **Vocals** | Clean, intelligible pronunciation |
 | **Mix** | Vocals prominent, minimal distortion |
 
 **Avoid:**
@@ -72,25 +72,25 @@ romanian_music/
 
 ### Lyrics File Format
 
-Each `.txt` file contains Romanian lyrics:
+Each `.txt` file contains lyrics in your target language:
 
 ```
-Codrul verde de brad şi de tei
-Codrul verde de brad şi de tei
-Îmi aduce aminte de cei
-Care-au luptat pentru țară
+Your lyrics here in your native language
+Second line of lyrics
+Third line continuing the song
+And so on...
 ```
 
 **Guidelines:**
-- UTF-8 encoding (supports Romanian diacritics: ă, â, î, ș, ț)
+- UTF-8 encoding (supports all Unicode characters and diacritics)
 - Plain text, no timestamps or formatting
 - Match the actual sung lyrics
 - Include repeated sections (choruses)
 
 **Example filename pairs:**
 ```
-doina_din_muntenia.mp3  →  doina_din_muntenia.txt
-hora_moldovenească.wav  →  hora_moldovenească.txt
+folk_song.mp3  →  folk_song.txt
+ballad.wav     →  ballad.txt
 ```
 
 ## Training Options
@@ -100,7 +100,7 @@ hora_moldovenească.wav  →  hora_moldovenească.txt
 Use the all-in-one training script:
 
 ```bash
-python train_romanian_lora.py /path/to/romanian_music
+python train_lora.py /path/to/my_language_music --custom-tag "my language music"
 ```
 
 **What it does:**
@@ -109,30 +109,30 @@ python train_romanian_lora.py /path/to/romanian_music
 3. Sets metadata (BPM, key, etc.)
 4. Preprocesses audio to tensors
 5. Trains LoRA for 30 epochs
-6. Saves to `./romanian_lora/final/`
+6. Saves to `./lora_output/final/`
 
 **Customize settings:**
 
 ```bash
-python train_romanian_lora.py /path/to/romanian_music \
+python train_lora.py /path/to/my_language_music \
   --output ./my_lora \
   --epochs 50 \
   --lr 5e-5 \
   --r 4 \
   --alpha 8 \
-  --custom-tag "romanian folk music"
+  --custom-tag "traditional folk music"
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--output` | `./romanian_lora` | Output directory |
+| `--output` | `./lora_output` | Output directory |
 | `--epochs` | 30 | Training epochs |
 | `--lr` | 5e-5 | Learning rate |
 | `--r` | 4 | LoRA rank (capacity) |
 | `--alpha` | 8 | LoRA alpha (scaling) |
 | `--dropout` | 0.15 | LoRA dropout |
 | `--save-every` | 5 | Save checkpoint every N epochs |
-| `--custom-tag` | `"romanian music"` | Style activation tag |
+| `--custom-tag` | `"local music"` | Style activation tag |
 
 **Time estimate:** 1 hour for 10 songs on RTX 3090
 
@@ -154,7 +154,7 @@ Navigate to **LoRA Training** tab.
    - Review detected files
 
 2. **Custom Tag** (optional):
-   - Enter: `romanian folk music`
+   - Enter: `traditional folk music` (or your preferred tag)
    - Position: `prepend`
 
 3. **Label Samples**:
@@ -168,14 +168,14 @@ Navigate to **LoRA Training** tab.
    - Click **Save Changes** per sample
 
 5. **Save Dataset**:
-   - Enter path: `./romanian_dataset.json`
+   - Enter path: `./my_dataset.json`
    - Click **Save Dataset**
 
 #### Step 2: Preprocess
 
 1. **Preprocessing** section:
    - Load dataset JSON (if saved)
-   - Set tensor output: `./romanian_tensors`
+   - Set tensor output: `./my_tensors`
    - Click **Preprocess**
 
 This converts audio to VAE latents (5-10 min for 10 songs).
@@ -183,7 +183,7 @@ This converts audio to VAE latents (5-10 min for 10 songs).
 #### Step 3: Train
 
 1. **Train LoRA** tab:
-   - **Dataset path**: `./romanian_tensors`
+   - **Dataset path**: `./my_tensors`
    - Click **Load Dataset**
 
 2. **LoRA Settings**:
@@ -204,7 +204,7 @@ This converts audio to VAE latents (5-10 min for 10 songs).
    - Stop early if loss plateaus
 
 5. **Export LoRA**:
-   - Enter export path: `./romanian_lora_final`
+   - Enter export path: `./my_lora_final`
    - Click **Export LoRA**
 
 ### Option C: CLI Step-by-Step
@@ -214,26 +214,26 @@ For scripting and automation:
 ```bash
 # 1. Prepare dataset
 uv run acestep-prepare \
-  --audio-dir ./romanian_music \
-  --output ./romanian_dataset.json \
-  --custom-tag "romanian folk music"
+  --audio-dir ./my_language_music \
+  --output ./my_dataset.json \
+  --custom-tag "traditional folk music"
 
 # 2. Preprocess tensors
 uv run acestep-preprocess \
-  --dataset ./romanian_dataset.json \
-  --output ./romanian_tensors
+  --dataset ./my_dataset.json \
+  --output ./my_tensors
 
 # 3. Train LoRA
 uv run acestep-train \
-  --dataset ./romanian_tensors \
-  --output ./romanian_lora \
+  --dataset ./my_tensors \
+  --output ./my_lora \
   --r 4 --alpha 8 --dropout 0.15 \
   --lr 5e-5 --epochs 30
 ```
 
 ## Recommended Settings for Small Datasets
 
-For **8-15 Romanian songs**, use these conservative settings to avoid overfitting:
+For **8-15 songs**, use these conservative settings to avoid overfitting:
 
 | Setting | Value | Why |
 |---------|-------|-----|
@@ -269,14 +269,14 @@ For **8-15 Romanian songs**, use these conservative settings to avoid overfittin
 2. Navigate to **LoRA** tab
 
 3. **Load LoRA**:
-   - Path: `./romanian_lora/final`
+   - Path: `./my_lora/final`
    - Click **Load LoRA**
    - Enable: Check **Use LoRA**
 
 4. **Test Generation**:
    - Go to **Text-to-Music** tab
-   - Caption: `romanian folk music, traditional doina, female vocals`
-   - Lyrics: `Codrul verde de brad și de tei...`
+   - Caption: `traditional folk music, female vocals` (use your activation tag)
+   - Lyrics: Your lyrics in your target language
    - Generate
 
 ### Loading Programmatically
@@ -294,13 +294,13 @@ handler.initialize_service(
 )
 
 # Load LoRA
-handler.load_lora("./romanian_lora/final")
+handler.load_lora("./my_lora/final")
 handler.set_use_lora(True)
 
 # Generate with LoRA
 result = handler.text_to_music(
-    caption="romanian folk music, traditional hora",
-    lyrics="Sară, sară, să-nserăm...",
+    caption="traditional folk music, emotional ballad",
+    lyrics="Your lyrics here...",
     duration=30.0,
     seed=42
 )
@@ -311,20 +311,20 @@ result = handler.text_to_music(
 **Include the activation tag** from training:
 
 ```
-romanian folk music, traditional doina, female vocals, emotional
+traditional folk music, female vocals, emotional
 ```
 
 **Be specific about style:**
 ```
-romanian folk music, hora dance, accordion and violin, upbeat
-romanian folk music, doina ballad, melancholic, solo female voice
-romanian folk music, colinde christmas carol, choir vocals
+traditional folk music, dance rhythm, accordion and violin, upbeat
+traditional folk music, slow ballad, melancholic, solo female voice
+traditional folk music, christmas carol, choir vocals
 ```
 
 **Mix with other ACE-Step features:**
-- Reference audio: Upload a Romanian song for style transfer
-- Cover generation: Apply Romanian style to existing music
-- Metadata control: Set BPM (120-140 for hora, 60-80 for doina)
+- Reference audio: Upload a song for style transfer
+- Cover generation: Apply your trained style to existing music
+- Metadata control: Set BPM appropriate for your music style
 
 ## Troubleshooting
 
@@ -340,7 +340,7 @@ romanian folk music, colinde christmas carol, choir vocals
 **Fix:**
 ```bash
 # Verify LoRA directory exists
-ls ./romanian_lora/final
+ls ./my_lora/final
 
 # Check for adapter_model.safetensors or adapter_model.bin
 # Reload LoRA in UI with correct path
@@ -348,7 +348,7 @@ ls ./romanian_lora/final
 
 ### Poor Quality / Garbled Pronunciation
 
-**Symptoms:** Romanian words sound wrong, unnatural accent
+**Symptoms:** Words sound wrong, unnatural accent
 
 **Causes:**
 - Training data had noisy vocals
@@ -395,10 +395,10 @@ handler.check_lora_status()  # Should show LoRA path
 **Fix:**
 ```bash
 # Reduce memory usage
-python train_romanian_lora.py ./romanian_music \
+python train_lora.py ./my_music \
   --r 4 \           # Lower rank
   --device cuda \
-  --custom-tag "romanian music"
+  --custom-tag "my music style"
 
 # In Gradio: reduce batch size to 1, gradient accumulation to 1
 ```
@@ -422,8 +422,8 @@ python train_romanian_lora.py ./romanian_music \
 ### Data Quality
 
 1. **Clean vocals** - Use vocal isolation tools if needed (e.g., Demucs, UVR)
-2. **Consistent style** - Mix traditional and modern Romanian or keep them separate
-3. **Accurate lyrics** - Proofread for typos and diacritics
+2. **Consistent style** - Keep similar styles together or train separate LoRAs
+3. **Accurate lyrics** - Proofread for typos and proper characters/diacritics
 4. **Trim silence** - Remove long intros/outros from audio files
 
 ### Training Strategy
@@ -435,8 +435,8 @@ python train_romanian_lora.py ./romanian_music \
 
 ### Generation Tips
 
-1. **Use the activation tag** - Always include "romanian folk music" or your custom tag
-2. **Combine with reference audio** - Upload a Romanian song + use LoRA for best results
+1. **Use the activation tag** - Always include your custom tag in prompts
+2. **Combine with reference audio** - Upload a song + use LoRA for best results
 3. **Experiment with seeds** - Try 5-10 seeds and pick the best pronunciation
 4. **Adjust LoRA weight** - In code: `handler.set_lora_scale(0.8)` (default 1.0)
 
@@ -446,10 +446,10 @@ Train separate LoRAs for different styles:
 
 ```bash
 # Traditional folk
-python train_romanian_lora.py ./traditional --custom-tag "romanian traditional folk"
+python train_lora.py ./traditional --custom-tag "traditional folk music"
 
 # Modern pop
-python train_romanian_lora.py ./modern --custom-tag "romanian pop music"
+python train_lora.py ./modern --custom-tag "modern pop music"
 
 # Load the appropriate one based on desired output
 ```
@@ -468,7 +468,7 @@ If first results aren't perfect:
 
 **Next Steps:**
 - Train your first LoRA with 8-10 songs
-- Test with various Romanian prompts
+- Test with various prompts in your language
 - Share your results on [Discord](https://discord.gg/PeWDxrkdj7)
 - See [GRADIO_GUIDE.md](./docs/en/GRADIO_GUIDE.md) for full UI documentation
 
