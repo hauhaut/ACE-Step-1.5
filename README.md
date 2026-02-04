@@ -204,7 +204,7 @@ If you have `PortableGit/` folder in your package, you can:
 **Download Source:**
 - `auto`: Auto-detect best source (checks Google accessibility)
 - `huggingface`: Use HuggingFace Hub
-- `modelscope`: Use ModelScope (recommended for users in China)
+- `modelscope`: Use ModelScope
 
 ---
 
@@ -232,16 +232,46 @@ uv sync
 
 #### 🖥️ Gradio Web UI (Recommended)
 
+**Using uv:**
 ```bash
 uv run acestep
+```
+
+**Using Python directly:**
+
+> **Note:** Make sure to activate your Python environment first:
+> - **Windows portable package**: Use `python_embeded\python.exe` instead of `python`
+> - **Conda environment**: Run `conda activate your_env_name` first
+> - **venv**: Run `source venv/bin/activate` (Linux/Mac) or `venv\Scripts\activate` (Windows) first
+> - **System Python**: Use `python` or `python3` directly
+
+```bash
+# Windows portable package
+python_embeded\python.exe acestep/acestep_v15_pipeline.py
+
+# Conda/venv/system Python
+python acestep/acestep_v15_pipeline.py
 ```
 
 Open http://localhost:7860 in your browser. Models will be downloaded automatically on first run.
 
 #### 🌐 REST API Server
 
+**Using uv:**
 ```bash
 uv run acestep-api
+```
+
+**Using Python directly:**
+
+> **Note:** Make sure to activate your Python environment first (see note above).
+
+```bash
+# Windows portable package
+python_embeded\python.exe acestep/api_server.py
+
+# Conda/venv/system Python
+python acestep/api_server.py
 ```
 
 API runs at http://localhost:8001. See [API Documentation](./docs/en/API.md) for endpoints.
@@ -260,6 +290,7 @@ API runs at http://localhost:8001. See [API Documentation](./docs/en/API.md) for
 | `--config_path` | auto | DiT model (e.g., `acestep-v15-turbo`, `acestep-v15-turbo-shift3`) |
 | `--lm_model_path` | auto | LM model (e.g., `acestep-5Hz-lm-0.6B`, `acestep-5Hz-lm-1.7B`) |
 | `--offload_to_cpu` | auto | CPU offload (auto-enabled if VRAM < 16GB) |
+| `--download-source` | auto | Model download source: `auto`, `huggingface`, or `modelscope` |
 | `--enable-api` | false | Enable REST API endpoints alongside Gradio UI |
 | `--api-key` | none | API key for API endpoints authentication |
 | `--auth-username` | none | Username for Gradio authentication |
@@ -267,18 +298,42 @@ API runs at http://localhost:8001. See [API Documentation](./docs/en/API.md) for
 
 **Examples:**
 
+> **Note for Python users:** Replace `python` with your environment's Python executable:
+> - Windows portable package: `python_embeded\python.exe`
+> - Conda: Activate environment first, then use `python`
+> - venv: Activate environment first, then use `python`
+> - System: Use `python` or `python3`
+
 ```bash
 # Public access with Chinese UI
 uv run acestep --server-name 0.0.0.0 --share --language zh
+# Or using Python directly:
+python acestep/acestep_v15_pipeline.py --server-name 0.0.0.0 --share --language zh
 
 # Pre-initialize models on startup
 uv run acestep --init_service true --config_path acestep-v15-turbo
+# Or using Python directly:
+python acestep/acestep_v15_pipeline.py --init_service true --config_path acestep-v15-turbo
 
 # Enable API endpoints with authentication
 uv run acestep --enable-api --api-key sk-your-secret-key --port 8001
+# Or using Python directly:
+python acestep/acestep_v15_pipeline.py --enable-api --api-key sk-your-secret-key --port 8001
 
 # Enable both Gradio auth and API auth
 uv run acestep --enable-api --api-key sk-123456 --auth-username admin --auth-password password
+# Or using Python directly:
+python acestep/acestep_v15_pipeline.py --enable-api --api-key sk-123456 --auth-username admin --auth-password password
+
+# Use ModelScope as download source
+uv run acestep --download-source modelscope
+# Or using Python directly:
+python acestep/acestep_v15_pipeline.py --download-source modelscope
+
+# Use HuggingFace Hub as download source
+uv run acestep --download-source huggingface
+# Or using Python directly:
+python acestep/acestep_v15_pipeline.py --download-source huggingface
 ```
 
 ### Development
@@ -292,7 +347,7 @@ uv add --dev package-name
 uv sync --upgrade
 ```
 
-## � Other GPU Support
+## 🎮 Other GPU Support
 
 ### Intel GPU
 Currently, we support Intel GPUs.
@@ -306,24 +361,94 @@ Currently, we support Intel GPUs.
 - **Test Environment**: PyTorch 2.8.0 from [Intel Extension for PyTorch](https://pytorch-extension.intel.com/?request=platform).
 - **Intel Discrete GPUs**: Expected to work, but not tested yet as the developer does not have available devices. Waiting for community feedback.
 
-## �📥 Model Download
+## 📥 Model Download
 
-Models are automatically downloaded from [HuggingFace]https://huggingface.co/ACE-Step/Ace-Step1.5) or [ModelScope](https://modelscope.cn/organization/ACE-Step) on first run. You can also manually download models using the CLI or `huggingface-cli`.
+Models are automatically downloaded from [HuggingFace](https://huggingface.co/ACE-Step/Ace-Step1.5) or [ModelScope](https://modelscope.cn/organization/ACE-Step) on first run. You can also manually download models using the CLI or `huggingface-cli`.
+
+### Download Source Configuration
+
+ACE-Step supports multiple download sources with automatic fallback:
+
+| Source | Description | Configuration |
+|--------|-------------|---------------|
+| **auto** (default) | Automatic detection based on network, selects best source | `--download-source auto` or omit |
+| **modelscope** | Use ModelScope as download source | `--download-source modelscope` |
+| **huggingface** | Use HuggingFace Hub as download source | `--download-source huggingface` |
+
+**How it works:**
+- **Auto mode** (default): Tests Google connectivity. If accessible → HuggingFace Hub; if not → ModelScope
+- **Manual mode**: Uses your specified source, with automatic fallback to alternate source on failure
+- **Fallback protection**: If primary source fails, automatically tries the other source
+
+**Examples:**
+
+> **Note for Python users:** Replace `python` with your environment's Python executable (see note in Launch section above).
+
+```bash
+# Use ModelScope
+uv run acestep --download-source modelscope
+# Or using Python directly:
+python acestep/acestep_v15_pipeline.py --download-source modelscope
+
+# Use HuggingFace Hub
+uv run acestep --download-source huggingface
+# Or using Python directly:
+python acestep/acestep_v15_pipeline.py --download-source huggingface
+
+# Auto-detect (default, no configuration needed)
+uv run acestep
+# Or using Python directly:
+python acestep/acestep_v15_pipeline.py
+```
+
+**For Windows portable package users**, edit `start_gradio_ui.bat` or `start_api_server.bat`:
+
+```batch
+REM Use ModelScope
+set DOWNLOAD_SOURCE=--download-source modelscope
+
+REM Use HuggingFace Hub
+set DOWNLOAD_SOURCE=--download-source huggingface
+
+REM Auto-detect (default)
+set DOWNLOAD_SOURCE=
+```
+
+**For command line users:**
+
+> **Note for Python users:** Replace `python` with your environment's Python executable (see note in Launch section above).
+
+```bash
+# Using uv
+uv run acestep --download-source modelscope
+
+# Using Python directly
+python acestep/acestep_v15_pipeline.py --download-source modelscope
+```
 
 ### Automatic Download
 
 When you run `acestep` or `acestep-api`, the system will:
 1. Check if the required models exist in `./checkpoints`
-2. If not found, automatically download them from HuggingFace
+2. If not found, automatically download them using the configured source (or auto-detect)
 
 ### Manual Download with CLI
 
+> **Note for Python users:** Replace `python` with your environment's Python executable (see note in Launch section above).
+
+**Using uv:**
 ```bash
 # Download main model (includes everything needed to run)
 uv run acestep-download
 
 # Download all available models (including optional variants)
 uv run acestep-download --all
+
+# Download from ModelScope
+uv run acestep-download --download-source modelscope
+
+# Download from HuggingFace Hub
+uv run acestep-download --download-source huggingface
 
 # Download a specific model
 uv run acestep-download --model acestep-v15-sft
@@ -333,6 +458,30 @@ uv run acestep-download --list
 
 # Download to a custom directory
 uv run acestep-download --dir /path/to/checkpoints
+```
+
+**Using Python directly:**
+```bash
+# Download main model (includes everything needed to run)
+python -m acestep.model_downloader
+
+# Download all available models (including optional variants)
+python -m acestep.model_downloader --all
+
+# Download from ModelScope
+python -m acestep.model_downloader --download-source modelscope
+
+# Download from HuggingFace Hub
+python -m acestep.model_downloader --download-source huggingface
+
+# Download a specific model
+python -m acestep.model_downloader --model acestep-v15-sft
+
+# List all available models
+python -m acestep.model_downloader --list
+
+# Download to a custom directory
+python -m acestep.model_downloader --dir /path/to/checkpoints
 ```
 
 ### Manual Download with huggingface-cli
