@@ -87,10 +87,10 @@ For Windows users, we provide a portable package with pre-installed dependencies
 
 ```bash
 # Gradio Web UI
-python_embeded\python -m acestep.entry.gradio_app
+python_embeded\python acestep\acestep_v15_pipeline.py
 
 # REST API Server
-python_embeded\python -m acestep.entry.api_server
+python_embeded\python acestep\api_server.py
 ```
 
 ---
