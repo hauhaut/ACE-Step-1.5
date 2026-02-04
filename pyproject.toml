@@ -35,6 +35,9 @@ dependencies = [
     "vector-quantize-pytorch>=1.27.15",
     "torchcodec>=0.9.1; sys_platform != 'darwin'",
     "torchao",
+    # Training dependencies
+    "peft>=0.7.0",
+    "lightning>=2.0.0",
     # Local third-party packages
     "nano-vllm; sys_platform != 'darwin'",
     "modelscope"

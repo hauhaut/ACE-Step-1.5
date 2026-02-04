@@ -30,7 +30,7 @@ torchcodec>=0.9.1; sys_platform != 'darwin' or platform_machine == 'arm64'
 torchao
 modelscope
 
-# LoRA Training dependencies (optional)
+# Training dependencies (required for LoRA training)
 peft>=0.7.0
 lightning>=2.0.0
 
