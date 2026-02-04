@@ -1002,7 +1002,7 @@ def calculate_score_handler(
         
         # PMI-based scoring (requires audio codes and LLM)
         if has_audio_codes:
-            if not llm_handler.llm_initialized:
+            if llm_handler is None or not llm_handler.llm_initialized:
                 # Can still try DiT alignment if available
                 if not has_dit_alignment_data:
                     return t("messages.lm_not_initialized")
@@ -1082,7 +1082,7 @@ def calculate_score_handler(
                 alignment_report = f"\n⚠️ Alignment Score Error: {str(e)}"
 
         # Format display string
-        if has_audio_codes and llm_handler.llm_initialized:
+        if has_audio_codes and llm_handler is not None and llm_handler.llm_initialized:
             # Full scoring with PMI + alignment
             if global_score == 0.0 and not scores_per_condition:
                 # PMI scoring failed but we might have alignment

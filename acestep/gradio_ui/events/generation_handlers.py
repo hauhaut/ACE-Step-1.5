@@ -309,7 +309,7 @@ def sample_example_smart(llm_handler, task_type: str, constrained_decoding_debug
         Tuple of (caption, lyrics, think, bpm, duration, keyscale, language, timesignature) for updating UI components
     """
     # Check if LM is initialized
-    if llm_handler.llm_initialized:
+    if llm_handler is not None and llm_handler.llm_initialized:
         # Use LM to generate example via understand_music API
         try:
             result = understand_music(
@@ -811,7 +811,7 @@ def handle_create_sample(
         - status_output
     """
     # Check if LLM is initialized
-    if not llm_handler.llm_initialized:
+    if llm_handler is None or not llm_handler.llm_initialized:
         gr.Warning(t("messages.lm_not_initialized"))
         return (
             gr.update(),  # captions - no change
@@ -946,7 +946,7 @@ def handle_format_sample(
         - status_output
     """
     # Check if LLM is initialized
-    if not llm_handler.llm_initialized:
+    if llm_handler is None or not llm_handler.llm_initialized:
         gr.Warning(t("messages.lm_not_initialized"))
         return (
             gr.update(),  # captions - no change

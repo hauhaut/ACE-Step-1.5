@@ -339,7 +339,7 @@ def calculate_pmi_score_per_condition(
     - Metadata: Uses Top-k Recall.
     - Caption/Lyrics: Uses PMI (Normalized).
     """
-    if not llm_handler.llm_initialized:
+    if llm_handler is None or not llm_handler.llm_initialized:
         return {}, 0.0, "❌ LLM not initialized"
 
     if not audio_codes or not audio_codes.strip():
