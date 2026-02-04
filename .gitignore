@@ -234,6 +234,9 @@ REAPER-LOG.md
 CLAUDE.md
 .claude/
 
+# Language-specific tutorials (keep generic version public)
+ROMANIAN_LORA_TUTORIAL.md
+
 # Local scripts
 start.bat
 start-api.bat
