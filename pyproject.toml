@@ -36,7 +36,8 @@ dependencies = [
     "torchcodec>=0.9.1; sys_platform != 'darwin'",
     # Local third-party packages
     "nano-vllm; sys_platform != 'darwin'",
-    "modelscope"
+    "modelscope",
+    "torchao>=0.15.0",
 ]
 
 [[tool.uv.index]]
@@ -67,6 +68,8 @@ torchaudio = [
 acestep = "acestep.acestep_v15_pipeline:main"
 acestep-api = "acestep.api_server:main"
 acestep-download = "acestep.model_downloader:main"
+acestep-train = "acestep.training.train_cli:main"
+acestep-prepare = "acestep.training.prepare_dataset_cli:main"
 
 [build-system]
 requires = ["hatchling"]
