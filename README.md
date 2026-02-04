@@ -247,7 +247,7 @@ uv run acestep
 
 ```bash
 # Windows portable package
-python_embeded\python.exe acestep/acestep_v15_pipeline.py
+python_embeded\python.exe acestep\acestep_v15_pipeline.py
 
 # Conda/venv/system Python
 python acestep/acestep_v15_pipeline.py
@@ -268,7 +268,7 @@ uv run acestep-api
 
 ```bash
 # Windows portable package
-python_embeded\python.exe acestep/api_server.py
+python_embeded\python.exe acestep\api_server.py
 
 # Conda/venv/system Python
 python acestep/api_server.py
