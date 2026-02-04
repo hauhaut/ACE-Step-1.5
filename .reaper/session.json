@@ -1,0 +1,28 @@
+{
+  "workspace": "C:/Users/cshauhau/Desktop/ACE-Step-1.5",
+  "phase": "EXECUTE",
+  "budget": "max",
+  "project_size": "medium",
+  "tasks": ["bugs", "qol", "cleanup", "features", "optimizations"],
+  "priorities": ["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+  "queue": [
+    {"id": "SEC-001", "priority": "CRITICAL", "file": "openrouter/openrouter_api_server.py", "line": 90, "issue": "Timing-unsafe API key comparison - use hmac.compare_digest", "status": "PENDING"},
+    {"id": "SEC-002", "priority": "CRITICAL", "file": "acestep/api_server.py", "line": 1869, "issue": "No path validation on ref_audio_path/src_audio_path", "status": "PENDING"},
+    {"id": "SEC-003", "priority": "CRITICAL", "file": "acestep/api_server.py", "line": 1370, "issue": "No enforcement of GPU-tier resource limits (DoS vector)", "status": "PENDING"},
+    {"id": "BUG-003", "priority": "HIGH", "file": "acestep/handler.py", "line": 1614, "issue": "Unguarded None dereference on target_wavs", "status": "PENDING"},
+    {"id": "BUG-005", "priority": "HIGH", "file": "acestep/inference.py", "line": 371, "issue": "Unguarded llm_handler access", "status": "PENDING"},
+    {"id": "ARCH-001", "priority": "HIGH", "file": "acestep/utils/security.py", "line": 0, "issue": "Extract shared security/auth code from api_server.py and api_routes.py", "status": "PENDING"},
+    {"id": "QUAL-001", "priority": "HIGH", "file": "acestep/utils/__init__.py", "line": 0, "issue": "Consolidate duplicate _get_project_root() to shared utils", "status": "PENDING"},
+    {"id": "BUG-006", "priority": "MEDIUM", "file": "acestep/api_server.py", "line": 626, "issue": "Race condition - _JobStore mark_* methods don't handle missing job_id", "status": "PENDING"},
+    {"id": "BUG-009", "priority": "MEDIUM", "file": "acestep/api_server.py", "line": 132, "issue": "Socket resource leak in _can_access_google", "status": "PENDING"},
+    {"id": "BUG-011", "priority": "MEDIUM", "file": "acestep/handler.py", "line": 2879, "issue": "torch.cuda.empty_cache without CUDA availability check", "status": "PENDING"},
+    {"id": "QUAL-002", "priority": "MEDIUM", "file": "acestep/handler.py", "line": 0, "issue": "Remove unused imports across handler.py, llm_inference.py, api_server.py", "status": "PENDING"},
+    {"id": "QUAL-005", "priority": "MEDIUM", "file": "acestep/inference.py", "line": 254, "issue": "Return type annotation mismatch (says 4, returns 7)", "status": "PENDING"},
+    {"id": "SIMP-002", "priority": "MEDIUM", "file": "acestep/inference.py", "line": 0, "issue": "Consolidate repeated metadata parsing logic into helper", "status": "PENDING"},
+    {"id": "H6", "priority": "LOW", "file": "acestep/handler.py", "lines": [3146, 3368], "issue": "Replace hardcoded token ID 151643 with tokenizer.eos_token_id", "status": "VERIFIED"}
+  ],
+  "completed": [],
+  "commits": [],
+  "checkpoint": "scan_complete",
+  "active": true
+}
