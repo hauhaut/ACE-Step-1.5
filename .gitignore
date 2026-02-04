@@ -226,3 +226,14 @@ lora_output/
 datasets/
 python_embeded/
 checkpoints_pack/
+
+# Claude Code / Reaper
+.reaper/
+PROJECT-BRIEF.md
+REAPER-LOG.md
+CLAUDE.md
+.claude/
+
+# Local scripts
+start.bat
+start-api.bat
