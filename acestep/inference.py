@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, asdict
 from loguru import logger
 
 from acestep.audio_utils import AudioSaver, generate_uuid_from_params
+from acestep.hooks import hooks, HookPoint
 
 # HuggingFace Space environment detection
 IS_HUGGINGFACE_SPACE = os.environ.get("SPACE_ID") is not None
@@ -309,6 +310,8 @@ def generate_music(
         GenerationResult with generated audio files and metadata
     """
     try:
+        hooks.fire(HookPoint.GENERATION_START, {"params": params.to_dict(), "config": config.to_dict()})
+
         # Phase 1: LM-based metadata and code generation (if enabled)
         audio_code_string_to_use = params.audio_codes
         lm_generated_metadata = None
@@ -389,6 +392,7 @@ def generate_music(
                    f"llm_initialized={llm_handler.llm_initialized if llm_handler else False}, use_lm={use_lm}")
         
         if use_lm:
+            hooks.fire(HookPoint.LM_PHASE_START, {"params": params.to_dict()})
             # Convert sampling parameters - handle None values safely
             top_k_value = None if not params.lm_top_k or params.lm_top_k == 0 else int(params.lm_top_k)
             top_p_value = None if not params.lm_top_p or params.lm_top_p >= 1.0 else params.lm_top_p
@@ -552,7 +556,10 @@ def generate_music(
                 if params.use_cot_language:
                     dit_input_vocal_language = lm_generated_metadata.get("vocal_language", dit_input_vocal_language)
 
+            hooks.fire(HookPoint.LM_PHASE_END, {"metadata": lm_generated_metadata, "audio_codes_count": len(lm_generated_audio_codes_list)})
+
         # Phase 2: DiT music generation
+        hooks.fire(HookPoint.DIT_PHASE_START, {"batch_size": config.batch_size, "inference_steps": params.inference_steps})
         # Use seed_for_generation (from config.seed or params.seed) instead of params.seed for actual generation
         result = dit_handler.generate_music(
             captions=dit_input_caption,
@@ -583,6 +590,8 @@ def generate_music(
             timesteps=params.timesteps,
             progress=progress,
         )
+
+        hooks.fire(HookPoint.DIT_PHASE_END, {"success": result.get("success", False)})
 
         # Check if generation failed
         if not result.get("success", False):
@@ -696,6 +705,9 @@ def generate_music(
             status_message = "\n".join(lm_status) + "\n" + status_message
         else:
             status_message = status_message
+
+        hooks.fire(HookPoint.GENERATION_END, {"audio_count": len(audios), "success": True})
+
         # Create and return GenerationResult
         return GenerationResult(
             audios=audios,
@@ -707,6 +719,7 @@ def generate_music(
 
     except Exception as e:
         logger.exception("Music generation failed")
+        hooks.fire(HookPoint.GENERATION_ERROR, {"error": str(e)})
         return GenerationResult(
             audios=[],
             status_message="Music generation failed. Check logs for details.",
