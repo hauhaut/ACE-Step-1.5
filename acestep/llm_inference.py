@@ -74,7 +74,56 @@ class LLMHandler:
 
         models.sort()
         return models
-    
+
+    def unload(self) -> str:
+        """Unload LLM model from memory to free VRAM.
+
+        Returns:
+            Status message
+        """
+        import gc
+
+        if self.llm is None:
+            return "⚠️ No LLM loaded."
+
+        try:
+            # Handle vllm backend
+            if self.llm_backend == "vllm":
+                # vllm LLM objects need special handling
+                del self.llm
+                self.llm = None
+            else:
+                # PyTorch model
+                del self.llm
+                self.llm = None
+
+            if self.llm_tokenizer is not None:
+                del self.llm_tokenizer
+                self.llm_tokenizer = None
+
+            if self._hf_model_for_scoring is not None:
+                del self._hf_model_for_scoring
+                self._hf_model_for_scoring = None
+
+            self.constrained_processor = None
+            self.llm_initialized = False
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            logger.info("LLM unloaded, VRAM freed")
+            return "✅ LLM unloaded."
+
+        except Exception as e:
+            logger.exception("Failed to unload LLM")
+            return f"❌ Failed to unload LLM: {str(e)}"
+
+    @property
+    def model(self):
+        """Alias for llm for compatibility with unload handler check."""
+        return self.llm
+
     def get_gpu_memory_utilization(self, model_path: str = None, minimal_gpu: float = 8, min_ratio: float = 0.2, max_ratio: float = 0.9) -> Tuple[float, bool]:
         """
         Get GPU memory utilization ratio based on LM model size and available GPU memory.
