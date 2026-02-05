@@ -463,6 +463,8 @@ class GenerateMusicRequest(BaseModel):
     instruction: str = DEFAULT_DIT_INSTRUCTION
     audio_cover_strength: float = 1.0
     task_type: str = "text2music"
+    track_name: Optional[str] = Field(default=None, description="Track name for lego/extract tasks (e.g., 'vocals', 'drums')")
+    complete_track_classes: Optional[List[str]] = Field(default=None, description="Track classes for complete task (e.g., ['vocals', 'drums'])")
 
     use_adg: bool = False
     cfg_interval_start: float = 0.0
@@ -1319,10 +1321,12 @@ def create_app() -> FastAPI:
                 actual_inference_steps = len(parsed_timesteps) if parsed_timesteps else req.inference_steps
 
                 # Auto-select instruction based on task_type if user didn't provide custom instruction
-                # This matches gradio behavior which uses TASK_INSTRUCTIONS for each task type
+                # Uses handler.generate_instruction() to support track_name/complete_track_classes
                 instruction_to_use = req.instruction
-                if instruction_to_use == DEFAULT_DIT_INSTRUCTION and req.task_type in TASK_INSTRUCTIONS:
-                    instruction_to_use = TASK_INSTRUCTIONS[req.task_type]
+                if instruction_to_use == DEFAULT_DIT_INSTRUCTION:
+                    instruction_to_use = h.generate_instruction(
+                        req.task_type, req.track_name, req.complete_track_classes
+                    )
 
                 # Build GenerationParams using unified interface
                 # Note: thinking controls LM code generation, sample_mode only affects CoT metas
