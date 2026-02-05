@@ -7,45 +7,115 @@
 This service provides an HTTP-based asynchronous music generation API.
 
 **Basic Workflow**:
-1. Call `POST /v1/music/generate` to submit a task and obtain a `job_id`.
-2. Call `GET /v1/jobs/{job_id}` to poll the task status until `status` is `succeeded` or `failed`.
+1. Call `POST /release_task` to submit a task and obtain a `task_id`.
+2. Call `POST /query_result` to batch query task status until `status` is `1` (succeeded) or `2` (failed).
 3. Download audio files via `GET /v1/audio?path=...` URLs returned in the result.
 
 ---
 
 ## Table of Contents
 
-- [Task Status Description](#1-task-status-description)
-- [Create Generation Task](#2-create-generation-task)
-- [Query Task Results](#3-query-task-results)
-- [Random Sample Generation](#4-random-sample-generation)
-- [List Available Models](#5-list-available-models)
-- [Download Audio Files](#6-download-audio-files)
-- [Health Check](#7-health-check)
-- [Environment Variables](#8-environment-variables)
+- [Authentication](#1-authentication)
+- [Response Format](#2-response-format)
+- [Task Status Description](#3-task-status-description)
+- [Create Generation Task](#4-create-generation-task)
+- [Batch Query Task Results](#5-batch-query-task-results)
+- [Format Input](#6-format-input)
+- [Get Random Sample](#7-get-random-sample)
+- [List Available Models](#8-list-available-models)
+- [Server Statistics](#9-server-statistics)
+- [Download Audio Files](#10-download-audio-files)
+- [Health Check](#11-health-check)
+- [Environment Variables](#12-environment-variables)
 
 ---
 
-## 1. Task Status Description
+## 1. Authentication
 
-Task status (`status`) includes the following types:
+The API supports optional API key authentication. When enabled, a valid key must be provided in requests.
 
-- `queued`: Task has entered the queue and is waiting to be executed. You can check `queue_position` and `eta_seconds` at this time.
-- `running`: Generation is in progress.
-- `succeeded`: Generation succeeded, results are in the `result` field.
-- `failed`: Generation failed, error information is in the `error` field.
+### Authentication Methods
+
+Two authentication methods are supported:
+
+**Method A: ai_token in request body**
+
+```json
+{
+  "ai_token": "your-api-key",
+  "prompt": "upbeat pop song",
+  ...
+}
+```
+
+**Method B: Authorization header**
+
+```bash
+curl -X POST http://localhost:8001/release_task \
+  -H 'Authorization: Bearer your-api-key' \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "upbeat pop song"}'
+```
+
+### Configuring API Key
+
+Set via environment variable or command-line argument:
+
+```bash
+# Environment variable
+export ACESTEP_API_KEY=your-secret-key
+
+# Or command-line argument
+python -m acestep.api_server --api-key your-secret-key
+```
 
 ---
 
-## 2. Create Generation Task
+## 2. Response Format
 
-### 2.1 API Definition
+All API responses use a unified wrapper format:
 
-- **URL**: `/v1/music/generate`
+```json
+{
+  "data": { ... },
+  "code": 200,
+  "error": null,
+  "timestamp": 1700000000000,
+  "extra": null
+}
+```
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `data` | any | Actual response data |
+| `code` | int | Status code (200=success) |
+| `error` | string | Error message (null on success) |
+| `timestamp` | int | Response timestamp (milliseconds) |
+| `extra` | any | Extra information (usually null) |
+
+---
+
+## 3. Task Status Description
+
+Task status (`status`) is represented as integers:
+
+| Status Code | Status Name | Description |
+| :--- | :--- | :--- |
+| `0` | queued/running | Task is queued or in progress |
+| `1` | succeeded | Generation succeeded, result is ready |
+| `2` | failed | Generation failed |
+
+---
+
+## 4. Create Generation Task
+
+### 4.1 API Definition
+
+- **URL**: `/release_task`
 - **Method**: `POST`
 - **Content-Type**: `application/json`, `multipart/form-data`, or `application/x-www-form-urlencoded`
 
-### 2.2 Request Parameters
+### 4.2 Request Parameters
 
 #### Parameter Naming Convention
 
@@ -66,9 +136,9 @@ Suitable for passing only text parameters, or referencing audio file paths that 
 
 | Parameter Name | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `caption` | string | `""` | Music description prompt |
+| `prompt` | string | `""` | Music description prompt (alias: `caption`) |
 | `lyrics` | string | `""` | Lyrics content |
-| `thinking` | bool | `false` | Whether to use 5Hz LM to generate audio codes (lm-dit behavior). |
+| `thinking` | bool | `false` | Whether to use 5Hz LM to generate audio codes (lm-dit behavior) |
 | `vocal_language` | string | `"en"` | Lyrics language (en, zh, ja, etc.) |
 | `audio_format` | string | `"mp3"` | Output format (mp3, wav, flac) |
 
@@ -76,9 +146,9 @@ Suitable for passing only text parameters, or referencing audio file paths that 
 
 | Parameter Name | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `sample_mode` | bool | `false` | Enable random sample generation mode (auto-generates caption/lyrics/metas via LM). |
-| `sample_query` | string | `""` | Natural language description for sample generation (e.g., "a soft Bengali love song"). Aliases: `description`, `desc`. |
-| `use_format` | bool | `false` | Use LM to enhance/format the provided caption and lyrics. Alias: `format`. |
+| `sample_mode` | bool | `false` | Enable random sample generation mode (auto-generates caption/lyrics/metas via LM) |
+| `sample_query` | string | `""` | Natural language description for sample generation (e.g., "a soft Bengali love song"). Aliases: `description`, `desc` |
+| `use_format` | bool | `false` | Use LM to enhance/format the provided caption and lyrics. Alias: `format` |
 
 **Multi-Model Support**:
 
@@ -165,6 +235,7 @@ These parameters control 5Hz LM sampling, used for metadata auto-completion and 
 | `use_cot_language` | bool | `true` | Let LM detect vocal language via CoT. Aliases: `cot_language`, `cot-language` |
 | `constrained_decoding` | bool | `true` | Enable FSM-based constrained decoding for structured LM output. Aliases: `constrainedDecoding`, `constrained` |
 | `constrained_decoding_debug` | bool | `false` | Enable debug logging for constrained decoding |
+| `allow_lm_batch` | bool | `true` | Allow LM batch processing for efficiency |
 
 **Edit/Reference Audio Parameters** (requires absolute path on server):
 
@@ -184,30 +255,36 @@ Use this when you need to upload local audio files as reference or source audio.
 
 In addition to supporting all the above fields as Form Fields, the following file fields are also supported:
 
-- `reference_audio`: (File) Upload reference audio file
-- `src_audio`: (File) Upload source audio file
+- `reference_audio` or `ref_audio`: (File) Upload reference audio file
+- `src_audio` or `ctx_audio`: (File) Upload source audio file
 
 > **Note**: After uploading files, the corresponding `_path` parameters will be automatically ignored, and the system will use the temporary file path after upload.
 
-### 2.3 Response Example
+### 4.3 Response Example
 
 ```json
 {
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "queued",
-  "queue_position": 1
+  "data": {
+    "task_id": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "queued",
+    "queue_position": 1
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1700000000000,
+  "extra": null
 }
 ```
 
-### 2.4 Usage Examples (cURL)
+### 4.4 Usage Examples (cURL)
 
 **Basic JSON Method**:
 
 ```bash
-curl -X POST http://localhost:8001/v1/music/generate \
+curl -X POST http://localhost:8001/release_task \
   -H 'Content-Type: application/json' \
   -d '{
-    "caption": "upbeat pop song",
+    "prompt": "upbeat pop song",
     "lyrics": "Hello world",
     "inference_steps": 8
   }'
@@ -216,10 +293,10 @@ curl -X POST http://localhost:8001/v1/music/generate \
 **With thinking=true (LM generates codes + fills missing metas)**:
 
 ```bash
-curl -X POST http://localhost:8001/v1/music/generate \
+curl -X POST http://localhost:8001/release_task \
   -H 'Content-Type: application/json' \
   -d '{
-    "caption": "upbeat pop song",
+    "prompt": "upbeat pop song",
     "lyrics": "Hello world",
     "thinking": true,
     "lm_temperature": 0.85,
@@ -230,7 +307,7 @@ curl -X POST http://localhost:8001/v1/music/generate \
 **Description-driven generation (sample_query)**:
 
 ```bash
-curl -X POST http://localhost:8001/v1/music/generate \
+curl -X POST http://localhost:8001/release_task \
   -H 'Content-Type: application/json' \
   -d '{
     "sample_query": "a soft Bengali love song for a quiet evening",
@@ -241,10 +318,10 @@ curl -X POST http://localhost:8001/v1/music/generate \
 **With format enhancement (use_format=true)**:
 
 ```bash
-curl -X POST http://localhost:8001/v1/music/generate \
+curl -X POST http://localhost:8001/release_task \
   -H 'Content-Type: application/json' \
   -d '{
-    "caption": "pop rock",
+    "prompt": "pop rock",
     "lyrics": "[Verse 1]\nWalking down the street...",
     "use_format": true,
     "thinking": true
@@ -254,10 +331,10 @@ curl -X POST http://localhost:8001/v1/music/generate \
 **Select specific model**:
 
 ```bash
-curl -X POST http://localhost:8001/v1/music/generate \
+curl -X POST http://localhost:8001/release_task \
   -H 'Content-Type: application/json' \
   -d '{
-    "caption": "electronic dance music",
+    "prompt": "electronic dance music",
     "model": "acestep-v15-turbo",
     "thinking": true
   }'
@@ -266,194 +343,218 @@ curl -X POST http://localhost:8001/v1/music/generate \
 **With custom timesteps**:
 
 ```bash
-curl -X POST http://localhost:8001/v1/music/generate \
+curl -X POST http://localhost:8001/release_task \
   -H 'Content-Type: application/json' \
   -d '{
-    "caption": "jazz piano trio",
+    "prompt": "jazz piano trio",
     "timesteps": "0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0",
     "thinking": true
-  }'
-```
-
-**With thinking=false (DiT only, but fill missing metas)**:
-
-```bash
-curl -X POST http://localhost:8001/v1/music/generate \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "caption": "slow emotional ballad",
-    "lyrics": "...",
-    "thinking": false,
-    "bpm": 72
   }'
 ```
 
 **File Upload Method**:
 
 ```bash
-curl -X POST http://localhost:8001/v1/music/generate \
-  -F "caption=remix this song" \
+curl -X POST http://localhost:8001/release_task \
+  -F "prompt=remix this song" \
   -F "src_audio=@/path/to/local/song.mp3" \
   -F "task_type=repaint"
 ```
 
 ---
 
-## 3. Query Task Results
+## 5. Batch Query Task Results
 
-### 3.1 API Definition
+### 5.1 API Definition
 
-- **URL**: `/v1/jobs/{job_id}`
-- **Method**: `GET`
+- **URL**: `/query_result`
+- **Method**: `POST`
+- **Content-Type**: `application/json` or `application/x-www-form-urlencoded`
 
-### 3.2 Response Parameters
+### 5.2 Request Parameters
 
-The response contains basic task information, queue status, and final results.
+| Parameter Name | Type | Description |
+| :--- | :--- | :--- |
+| `task_id_list` | string (JSON array) or array | List of task IDs to query |
 
-**Main Fields**:
-
-- `status`: Current status
-- `queue_position`: Current queue position (0 means running or completed)
-- `eta_seconds`: Estimated remaining wait time (seconds)
-- `avg_job_seconds`: Average job duration (for ETA estimation)
-- `result`: Result object when successful
-  - `audio_paths`: List of generated audio file URLs (use with `/v1/audio` endpoint)
-  - `first_audio_path`: First audio path (URL)
-  - `second_audio_path`: Second audio path (URL, if batch_size >= 2)
-  - `generation_info`: Generation parameter details
-  - `status_message`: Brief result description
-  - `seed_value`: Comma-separated seed values used
-  - `metas`: Complete metadata dict
-  - `bpm`: Detected/used BPM
-  - `duration`: Detected/used duration
-  - `keyscale`: Detected/used key scale
-  - `timesignature`: Detected/used time signature
-  - `genres`: Detected genres (if available)
-  - `lm_model`: Name of the LM model used
-  - `dit_model`: Name of the DiT model used
-- `error`: Error information when failed
-
-### 3.3 Response Examples
-
-**Queued**:
+### 5.3 Response Example
 
 ```json
 {
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "queued",
-  "created_at": 1700000000.0,
-  "queue_position": 5,
-  "eta_seconds": 25.0,
-  "avg_job_seconds": 5.0,
-  "result": null,
-  "error": null
+  "data": [
+    {
+      "task_id": "550e8400-e29b-41d4-a716-446655440000",
+      "status": 1,
+      "result": "[{\"file\": \"/v1/audio?path=...\", \"wave\": \"\", \"status\": 1, \"create_time\": 1700000000, \"env\": \"development\", \"prompt\": \"upbeat pop song\", \"lyrics\": \"Hello world\", \"metas\": {\"bpm\": 120, \"duration\": 30, \"genres\": \"\", \"keyscale\": \"C Major\", \"timesignature\": \"4\"}, \"generation_info\": \"...\", \"seed_value\": \"12345,67890\", \"lm_model\": \"acestep-5Hz-lm-0.6B\", \"dit_model\": \"acestep-v15-turbo\"}]"
+    }
+  ],
+  "code": 200,
+  "error": null,
+  "timestamp": 1700000000000,
+  "extra": null
 }
 ```
 
-**Execution Successful**:
+**Result Field Description** (result is a JSON string, after parsing contains):
 
-```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "succeeded",
-  "created_at": 1700000000.0,
-  "started_at": 1700000001.0,
-  "finished_at": 1700000010.0,
-  "queue_position": 0,
-  "result": {
-    "first_audio_path": "/v1/audio?path=%2Ftmp%2Fapi_audio%2Fabc123.mp3",
-    "second_audio_path": "/v1/audio?path=%2Ftmp%2Fapi_audio%2Fdef456.mp3",
-    "audio_paths": [
-      "/v1/audio?path=%2Ftmp%2Fapi_audio%2Fabc123.mp3",
-      "/v1/audio?path=%2Ftmp%2Fapi_audio%2Fdef456.mp3"
-    ],
-    "generation_info": "🎵 Generated 2 audios\n⏱️ Total: 8.5s\n🎲 Seeds: 12345,67890",
-    "status_message": "✅ Generation completed successfully!",
-    "seed_value": "12345,67890",
-    "metas": {
-      "bpm": 120,
-      "duration": 30,
-      "keyscale": "C Major",
-      "timesignature": "4",
-      "caption": "upbeat pop song with catchy melody"
-    },
-    "bpm": 120,
-    "duration": 30,
-    "keyscale": "C Major",
-    "timesignature": "4",
-    "genres": null,
-    "lm_model": "acestep-5Hz-lm-0.6B",
-    "dit_model": "acestep-v15-turbo"
-  },
-  "error": null
-}
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `file` | string | Audio file URL (use with `/v1/audio` endpoint) |
+| `wave` | string | Waveform data (usually empty) |
+| `status` | int | Status code (0=in progress, 1=success, 2=failed) |
+| `create_time` | int | Creation time (Unix timestamp) |
+| `env` | string | Environment identifier |
+| `prompt` | string | Prompt used |
+| `lyrics` | string | Lyrics used |
+| `metas` | object | Metadata (bpm, duration, genres, keyscale, timesignature) |
+| `generation_info` | string | Generation info summary |
+| `seed_value` | string | Seed values used (comma-separated) |
+| `lm_model` | string | LM model name used |
+| `dit_model` | string | DiT model name used |
+
+### 5.4 Usage Example
+
+```bash
+curl -X POST http://localhost:8001/query_result \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "task_id_list": ["550e8400-e29b-41d4-a716-446655440000"]
+  }'
 ```
 
 ---
 
-## 4. Random Sample Generation
+## 6. Format Input
 
-### 4.1 API Definition
+### 6.1 API Definition
 
-- **URL**: `/v1/music/random`
+- **URL**: `/format_input`
 - **Method**: `POST`
 
-This endpoint creates a sample-mode job that auto-generates caption, lyrics, and metadata via the 5Hz LM.
+This endpoint uses LLM to enhance and format user-provided caption and lyrics.
 
-### 4.2 Request Parameters
+### 6.2 Request Parameters
 
 | Parameter Name | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `thinking` | bool | `true` | Whether to also generate audio codes via LM |
+| `prompt` | string | `""` | Music description prompt |
+| `lyrics` | string | `""` | Lyrics content |
+| `temperature` | float | `0.85` | LM sampling temperature |
+| `param_obj` | string (JSON) | `"{}"` | JSON object containing metadata (duration, bpm, key, time_signature, language) |
 
-### 4.3 Response Example
+### 6.3 Response Example
 
 ```json
 {
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "queued",
-  "queue_position": 1
+  "data": {
+    "caption": "Enhanced music description",
+    "lyrics": "Formatted lyrics...",
+    "bpm": 120,
+    "key_scale": "C Major",
+    "time_signature": "4",
+    "duration": 180,
+    "vocal_language": "en"
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1700000000000,
+  "extra": null
 }
 ```
 
-### 4.4 Usage Example
+### 6.4 Usage Example
 
 ```bash
-curl -X POST http://localhost:8001/v1/music/random \
+curl -X POST http://localhost:8001/format_input \
   -H 'Content-Type: application/json' \
-  -d '{"thinking": true}'
+  -d '{
+    "prompt": "pop rock",
+    "lyrics": "Walking down the street",
+    "param_obj": "{\"duration\": 180, \"language\": \"en\"}"
+  }'
 ```
 
 ---
 
-## 5. List Available Models
+## 7. Get Random Sample
 
-### 5.1 API Definition
+### 7.1 API Definition
+
+- **URL**: `/create_random_sample`
+- **Method**: `POST`
+
+This endpoint returns random sample parameters from pre-loaded example data for form filling.
+
+### 7.2 Request Parameters
+
+| Parameter Name | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `sample_type` | string | `"simple_mode"` | Sample type: `"simple_mode"` or `"custom_mode"` |
+
+### 7.3 Response Example
+
+```json
+{
+  "data": {
+    "caption": "Upbeat pop song with guitar accompaniment",
+    "lyrics": "[Verse 1]\nSunshine on my face...",
+    "bpm": 120,
+    "key_scale": "G Major",
+    "time_signature": "4",
+    "duration": 180,
+    "vocal_language": "en"
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1700000000000,
+  "extra": null
+}
+```
+
+### 7.4 Usage Example
+
+```bash
+curl -X POST http://localhost:8001/create_random_sample \
+  -H 'Content-Type: application/json' \
+  -d '{"sample_type": "simple_mode"}'
+```
+
+---
+
+## 8. List Available Models
+
+### 8.1 API Definition
 
 - **URL**: `/v1/models`
 - **Method**: `GET`
 
 Returns a list of available DiT models loaded on the server.
 
-### 5.2 Response Example
+### 8.2 Response Example
 
 ```json
 {
-  "models": [
-    {
-      "name": "acestep-v15-turbo",
-      "is_default": true
-    },
-    {
-      "name": "acestep-v15-turbo-shift3",
-      "is_default": false
-    }
-  ],
-  "default_model": "acestep-v15-turbo"
+  "data": {
+    "models": [
+      {
+        "name": "acestep-v15-turbo",
+        "is_default": true
+      },
+      {
+        "name": "acestep-v15-turbo-shift3",
+        "is_default": false
+      }
+    ],
+    "default_model": "acestep-v15-turbo"
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1700000000000,
+  "extra": null
 }
 ```
 
-### 5.3 Usage Example
+### 8.3 Usage Example
 
 ```bash
 curl http://localhost:8001/v1/models
@@ -461,59 +562,114 @@ curl http://localhost:8001/v1/models
 
 ---
 
-## 6. Download Audio Files
+## 9. Server Statistics
 
-### 6.1 API Definition
+### 9.1 API Definition
+
+- **URL**: `/v1/stats`
+- **Method**: `GET`
+
+Returns server runtime statistics.
+
+### 9.2 Response Example
+
+```json
+{
+  "data": {
+    "jobs": {
+      "total": 100,
+      "queued": 5,
+      "running": 1,
+      "succeeded": 90,
+      "failed": 4
+    },
+    "queue_size": 5,
+    "queue_maxsize": 200,
+    "avg_job_seconds": 8.5
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1700000000000,
+  "extra": null
+}
+```
+
+### 9.3 Usage Example
+
+```bash
+curl http://localhost:8001/v1/stats
+```
+
+---
+
+## 10. Download Audio Files
+
+### 10.1 API Definition
 
 - **URL**: `/v1/audio`
 - **Method**: `GET`
 
 Download generated audio files by path.
 
-### 6.2 Request Parameters
+### 10.2 Request Parameters
 
 | Parameter Name | Type | Description |
 | :--- | :--- | :--- |
 | `path` | string | URL-encoded path to the audio file |
 
-### 6.3 Usage Example
+### 10.3 Usage Example
 
 ```bash
-# Download using the URL from job result
+# Download using the URL from task result
 curl "http://localhost:8001/v1/audio?path=%2Ftmp%2Fapi_audio%2Fabc123.mp3" -o output.mp3
 ```
 
 ---
 
-## 7. Health Check
+## 11. Health Check
 
-### 7.1 API Definition
+### 11.1 API Definition
 
 - **URL**: `/health`
 - **Method**: `GET`
 
 Returns service health status.
 
-### 7.2 Response Example
+### 11.2 Response Example
 
 ```json
 {
-  "status": "ok",
-  "service": "ACE-Step API",
-  "version": "1.0"
+  "data": {
+    "status": "ok",
+    "service": "ACE-Step API",
+    "version": "1.0"
+  },
+  "code": 200,
+  "error": null,
+  "timestamp": 1700000000000,
+  "extra": null
 }
 ```
 
 ---
 
-## 8. Environment Variables
+## 12. Environment Variables
 
 The API server can be configured using environment variables:
+
+### Server Configuration
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `ACESTEP_API_HOST` | `127.0.0.1` | Server bind host |
 | `ACESTEP_API_PORT` | `8001` | Server bind port |
+| `ACESTEP_API_KEY` | (empty) | API authentication key (empty disables auth) |
+| `ACESTEP_API_WORKERS` | `1` | API worker thread count |
+
+### Model Configuration
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
 | `ACESTEP_CONFIG_PATH` | `acestep-v15-turbo` | Primary DiT model path |
 | `ACESTEP_CONFIG_PATH2` | (empty) | Secondary DiT model path (optional) |
 | `ACESTEP_CONFIG_PATH3` | (empty) | Third DiT model path (optional) |
@@ -521,14 +677,33 @@ The API server can be configured using environment variables:
 | `ACESTEP_USE_FLASH_ATTENTION` | `true` | Enable flash attention |
 | `ACESTEP_OFFLOAD_TO_CPU` | `false` | Offload models to CPU when idle |
 | `ACESTEP_OFFLOAD_DIT_TO_CPU` | `false` | Offload DiT specifically to CPU |
+
+### LM Configuration
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `ACESTEP_INIT_LLM` | auto | Whether to initialize LM at startup (auto determines based on GPU) |
 | `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-0.6B` | Default 5Hz LM model |
 | `ACESTEP_LM_BACKEND` | `vllm` | LM backend (vllm or pt) |
 | `ACESTEP_LM_DEVICE` | (same as ACESTEP_DEVICE) | Device for LM |
 | `ACESTEP_LM_OFFLOAD_TO_CPU` | `false` | Offload LM to CPU |
+
+### Queue Configuration
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
 | `ACESTEP_QUEUE_MAXSIZE` | `200` | Maximum queue size |
 | `ACESTEP_QUEUE_WORKERS` | `1` | Number of queue workers |
 | `ACESTEP_AVG_JOB_SECONDS` | `5.0` | Initial average job duration estimate |
-| `ACESTEP_TMPDIR` | `.cache/acestep/tmp` | Temporary directory for files |
+| `ACESTEP_AVG_WINDOW` | `50` | Window for averaging job duration |
+
+### Cache Configuration
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `ACESTEP_TMPDIR` | `.cache/acestep/tmp` | Temporary file directory |
+| `TRITON_CACHE_DIR` | `.cache/acestep/triton` | Triton cache directory |
+| `TORCHINDUCTOR_CACHE_DIR` | `.cache/acestep/torchinductor` | TorchInductor cache directory |
 
 ---
 
@@ -538,7 +713,8 @@ The API server can be configured using environment variables:
 
 - `200`: Success
 - `400`: Invalid request (bad JSON, missing fields)
-- `404`: Job not found
+- `401`: Unauthorized (missing or invalid API key)
+- `404`: Resource not found
 - `415`: Unsupported Content-Type
 - `429`: Server busy (queue is full)
 - `500`: Internal server error
@@ -561,10 +737,12 @@ The API server can be configured using environment variables:
 
 3. **Use `use_format=true`** when you have caption/lyrics but want LM to enhance them.
 
-4. **Poll job status** with reasonable intervals (e.g., every 1-2 seconds) to avoid overloading the server.
+4. **Batch query task status** using the `/query_result` endpoint to query multiple tasks at once.
 
-5. **Check `avg_job_seconds`** in the response to estimate wait times.
+5. **Check `/v1/stats`** to understand server load and average job time.
 
 6. **Use multi-model support** by setting `ACESTEP_CONFIG_PATH2` and `ACESTEP_CONFIG_PATH3` environment variables, then select with the `model` parameter.
 
-7. **For production**, always set proper Content-Type headers to avoid 415 errors.
+7. **For production**, set `ACESTEP_API_KEY` to enable authentication and secure your API.
+
+8. **For low VRAM environments**, enable `ACESTEP_OFFLOAD_TO_CPU=true` to support longer audio generation.
