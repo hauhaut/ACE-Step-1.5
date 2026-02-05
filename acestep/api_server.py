@@ -265,9 +265,9 @@ def _get_project_root() -> str:
 # =============================================================================
 
 RESULT_KEY_PREFIX = "ace_step_v1.5_"
-RESULT_EXPIRE_SECONDS = 7 * 24 * 60 * 60  # 7 days
-TASK_TIMEOUT_SECONDS = 3600  # 1 hour
-JOB_STORE_CLEANUP_INTERVAL = 300  # 5 minutes - interval for cleaning up old jobs
+RESULT_EXPIRE_SECONDS = int(os.environ.get("ACESTEP_RESULT_EXPIRE_SECONDS", 604800))
+TASK_TIMEOUT_SECONDS = int(os.environ.get("ACESTEP_TASK_TIMEOUT_SECONDS", 3600))
+JOB_STORE_CLEANUP_INTERVAL = int(os.environ.get("ACESTEP_JOB_CLEANUP_INTERVAL", 300))
 JOB_STORE_MAX_AGE_SECONDS = 86400  # 24 hours - completed jobs older than this will be cleaned
 STATUS_MAP = {"queued": 0, "running": 0, "succeeded": 1, "failed": 2, "cancelled": 3}
 
@@ -2163,6 +2163,40 @@ def create_app() -> FastAPI:
         if rec is None:
             raise HTTPException(status_code=404, detail="Job not found")
         raise HTTPException(status_code=400, detail=f"Cannot cancel job in '{rec.status}' state")
+
+    @app.get("/v1/jobs/{job_id}")
+    async def get_job(job_id: str, _: None = Depends(verify_api_key)):
+        """Get status of a single job."""
+        rec = store.get(job_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        status_int = _map_status(rec.status)
+        queue_pos = 0
+        eta_secs = None
+        if rec.status == "queued":
+            queue_pos = await _queue_position(job_id)
+            if queue_pos > 0:
+                eta_secs = await _eta_seconds_for_position(queue_pos)
+        
+        response = {
+            "job_id": job_id,
+            "status": rec.status,
+            "status_code": status_int,
+            "created_at": rec.created_at,
+            "queue_position": queue_pos,
+            "eta_seconds": eta_secs,
+        }
+        if rec.started_at:
+            response["started_at"] = rec.started_at
+        if rec.finished_at:
+            response["finished_at"] = rec.finished_at
+        if rec.result and rec.status == "succeeded":
+            response["result"] = rec.result
+        if rec.error and rec.status == "failed":
+            response["error"] = rec.error
+        
+        return _wrap_response(response)
 
     @app.get("/v1/models")
     async def list_models(_: None = Depends(verify_api_key)):
