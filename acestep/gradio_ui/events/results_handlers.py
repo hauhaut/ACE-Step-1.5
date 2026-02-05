@@ -801,7 +801,7 @@ def generate_with_progress(
             # First, update audio and clear LRC to avoid race condition
             # (audio needs to load before subtitles are set via .change() event)
             current_audio_updates = [gr.skip() for _ in range(8)]
-            current_audio_updates[i] = audio_path
+            current_audio_updates[i] = gr.update(value=audio_path)
             
             codes_display_updates = [gr.skip() for _ in range(8)]
             codes_display_updates[i] = gr.update(value=code_str, visible=True)  # Keep visible=True
