@@ -218,7 +218,7 @@ def save_preset(preset_name, task_type, captions, lyrics, vocal_language, bpm, k
     if not preset_name or not preset_name.strip():
         return gr.Dropdown(choices=get_preset_choices()), t("messages.preset_name_required")
     
-    preset_name = preset_name.strip().replace(" ", "_")
+    preset_name = os.path.basename(preset_name.strip().replace(" ", "_"))
     presets_dir = Path("./presets")
     presets_dir.mkdir(exist_ok=True)
     
@@ -254,6 +254,7 @@ def load_preset(preset_name, llm_handler=None):
     if not preset_name:
         return [None] * 36 + [False]
     
+    preset_name = os.path.basename(preset_name)
     filepath = Path("./presets") / f"{preset_name}.json"
     if not filepath.exists():
         gr.Warning(t("messages.preset_not_found", name=preset_name))
