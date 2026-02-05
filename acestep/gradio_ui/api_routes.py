@@ -22,6 +22,7 @@ from acestep.api_common import (
 
 
 # Use diskcache to store results
+_result_cache: Any  # diskcache.Cache or dict fallback
 try:
     import diskcache
     _cache_dir = os.path.join(os.path.dirname(__file__), ".cache", "api_results")

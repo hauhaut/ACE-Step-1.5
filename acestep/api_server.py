@@ -1691,6 +1691,7 @@ def create_app() -> FastAPI:
             init_llm = gpu_config.init_lm_default
             logger.info("Auto-setting init_llm=%s based on GPU configuration", init_llm)
 
+        lm_model_path = "acestep-5Hz-lm-0.6B"  # default
         if init_llm:
             logger.info("Loading LLM model...")
 
