@@ -233,6 +233,9 @@ class AceStepHandler:
         if use_lora and not self.lora_loaded:
             return "❌ No LoRA adapter loaded. Please load a LoRA first."
         
+        if self.model is None:
+            return "⚠️ No model loaded."
+        
         self.use_lora = use_lora
         
         # Use PEFT's enable/disable methods if available
