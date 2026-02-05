@@ -2079,10 +2079,18 @@ def create_app() -> FastAPI:
                         if status == 0 and (current_time - create_time) > TASK_TIMEOUT_SECONDS:
                             data_list.append({"task_id": task_id, "result": data, "status": 2})
                         else:
+                            queue_pos = 0
+                            eta_secs = None
+                            if status == 0:  # queued/running
+                                queue_pos = await _queue_position(task_id)
+                                if queue_pos > 0:
+                                    eta_secs = await _eta_seconds_for_position(queue_pos)
                             data_list.append({
                                 "task_id": task_id,
                                 "result": data,
                                 "status": int(status) if status is not None else 1,
+                                "queue_position": queue_pos,
+                                "eta_seconds": eta_secs,
                             })
                     continue
 
@@ -2132,10 +2140,18 @@ def create_app() -> FastAPI:
                         "metas": {}
                     }]
 
+                queue_pos = 0
+                eta_secs = None
+                if rec.status == "queued":
+                    queue_pos = await _queue_position(task_id)
+                    if queue_pos > 0:
+                        eta_secs = await _eta_seconds_for_position(queue_pos)
                 data_list.append({
                     "task_id": task_id,
                     "result": json.dumps(result_data, ensure_ascii=False),
                     "status": status_int,
+                    "queue_position": queue_pos,
+                    "eta_seconds": eta_secs,
                 })
             else:
                 data_list.append({"task_id": task_id, "result": "[]", "status": 0})
