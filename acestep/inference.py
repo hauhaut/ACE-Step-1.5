@@ -8,7 +8,6 @@ backward-compatible Gradio UI support.
 
 import math
 import os
-import tempfile
 from typing import Optional, Union, List, Dict, Any, Tuple
 from dataclasses import dataclass, field, asdict
 from loguru import logger
