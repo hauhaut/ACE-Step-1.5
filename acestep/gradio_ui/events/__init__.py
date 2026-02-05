@@ -90,23 +90,33 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     )
     
     # ========== LoRA Handlers ==========
+    def load_lora_with_checkbox_update(lora_path):
+        """Load LoRA and update checkbox only on success"""
+        status = dit_handler.load_lora(lora_path)
+        # Only enable checkbox if loading succeeded (status starts with success emoji)
+        if status.startswith("✅"):
+            return status, gr.update(value=True)
+        else:
+            return status, gr.update()  # Don't change checkbox on failure
+
     generation_section["load_lora_btn"].click(
-        fn=dit_handler.load_lora,
+        fn=load_lora_with_checkbox_update,
         inputs=[generation_section["lora_path"]],
-        outputs=[generation_section["lora_status"]]
-    ).then(
-        # Update checkbox to enabled state after loading
-        fn=lambda: gr.update(value=True),
-        outputs=[generation_section["use_lora_checkbox"]]
+        outputs=[generation_section["lora_status"], generation_section["use_lora_checkbox"]]
     )
-    
+
+    def unload_lora_with_checkbox_update():
+        """Unload LoRA and update checkbox only on success"""
+        status = dit_handler.unload_lora()
+        # Only disable checkbox if unloading succeeded
+        if status.startswith("✅"):
+            return status, gr.update(value=False)
+        else:
+            return status, gr.update()  # Don't change checkbox on failure
+
     generation_section["unload_lora_btn"].click(
-        fn=dit_handler.unload_lora,
-        outputs=[generation_section["lora_status"]]
-    ).then(
-        # Update checkbox to disabled state after unloading
-        fn=lambda: gr.update(value=False),
-        outputs=[generation_section["use_lora_checkbox"]]
+        fn=unload_lora_with_checkbox_update,
+        outputs=[generation_section["lora_status"], generation_section["use_lora_checkbox"]]
     )
     
     generation_section["use_lora_checkbox"].change(
