@@ -58,6 +58,20 @@
     "language_label": "界面语言",
     "language_info": "选择界面语言"
   },
+  "lora": {
+    "title": "🔧 LoRA 适配器",
+    "path_label": "LoRA 路径",
+    "path_placeholder": "./lora_output/final/adapter",
+    "path_info": "已训练的 LoRA 适配器目录路径",
+    "load_btn": "📥 加载 LoRA",
+    "unload_btn": "🗑️ 卸载",
+    "use_checkbox_label": "使用 LoRA",
+    "use_checkbox_info": "启用 LoRA 适配器进行推理",
+    "scale_label": "LoRA 强度",
+    "scale_info": "LoRA 影响强度 (0=禁用, 1=完全)",
+    "status_label": "LoRA 状态",
+    "status_default": "未加载 LoRA"
+  },
   "generation": {
     "required_inputs": "📝 必需输入",
     "task_type_label": "任务类型",
@@ -249,6 +263,7 @@
     "skipping_metas_cot": "⚡ 跳过 Phase 1 元数据 COT（样本已格式化）",
     "invalid_timesteps_format": "⚠️ 时间步格式无效，使用默认调度。",
     "timesteps_out_of_range": "⚠️ 时间步必须在 [0, 1] 范围内，使用默认调度。",
-    "timesteps_count_mismatch": "⚠️ 时间步数量 ({actual}) 与推理步数 ({expected}) 不匹配，将使用时间步数量。"
+    "timesteps_count_mismatch": "⚠️ 时间步数量 ({actual}) 与推理步数 ({expected}) 不匹配，将使用时间步数量。",
+    "duration_clamped_warning": "时长从 {original}秒 减少到 {max}秒 (GPU显存限制)"
   }
 }

@@ -37,6 +37,7 @@ def clamp_duration_to_gpu_limit(duration_value: Optional[float], llm_handler=Non
     max_duration = gpu_config.max_duration_with_lm if lm_initialized else gpu_config.max_duration_without_lm
     
     if duration_value > max_duration:
+        gr.Warning(t("duration_clamped_warning", original=int(duration_value), max=int(max_duration)))
         return float(max_duration)
     
     return duration_value

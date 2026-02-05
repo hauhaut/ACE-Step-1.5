@@ -198,21 +198,21 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
             init_status = gr.Textbox(label=t("service.status_label"), interactive=False, lines=3, value=init_status_value)
             
             # LoRA Configuration Section
-            gr.HTML("<hr><h4>🔧 LoRA Adapter</h4>")
+            gr.HTML(f"<hr><h4>{t('lora.title')}</h4>")
             with gr.Row():
                 lora_path = gr.Textbox(
-                    label="LoRA Path",
-                    placeholder="./lora_output/final/adapter",
-                    info="Path to trained LoRA adapter directory",
+                    label=t("lora.path_label"),
+                    placeholder=t("lora.path_placeholder"),
+                    info=t("lora.path_info"),
                     scale=3,
                 )
-                load_lora_btn = gr.Button("📥 Load LoRA", variant="secondary", scale=1)
-                unload_lora_btn = gr.Button("🗑️ Unload", variant="secondary", scale=1)
+                load_lora_btn = gr.Button(t("lora.load_btn"), variant="secondary", scale=1)
+                unload_lora_btn = gr.Button(t("lora.unload_btn"), variant="secondary", scale=1)
             with gr.Row():
                 use_lora_checkbox = gr.Checkbox(
-                    label="Use LoRA",
+                    label=t("lora.use_checkbox_label"),
                     value=False,
-                    info="Enable LoRA adapter for inference",
+                    info=t("lora.use_checkbox_info"),
                     scale=1,
                 )
                 lora_scale_slider = gr.Slider(
@@ -220,13 +220,13 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     maximum=1.0,
                     value=1.0,
                     step=0.05,
-                    label="LoRA Scale",
-                    info="LoRA influence strength (0=disabled, 1=full)",
+                    label=t("lora.scale_label"),
+                    info=t("lora.scale_info"),
                     scale=2,
                 )
                 lora_status = gr.Textbox(
-                    label="LoRA Status",
-                    value="No LoRA loaded",
+                    label=t("lora.status_label"),
+                    value=t("lora.status_default"),
                     interactive=False,
                     scale=2,
                 )

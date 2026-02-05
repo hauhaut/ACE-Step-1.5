@@ -58,6 +58,20 @@
     "language_label": "UI Language",
     "language_info": "Select interface language"
   },
+  "lora": {
+    "title": "🔧 LoRA Adapter",
+    "path_label": "LoRA Path",
+    "path_placeholder": "./lora_output/final/adapter",
+    "path_info": "Path to trained LoRA adapter directory",
+    "load_btn": "📥 Load LoRA",
+    "unload_btn": "🗑️ Unload",
+    "use_checkbox_label": "Use LoRA",
+    "use_checkbox_info": "Enable LoRA adapter for inference",
+    "scale_label": "LoRA Scale",
+    "scale_info": "LoRA influence strength (0=disabled, 1=full)",
+    "status_label": "LoRA Status",
+    "status_default": "No LoRA loaded"
+  },
   "generation": {
     "required_inputs": "📝 Required Inputs",
     "task_type_label": "Task Type",
@@ -249,6 +263,7 @@
     "skipping_metas_cot": "⚡ Skipping Phase 1 metas COT (sample already formatted)",
     "invalid_timesteps_format": "⚠️ Invalid timesteps format. Using default schedule.",
     "timesteps_out_of_range": "⚠️ Timesteps must be in range [0, 1]. Using default schedule.",
-    "timesteps_count_mismatch": "⚠️ Timesteps count ({actual}) differs from inference_steps ({expected}). Using timesteps count."
+    "timesteps_count_mismatch": "⚠️ Timesteps count ({actual}) differs from inference_steps ({expected}). Using timesteps count.",
+    "duration_clamped_warning": "Duration reduced from {original}s to {max}s due to GPU memory limit"
   }
 }

@@ -576,7 +576,7 @@ class AceStepHandler:
             
         except Exception as e:
             logger.exception("[initialize_service] Error initializing model")
-            return "Model initialization failed. Check logs for details.", False
+            return "Model initialization failed", False
     
     def _is_on_target_device(self, tensor, target_device):
         """Check if tensor is on the target device (handles cuda vs cuda:0 comparison)."""
@@ -942,14 +942,9 @@ class AceStepHandler:
         actual_language = vocal_language
         
         if metas is not None:
-            # Parse metas to dict if it's a string
             if isinstance(metas, str):
-                # Try to parse as dict-like string or use as-is
-                parsed_metas = self._parse_metas([metas])
-                if parsed_metas and isinstance(parsed_metas[0], dict):
-                    meta_dict = parsed_metas[0]
-                else:
-                    meta_dict = {}
+                # _parse_metas returns strings, not dicts - no extraction possible
+                meta_dict = {}
             elif isinstance(metas, dict):
                 meta_dict = metas
             else:
@@ -1182,13 +1177,8 @@ class AceStepHandler:
             if i >= len(actual_captions):
                 break
                 
-            meta_dict = None
-            if isinstance(meta, str):
-                parsed = self._parse_metas([meta])
-                if parsed and isinstance(parsed[0], dict):
-                    meta_dict = parsed[0]
-            elif isinstance(meta, dict):
-                meta_dict = meta
+            # _parse_metas returns strings, not dicts - only dict input is useful
+            meta_dict = meta if isinstance(meta, dict) else None
             
             if meta_dict:
                 if 'caption' in meta_dict and meta_dict['caption']:
@@ -1681,12 +1671,13 @@ class AceStepHandler:
         # Normalize audio_code_hints to batch list
         audio_code_hints = self._normalize_audio_code_hints(audio_code_hints, batch_size)
         
-        for ii, refer_audio_list in enumerate(refer_audios):
-            if isinstance(refer_audio_list, list):
-                for idx, refer_audio in enumerate(refer_audio_list):
-                    refer_audio_list[idx] = refer_audio_list[idx].to(self.device).to(torch.bfloat16)
-            elif isinstance(refer_audio_list, torch.Tensor):
-                refer_audios[ii] = refer_audios[ii].to(self.device)
+        if refer_audios is not None:
+            for ii, refer_audio_list in enumerate(refer_audios):
+                if isinstance(refer_audio_list, list):
+                    for idx, refer_audio in enumerate(refer_audio_list):
+                        refer_audio_list[idx] = refer_audio_list[idx].to(self.device).to(torch.bfloat16)
+                elif isinstance(refer_audio_list, torch.Tensor):
+                    refer_audios[ii] = refer_audios[ii].to(self.device)
         
         if vocal_languages is None:
             vocal_languages = self._create_fallback_vocal_languages(batch_size)
@@ -2378,7 +2369,7 @@ class AceStepHandler:
             "audio_cover_strength": audio_cover_strength,
             "infer_method": infer_method,
             "infer_steps": infer_steps,
-            "diffusion_guidance_sale": guidance_scale,
+            "diffusion_guidance_scale": guidance_scale,
             "use_adg": use_adg,
             "cfg_interval_start": cfg_interval_start,
             "cfg_interval_end": cfg_interval_end,
@@ -2852,8 +2843,6 @@ class AceStepHandler:
         # Convert special values to None
         if audio_duration is not None and float(audio_duration) <= 0:
             audio_duration = None
-        # if seed is not None and seed < 0:
-        #     seed = None
         if repainting_end is not None and float(repainting_end) < 0:
             repainting_end = None
             

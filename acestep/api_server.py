@@ -462,14 +462,14 @@ class GenerateMusicRequest(BaseModel):
 
     instruction: str = DEFAULT_DIT_INSTRUCTION
     audio_cover_strength: float = 1.0
-    task_type: str = "text2music"
+    task_type: Literal["text2music", "repaint", "cover", "extract", "lego", "complete"] = "text2music"
     track_name: Optional[str] = Field(default=None, description="Track name for lego/extract tasks (e.g., 'vocals', 'drums')")
     complete_track_classes: Optional[List[str]] = Field(default=None, description="Track classes for complete task (e.g., ['vocals', 'drums'])")
 
     use_adg: bool = False
     cfg_interval_start: float = 0.0
     cfg_interval_end: float = 1.0
-    infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
+    infer_method: Literal["ode", "sde"] = "ode"
     shift: float = Field(
         default=3.0, ge=1.0, le=5.0,
         description="Timestep shift factor (range 1.0~5.0, default 3.0). Only effective for base models, not turbo models."
@@ -479,7 +479,7 @@ class GenerateMusicRequest(BaseModel):
         description="Custom timesteps (comma-separated, e.g., '0.97,0.76,0.615,0.5,0.395,0.28,0.18,0.085,0'). Overrides inference_steps and shift."
     )
 
-    audio_format: str = "mp3"
+    audio_format: Literal["mp3", "wav", "flac"] = "mp3"
     use_tiled_decode: bool = True
 
     # 5Hz LM (server-side): used for metadata completion and (when thinking=True) codes generation.
@@ -1521,8 +1521,9 @@ def create_app() -> FastAPI:
                 # Validation errors get stored with status_code for proper 400 response
                 job_store.mark_failed(job_id, f"[{ve.status_code}] {ve.detail}")
                 _update_local_cache(job_id, None, "failed")
-            except Exception:
-                job_store.mark_failed(job_id, traceback.format_exc())
+            except Exception as e:
+                logger.exception("Generation job %s failed", job_id)
+                job_store.mark_failed(job_id, "Generation failed")
 
                 # Update local cache
                 _update_local_cache(job_id, None, "failed")
@@ -2126,7 +2127,8 @@ def create_app() -> FastAPI:
                         "file": "", "wave": "", "status": status_int,
                         "create_time": int(create_time), "env": env,
                         "prompt": "", "lyrics": "",
-                        "metas": {}
+                        "metas": {},
+                        "error": rec.error
                     }]
 
                 queue_pos = 0

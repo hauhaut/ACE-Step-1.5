@@ -15,13 +15,13 @@ def cmd_scan(args):
     builder.metadata.name = args.dataset_name
 
     samples, status = builder.scan_directory(args.audio_dir)
-    print(status)
+    print(status, file=sys.stderr)
 
     if not samples:
         sys.exit(1)
 
     result = builder.save_dataset(args.output, args.dataset_name)
-    print(result)
+    print(result, file=sys.stderr)
 
 
 def cmd_preprocess(args):
@@ -32,7 +32,7 @@ def cmd_preprocess(args):
     # Load dataset
     builder = DatasetBuilder()
     samples, status = builder.load_dataset(args.dataset)
-    print(status)
+    print(status, file=sys.stderr)
     if not samples:
         sys.exit(1)
 
@@ -44,18 +44,19 @@ def cmd_preprocess(args):
     # Find first available model
     models = [d.name for d in checkpoint_dir.iterdir() if d.is_dir() and d.name.startswith("acestep-v15-")]
     if not models:
-        print("No acestep-v15-* model found in checkpoints/")
+        print("No acestep-v15-* model found in checkpoints/", file=sys.stderr)
+        print("Run start_gradio_ui.bat or: python -m acestep.handler --init_service", file=sys.stderr)
         sys.exit(1)
 
     model_name = models[0]
-    print(f"Using model: {model_name}")
+    print(f"Using model: {model_name}", file=sys.stderr)
 
     status_msg, ok = handler.initialize_service(
         project_root=str(project_root),
         config_path=model_name,
         device="auto",
     )
-    print(status_msg)
+    print(status_msg, file=sys.stderr)
     if not ok:
         sys.exit(1)
 
@@ -64,9 +65,9 @@ def cmd_preprocess(args):
         dit_handler=handler,
         output_dir=args.output_dir,
         max_duration=args.max_duration,
-        progress_callback=lambda msg: print(f"  {msg}"),
+        progress_callback=lambda msg: print(f"  {msg}", file=sys.stderr),
     )
-    print(status)
+    print(status, file=sys.stderr)
 
 
 def main():

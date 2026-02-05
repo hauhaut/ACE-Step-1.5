@@ -956,47 +956,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 logger.debug(f"First tokens allowed for language (empty prefix): {decoded_first}")
         
         return prefix_to_tokens
-    
-    def diagnose_keyscale_prefix_tree(self):
-        """
-        Diagnose the keyscale prefix tree to help debug generation bias.
-        Call this method to print detailed information about allowed tokens at each prefix.
-        """
-        print("=" * 60)
-        print("KEYSCALE PREFIX TREE DIAGNOSIS")
-        print("=" * 60)
-        
-        # Check empty prefix (first token)
-        if "" in self.keyscale_prefix_tree:
-            first_tokens = self.keyscale_prefix_tree[""]
-            print(f"\n[Empty prefix] Allowed first tokens ({len(first_tokens)} total):")
-            for t in sorted(first_tokens):
-                decoded = self.tokenizer.decode([t])
-                print(f"  Token {t}: {repr(decoded)}")
-        else:
-            print("\nWARNING: Empty prefix not in tree!")
-        
-        # Check some common prefixes
-        test_prefixes = ["A", "B", "C", "D", "E", "F", "G"]
-        for prefix in test_prefixes:
-            # Try both with and without potential tokenizer artifacts
-            for test_key in [prefix, prefix + " "]:
-                if test_key in self.keyscale_prefix_tree:
-                    tokens = self.keyscale_prefix_tree[test_key]
-                    print(f"\n[Prefix {repr(test_key)}] Allowed tokens ({len(tokens)}):")
-                    for t in sorted(tokens):
-                        decoded = self.tokenizer.decode([t])
-                        print(f"  Token {t}: {repr(decoded)}")
-        
-        # Show some complete keyscales that should be valid
-        print(f"\n[Valid keyscales] Total: {len(self.valid_keyscales)}")
-        sample = sorted(list(self.valid_keyscales))[:10]
-        for ks in sample:
-            print(f"  {repr(ks)}")
-        
-        print("=" * 60)
 
-    
     def _load_genres_vocab(self):
         """
         Load genres vocabulary from file. Supports hot reload by checking file mtime.

@@ -110,7 +110,15 @@ def create_demo(init_params=None, language='en'):
 def main():
     """Main entry function"""
     import argparse
-    
+
+    def str_to_bool(value: str) -> bool:
+        """Convert string to boolean with proper validation."""
+        if value.lower() in ('true', '1', 'yes'):
+            return True
+        if value.lower() in ('false', '0', 'no'):
+            return False
+        raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}. Use true/false, yes/no, or 1/0.")
+
     # Detect GPU memory and get configuration
     gpu_config = get_gpu_config()
     set_global_gpu_config(gpu_config)  # Set global config for use across modules
@@ -147,20 +155,20 @@ def main():
     parser.add_argument("--language", type=str, default="en", choices=["en", "zh", "ja"], help="UI language: en (English), zh (中文), ja (日本語)")
     
     # Service mode argument
-    parser.add_argument("--service_mode", type=lambda x: x.lower() in ['true', '1', 'yes'], default=False, 
+    parser.add_argument("--service_mode", type=str_to_bool, default=False, 
                        help="Enable service mode (default: False). When enabled, uses preset models and restricts UI options.")
     
     # Service initialization arguments
-    parser.add_argument("--init_service", type=lambda x: x.lower() in ['true', '1', 'yes'], default=False, help="Initialize service on startup (default: False)")
+    parser.add_argument("--init_service", type=str_to_bool, default=False, help="Initialize service on startup (default: False)")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file path (optional, for display purposes)")
     parser.add_argument("--config_path", type=str, default=None, help="Main model path (e.g., 'acestep-v15-turbo')")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu", "xpu"], help="Processing device (default: auto)")
-    parser.add_argument("--init_llm", type=lambda x: x.lower() in ['true', '1', 'yes'], default=None, help="Initialize 5Hz LM (default: auto based on GPU memory)")
+    parser.add_argument("--init_llm", type=str_to_bool, default=None, help="Initialize 5Hz LM (default: auto based on GPU memory)")
     parser.add_argument("--lm_model_path", type=str, default=None, help="5Hz LM model path (e.g., 'acestep-5Hz-lm-0.6B')")
     parser.add_argument("--backend", type=str, default="vllm", choices=["vllm", "pt"], help="5Hz LM backend (default: vllm)")
-    parser.add_argument("--use_flash_attention", type=lambda x: x.lower() in ['true', '1', 'yes'], default=None, help="Use flash attention (default: auto-detect)")
-    parser.add_argument("--offload_to_cpu", type=lambda x: x.lower() in ['true', '1', 'yes'], default=auto_offload, help=f"Offload models to CPU (default: {'True' if auto_offload else 'False'}, auto-detected based on GPU VRAM)")
-    parser.add_argument("--offload_dit_to_cpu", type=lambda x: x.lower() in ['true', '1', 'yes'], default=False, help="Offload DiT to CPU (default: False)")
+    parser.add_argument("--use_flash_attention", type=str_to_bool, default=None, help="Use flash attention (default: auto-detect)")
+    parser.add_argument("--offload_to_cpu", type=str_to_bool, default=auto_offload, help=f"Offload models to CPU (default: {'True' if auto_offload else 'False'}, auto-detected based on GPU VRAM)")
+    parser.add_argument("--offload_dit_to_cpu", type=str_to_bool, default=False, help="Offload DiT to CPU (default: False)")
     parser.add_argument("--download-source", type=str, default=None, choices=["huggingface", "modelscope", "auto"], help="Preferred model download source (default: auto-detect based on network)")
 
     # API mode argument

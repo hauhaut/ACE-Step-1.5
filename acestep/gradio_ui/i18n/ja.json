@@ -58,6 +58,20 @@
     "language_label": "UI言語",
     "language_info": "インターフェース言語を選択"
   },
+  "lora": {
+    "title": "🔧 LoRA アダプター",
+    "path_label": "LoRA パス",
+    "path_placeholder": "./lora_output/final/adapter",
+    "path_info": "学習済み LoRA アダプターディレクトリへのパス",
+    "load_btn": "📥 LoRA を読み込む",
+    "unload_btn": "🗑️ アンロード",
+    "use_checkbox_label": "LoRA を使用",
+    "use_checkbox_info": "推論時に LoRA アダプターを有効化",
+    "scale_label": "LoRA スケール",
+    "scale_info": "LoRA の影響度 (0=無効, 1=最大)",
+    "status_label": "LoRA ステータス",
+    "status_default": "LoRA 未読み込み"
+  },
   "generation": {
     "required_inputs": "📝 必須入力",
     "task_type_label": "タスクタイプ",
@@ -249,6 +263,7 @@
     "skipping_metas_cot": "⚡ Phase 1 メタデータ COT をスキップ（サンプルは既にフォーマット済み）",
     "invalid_timesteps_format": "⚠️ タイムステップ形式が無効です。デフォルトスケジュールを使用します。",
     "timesteps_out_of_range": "⚠️ タイムステップは [0, 1] の範囲内である必要があります。デフォルトスケジュールを使用します。",
-    "timesteps_count_mismatch": "⚠️ タイムステップ数 ({actual}) が推論ステップ数 ({expected}) と異なります。タイムステップ数を使用します。"
+    "timesteps_count_mismatch": "⚠️ タイムステップ数 ({actual}) が推論ステップ数 ({expected}) と異なります。タイムステップ数を使用します。",
+    "duration_clamped_warning": "GPUメモリ制限により、時間が {original}秒 から {max}秒 に短縮されました"
   }
 }

@@ -358,12 +358,6 @@ def generate_music(
         # Use config.seed if provided, otherwise fallback to params.seed
         # Convert config.seed (None, int, or List[int]) to format that prepare_seeds accepts
         seed_for_generation = ""
-        # Original code (commented out because it crashes on int seeds):
-        # if config.seeds is not None and len(config.seeds) > 0:
-        #     if isinstance(config.seeds, list):
-        #         # Convert List[int] to comma-separated string
-        #         seed_for_generation = ",".join(str(s) for s in config.seeds)
-
         if config.seeds is not None:
             if isinstance(config.seeds, list) and len(config.seeds) > 0:
                 # Convert List[int] to comma-separated string
@@ -732,7 +726,7 @@ def generate_music(
         hooks.fire(HookPoint.GENERATION_ERROR, {"error": str(e)})
         return GenerationResult(
             audios=[],
-            status_message="Music generation failed. Check logs for details.",
+            status_message="Music generation failed",
             extra_outputs={},
             success=False,
             error="generation_failed",
