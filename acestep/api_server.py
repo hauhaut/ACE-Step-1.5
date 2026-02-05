@@ -1164,8 +1164,8 @@ def create_app() -> FastAPI:
                         selected_handler = app.state.handler2
                         selected_model_name = model2_name
                         model_matched = True
-                        print(f"[API Server] Job {job_id}: Using second model: {model2_name}")
-                
+                        logger.info("Job %s: Using second model: %s", job_id, model2_name)
+
                 # Check if it matches the third model
                 if not model_matched and app.state.handler3 and getattr(app.state, "_initialized3", False):
                     model3_name = _get_model_name(app.state._config_path3)
@@ -1173,15 +1173,15 @@ def create_app() -> FastAPI:
                         selected_handler = app.state.handler3
                         selected_model_name = model3_name
                         model_matched = True
-                        print(f"[API Server] Job {job_id}: Using third model: {model3_name}")
-                
+                        logger.info("Job %s: Using third model: %s", job_id, model3_name)
+
                 if not model_matched:
                     available_models = [_get_model_name(app.state._config_path)]
                     if app.state.handler2 and getattr(app.state, "_initialized2", False):
                         available_models.append(_get_model_name(app.state._config_path2))
                     if app.state.handler3 and getattr(app.state, "_initialized3", False):
                         available_models.append(_get_model_name(app.state._config_path3))
-                    print(f"[API Server] Job {job_id}: Model '{req.model}' not found in {available_models}, using primary: {selected_model_name}")
+                    logger.info("Job %s: Model '%s' not found in %s, using primary: %s", job_id, req.model, available_models, selected_model_name)
             
             # Use selected handler for generation
             h: AceStepHandler = selected_handler
@@ -1210,7 +1210,7 @@ def create_app() -> FastAPI:
                             try:
                                 _ensure_model_downloaded(lm_model_name, checkpoint_dir)
                             except Exception as e:
-                                print(f"[API Server] Warning: Failed to download LM model {lm_model_name}: {e}")
+                                logger.warning("Failed to download LM model %s: %s", lm_model_name, e)
 
                         lm_device = os.getenv("ACESTEP_LM_DEVICE", os.getenv("ACESTEP_DEVICE", "auto"))
                         lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
@@ -1600,11 +1600,11 @@ def create_app() -> FastAPI:
                     removed = store.cleanup_old_jobs()
                     if removed > 0:
                         stats = store.get_stats()
-                        print(f"[API Server] Cleaned up {removed} old jobs. Current stats: {stats}")
+                        logger.info("Cleaned up %d old jobs. Current stats: %s", removed, stats)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    print(f"[API Server] Job cleanup error: {e}")
+                    logger.error("Job cleanup error: %s", e)
 
         worker_count = max(1, WORKER_COUNT)
         workers = [asyncio.create_task(_queue_worker(i)) for i in range(worker_count)]
@@ -1615,7 +1615,7 @@ def create_app() -> FastAPI:
         # =================================================================
         # Initialize models at startup (not lazily on first request)
         # =================================================================
-        print("[API Server] Initializing models at startup...")
+        logger.info("Initializing models at startup...")
 
         # Detect GPU memory and get configuration
         gpu_config = get_gpu_config()
@@ -1625,26 +1625,23 @@ def create_app() -> FastAPI:
         gpu_memory_gb = gpu_config.gpu_memory_gb
         auto_offload = gpu_memory_gb > 0 and gpu_memory_gb < 16
 
-        # Print GPU configuration info
-        print(f"\n{'='*60}")
-        print("[API Server] GPU Configuration Detected:")
-        print(f"{'='*60}")
-        print(f"  GPU Memory: {gpu_memory_gb:.2f} GB")
-        print(f"  Configuration Tier: {gpu_config.tier}")
-        print(f"  Max Duration (with LM): {gpu_config.max_duration_with_lm}s")
-        print(f"  Max Duration (without LM): {gpu_config.max_duration_without_lm}s")
-        print(f"  Max Batch Size (with LM): {gpu_config.max_batch_size_with_lm}")
-        print(f"  Max Batch Size (without LM): {gpu_config.max_batch_size_without_lm}")
-        print(f"  Default LM Init: {gpu_config.init_lm_default}")
-        print(f"  Available LM Models: {gpu_config.available_lm_models or 'None'}")
-        print(f"{'='*60}\n")
+        # Log GPU configuration info
+        logger.info("GPU Configuration Detected:")
+        logger.info("  GPU Memory: %.2f GB", gpu_memory_gb)
+        logger.info("  Configuration Tier: %s", gpu_config.tier)
+        logger.info("  Max Duration (with LM): %ds", gpu_config.max_duration_with_lm)
+        logger.info("  Max Duration (without LM): %ds", gpu_config.max_duration_without_lm)
+        logger.info("  Max Batch Size (with LM): %d", gpu_config.max_batch_size_with_lm)
+        logger.info("  Max Batch Size (without LM): %d", gpu_config.max_batch_size_without_lm)
+        logger.info("  Default LM Init: %s", gpu_config.init_lm_default)
+        logger.info("  Available LM Models: %s", gpu_config.available_lm_models or "None")
 
         if auto_offload:
-            print(f"[API Server] Auto-enabling CPU offload (GPU < 16GB)")
+            logger.info("Auto-enabling CPU offload (GPU < 16GB)")
         elif gpu_memory_gb > 0:
-            print(f"[API Server] CPU offload disabled by default (GPU >= 16GB)")
+            logger.info("CPU offload disabled by default (GPU >= 16GB)")
         else:
-            print("[API Server] No GPU detected, running on CPU")
+            logger.info("No GPU detected, running on CPU")
 
         project_root = _get_project_root()
         config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
@@ -1658,7 +1655,7 @@ def create_app() -> FastAPI:
         else:
             offload_to_cpu = auto_offload
             if auto_offload:
-                print(f"[API Server] Auto-setting offload_to_cpu=True based on GPU memory")
+                logger.info("Auto-setting offload_to_cpu=True based on GPU memory")
 
         offload_dit_to_cpu = _env_bool("ACESTEP_OFFLOAD_DIT_TO_CPU", False)
 
@@ -1672,15 +1669,15 @@ def create_app() -> FastAPI:
             try:
                 _ensure_model_downloaded(dit_model_name, checkpoint_dir)
             except Exception as e:
-                print(f"[API Server] Warning: Failed to download DiT model: {e}")
+                logger.warning("Failed to download DiT model: %s", e)
 
         # Download VAE model
         try:
             _ensure_model_downloaded("vae", checkpoint_dir)
         except Exception as e:
-            print(f"[API Server] Warning: Failed to download VAE model: {e}")
+            logger.warning("Failed to download VAE model: %s", e)
 
-        print(f"[API Server] Loading primary DiT model: {config_path}")
+        logger.info("Loading primary DiT model: %s", config_path)
         status_msg, ok = handler.initialize_service(
             project_root=project_root,
             config_path=config_path,
@@ -1692,10 +1689,10 @@ def create_app() -> FastAPI:
         )
         if not ok:
             app.state._init_error = status_msg
-            print(f"[API Server] ERROR: Primary model failed to load: {status_msg}")
+            logger.error("Primary model failed to load: %s", status_msg)
             raise RuntimeError(status_msg)
         app.state._initialized = True
-        print(f"[API Server] Primary model loaded: {_get_model_name(config_path)}")
+        logger.info("Primary model loaded: %s", _get_model_name(config_path))
 
         # Initialize secondary model if configured
         if handler2 and config_path2:
@@ -1704,9 +1701,9 @@ def create_app() -> FastAPI:
                 try:
                     _ensure_model_downloaded(model2_name, checkpoint_dir)
                 except Exception as e:
-                    print(f"[API Server] Warning: Failed to download secondary model: {e}")
+                    logger.warning("Failed to download secondary model: %s", e)
 
-            print(f"[API Server] Loading secondary DiT model: {config_path2}")
+            logger.info("Loading secondary DiT model: %s", config_path2)
             try:
                 status_msg2, ok2 = handler2.initialize_service(
                     project_root=project_root,
@@ -1719,11 +1716,11 @@ def create_app() -> FastAPI:
                 )
                 app.state._initialized2 = ok2
                 if ok2:
-                    print(f"[API Server] Secondary model loaded: {model2_name}")
+                    logger.info("Secondary model loaded: %s", model2_name)
                 else:
-                    print(f"[API Server] Warning: Secondary model failed: {status_msg2}")
+                    logger.warning("Secondary model failed: %s", status_msg2)
             except Exception as e:
-                print(f"[API Server] Warning: Failed to initialize secondary model: {e}")
+                logger.warning("Failed to initialize secondary model: %s", e)
                 app.state._initialized2 = False
 
         # Initialize third model if configured
@@ -1733,9 +1730,9 @@ def create_app() -> FastAPI:
                 try:
                     _ensure_model_downloaded(model3_name, checkpoint_dir)
                 except Exception as e:
-                    print(f"[API Server] Warning: Failed to download third model: {e}")
+                    logger.warning("Failed to download third model: %s", e)
 
-            print(f"[API Server] Loading third DiT model: {config_path3}")
+            logger.info("Loading third DiT model: %s", config_path3)
             try:
                 status_msg3, ok3 = handler3.initialize_service(
                     project_root=project_root,
@@ -1748,11 +1745,11 @@ def create_app() -> FastAPI:
                 )
                 app.state._initialized3 = ok3
                 if ok3:
-                    print(f"[API Server] Third model loaded: {model3_name}")
+                    logger.info("Third model loaded: %s", model3_name)
                 else:
-                    print(f"[API Server] Warning: Third model failed: {status_msg3}")
+                    logger.warning("Third model failed: %s", status_msg3)
             except Exception as e:
-                print(f"[API Server] Warning: Failed to initialize third model: {e}")
+                logger.warning("Failed to initialize third model: %s", e)
                 app.state._initialized3 = False
 
         # Initialize LLM model based on GPU configuration
@@ -1762,10 +1759,10 @@ def create_app() -> FastAPI:
             init_llm = _env_bool("ACESTEP_INIT_LLM", True)
         else:
             init_llm = gpu_config.init_lm_default
-            print(f"[API Server] Auto-setting init_llm={init_llm} based on GPU configuration")
+            logger.info("Auto-setting init_llm=%s based on GPU configuration", init_llm)
 
         if init_llm:
-            print("[API Server] Loading LLM model...")
+            logger.info("Loading LLM model...")
 
             # Auto-select LM model based on GPU config if not explicitly set
             lm_model_path_env = os.getenv("ACESTEP_LM_MODEL_PATH", "").strip()
@@ -1776,22 +1773,22 @@ def create_app() -> FastAPI:
                 recommended_lm = get_recommended_lm_model(gpu_config)
                 if recommended_lm:
                     lm_model_path = recommended_lm
-                    print(f"[API Server] Auto-selected LM model: {lm_model_path} based on GPU tier")
+                    logger.info("Auto-selected LM model: %s based on GPU tier", lm_model_path)
                 else:
                     lm_model_path = "acestep-5Hz-lm-0.6B"
-                    print(f"[API Server] Using default LM model: {lm_model_path}")
+                    logger.info("Using default LM model: %s", lm_model_path)
 
             # Validate LM model is supported for this GPU
             is_supported, warning_msg = is_lm_model_supported(lm_model_path, gpu_config)
             if not is_supported:
-                print(f"[API Server] Warning: {warning_msg}")
+                logger.warning("%s", warning_msg)
                 # Try to use a supported model instead
                 recommended_lm = get_recommended_lm_model(gpu_config)
                 if recommended_lm:
                     lm_model_path = recommended_lm
-                    print(f"[API Server] Falling back to supported LM model: {lm_model_path}")
+                    logger.info("Falling back to supported LM model: %s", lm_model_path)
                 else:
-                    print("[API Server] No supported LM models for this GPU, skipping LM initialization")
+                    logger.info("No supported LM models for this GPU, skipping LM initialization")
                     init_llm = False
 
         if init_llm:
@@ -1810,7 +1807,7 @@ def create_app() -> FastAPI:
             try:
                 _ensure_model_downloaded(lm_model_path, checkpoint_dir)
             except Exception as e:
-                print(f"[API Server] Warning: Failed to download LLM model: {e}")
+                logger.warning("Failed to download LLM model: %s", e)
 
             llm_status, llm_ok = llm_handler.initialize(
                 checkpoint_dir=checkpoint_dir,
@@ -1822,15 +1819,15 @@ def create_app() -> FastAPI:
             )
             if llm_ok:
                 app.state._llm_initialized = True
-                print(f"[API Server] LLM model loaded: {lm_model_path}")
+                logger.info("LLM model loaded: %s", lm_model_path)
             else:
                 app.state._llm_init_error = llm_status
-                print(f"[API Server] Warning: LLM model failed to load: {llm_status}")
+                logger.warning("LLM model failed to load: %s", llm_status)
         else:
-            print("[API Server] Skipping LLM initialization (disabled or not supported for this GPU)")
+            logger.info("Skipping LLM initialization (disabled or not supported for this GPU)")
             app.state._llm_initialized = False
 
-        print("[API Server] All models initialized successfully!")
+        logger.info("All models initialized successfully!")
 
         try:
             yield
@@ -2271,7 +2268,7 @@ def create_app() -> FastAPI:
                     try:
                         _ensure_model_downloaded(lm_model_name, checkpoint_dir)
                     except Exception as e:
-                        print(f"[API Server] Warning: Failed to download LM model {lm_model_name}: {e}")
+                        logger.warning("Failed to download LM model %s: %s", lm_model_name, e)
 
                 lm_device = os.getenv("ACESTEP_LM_DEVICE", os.getenv("ACESTEP_DEVICE", "auto"))
                 lm_offload = _env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)
@@ -2423,7 +2420,7 @@ def main() -> None:
     # Set download source preference
     if args.download_source and args.download_source != "auto":
         os.environ["ACESTEP_DOWNLOAD_SOURCE"] = args.download_source
-        print(f"Using preferred download source: {args.download_source}")
+        logger.info("Using preferred download source: %s", args.download_source)
 
     # IMPORTANT: in-memory queue/store -> workers MUST be 1
     uvicorn.run(
