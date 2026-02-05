@@ -1,0 +1,72 @@
+﻿{
+    "mcpServers":  {
+                       "serena":  {
+                                      "command":  "uv",
+                                      "args":  [
+                                                   "run",
+                                                   "--directory",
+                                                   "C:\\Users\\cshauhau\\serena",
+                                                   "serena-mcp-server",
+                                                   "--context",
+                                                   "claude-code",
+                                                   "--project",
+                                                   "C:/Users/cshauhau/Desktop/ACE-Step-1.5/.reaper/worktrees/architect-2"
+                                               ]
+                                  },
+                       "ast-grep":  {
+                                        "command":  "uv",
+                                        "args":  [
+                                                     "run",
+                                                     "--directory",
+                                                     "C:\\Users\\cshauhau\\ast-grep-mcp",
+                                                     "ast-grep-mcp"
+                                                 ]
+                                    },
+                       "context7":  {
+                                        "command":  "npx",
+                                        "args":  [
+                                                     "-y",
+                                                     "@upstash/context7-mcp"
+                                                 ]
+                                    },
+                       "sequential-thinking":  {
+                                                   "command":  "npx",
+                                                   "args":  [
+                                                                "-y",
+                                                                "@modelcontextprotocol/server-sequential-thinking"
+                                                            ]
+                                               },
+                       "memory":  {
+                                      "command":  "npx",
+                                      "args":  [
+                                                   "-y",
+                                                   "@modelcontextprotocol/server-memory"
+                                               ]
+                                  },
+                       "github":  {
+                                      "command":  "npx",
+                                      "args":  [
+                                                   "-y",
+                                                   "@modelcontextprotocol/server-github"
+                                               ],
+                                      "env":  {
+                                                  "GITHUB_PERSONAL_ACCESS_TOKEN":  "${GITHUB_TOKEN}"
+                                              }
+                                  },
+                       "playwright":  {
+                                          "command":  "npx",
+                                          "args":  [
+                                                       "-y",
+                                                       "@playwright/mcp"
+                                                   ]
+                                      },
+                       "filesystem":  {
+                                          "command":  "npx",
+                                          "args":  [
+                                                       "-y",
+                                                       "@modelcontextprotocol/server-filesystem",
+                                                       "C:\\Users\\cshauhau"
+                                                   ]
+                                      }
+                   }
+}
