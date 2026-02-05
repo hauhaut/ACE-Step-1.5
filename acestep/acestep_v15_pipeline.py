@@ -322,10 +322,10 @@ def main():
                 'gpu_config': gpu_config,  # Pass GPU config to UI
             }
             
-            print("Service initialization completed successfully!")
-        
+            logger.info("Service initialization completed successfully!")
+
         # Create and launch demo
-        print(f"Creating Gradio interface with language: {args.language}...")
+        logger.info(f"Creating Gradio interface with language: {args.language}...")
         
         # If not using init_service, still pass gpu_config to init_params
         if init_params is None:
@@ -338,23 +338,23 @@ def main():
         
         # Enable queue for multi-user support
         # This ensures proper request queuing and prevents concurrent generation conflicts
-        print("Enabling queue for multi-user support...")
+        logger.info("Enabling queue for multi-user support...")
         demo.queue(
             max_size=20,  # Maximum queue size (adjust based on your needs)
             status_update_rate="auto",  # Update rate for queue status
         )
 
-        print(f"Launching server on {args.server_name}:{args.port}...")
+        logger.info(f"Launching server on {args.server_name}:{args.port}...")
 
         # Setup authentication if provided
         auth = None
         if args.auth_username and args.auth_password:
             auth = (args.auth_username, args.auth_password)
-            print("Authentication enabled")
+            logger.info("Authentication enabled")
 
         # Enable API endpoints if requested
         if args.enable_api:
-            print("Enabling API endpoints...")
+            logger.info("Enabling API endpoints...")
             from acestep.gradio_ui.api_routes import setup_api_routes
 
             # Launch Gradio first with prevent_thread_lock=True
@@ -373,8 +373,8 @@ def main():
             setup_api_routes(demo, dit_handler, llm_handler, api_key=args.api_key)
 
             if args.api_key:
-                print("API authentication enabled")
-            print("API endpoints enabled: /health, /v1/models, /release_task, /query_result, /create_random_sample, /format_lyrics")
+                logger.info("API authentication enabled")
+            logger.info("API endpoints enabled: /health, /v1/models, /release_task, /query_result, /create_random_sample, /format_lyrics")
 
             # Keep the main thread alive
             try:
@@ -382,7 +382,7 @@ def main():
                     import time
                     time.sleep(1)
             except KeyboardInterrupt:
-                print("\nShutting down...")
+                logger.info("Shutting down...")
         else:
             demo.launch(
                 server_name=args.server_name,
@@ -395,9 +395,7 @@ def main():
                 auth=auth,
             )
     except Exception as e:
-        print(f"Error launching Gradio: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error launching Gradio: {e}", exc_info=True)
         sys.exit(1)
 
 
