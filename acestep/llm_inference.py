@@ -1155,8 +1155,10 @@ class LLMHandler:
                         seeds=seeds,
                     )
             except Exception as e:
-                error_msg = f"Error in batch codes generation: {str(e)}"
+                import traceback
+                error_msg = f"Error in batch codes generation: {type(e).__name__}: {str(e) or repr(e)}"
                 logger.error(error_msg)
+                logger.error(f"Traceback:\n{traceback.format_exc()}")
                 return {
                     "metadata": [],
                     "audio_codes": [],
@@ -1172,6 +1174,11 @@ class LLMHandler:
                 }
             
             # Parse audio codes from each output
+            logger.debug(f"Batch Phase 2: codes_outputs has {len(codes_outputs)} items")
+            for i, output in enumerate(codes_outputs):
+                preview = output[:200] if output else "(empty)"
+                logger.debug(f"  codes_outputs[{i}]: {len(output) if output else 0} chars, preview: {preview}...")
+
             audio_codes_list = []
             metadata_list = []
             for output_text in codes_outputs:
