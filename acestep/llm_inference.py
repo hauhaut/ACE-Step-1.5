@@ -1099,13 +1099,30 @@ class LLMHandler:
         # ========== PHASE 1: CoT Generation ==========
         # Skip CoT if all metadata are user-provided OR caption is already formatted
         progress(0.1, f"Phase 1: Generating CoT metadata (once for all items)...")
-        if not has_all_metas and use_cot_metas:
+
+        # CoT caching: only valid for greedy decoding (temperature ~0)
+        is_cacheable = temperature < 0.01
+        cot_cache_key = self._get_cot_cache_key(caption, lyrics, use_cot_caption, use_cot_language, use_cot_metas) if is_cacheable else None
+        cached_metadata = None
+        if is_cacheable:
+            try:
+                cached_raw = get_local_cache().get(cot_cache_key)
+                if cached_raw:
+                    import json
+                    cached_metadata = json.loads(cached_raw)
+                    logger.info(f"Phase 1: Cache HIT for CoT metadata (key={cot_cache_key[:16]}...)")
+            except Exception as e:
+                logger.debug(f"CoT cache read error: {e}")
+
+        if cached_metadata:
+            metadata = cached_metadata
+        elif not has_all_metas and use_cot_metas:
             if is_batch:
                 logger.info("Batch Phase 1: Generating CoT metadata (once for all items)...")
             else:
                 logger.info("Phase 1: Generating CoT metadata...")
             phase1_start = time.time()
-            
+
             # Build formatted prompt for CoT phase
             formatted_prompt = self.build_formatted_prompt(caption, lyrics, generation_phase="cot")
             
@@ -1149,6 +1166,16 @@ class LLMHandler:
             
             # Parse metadata from CoT output
             metadata, _ = self.parse_lm_output(cot_output_text)
+
+            # Cache metadata for future greedy decoding requests (7-day TTL)
+            if is_cacheable and metadata:
+                try:
+                    import json
+                    get_local_cache().set(cot_cache_key, json.dumps(metadata), ex=604800)
+                    logger.debug(f"Phase 1: Cached CoT metadata (key={cot_cache_key[:16]}...)")
+                except Exception as e:
+                    logger.debug(f"CoT cache write error: {e}")
+
             if is_batch:
                 logger.info(f"Batch Phase 1 completed in {phase1_time:.2f}s. Generated metadata: {list(metadata.keys())}")
             else:
