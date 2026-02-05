@@ -315,10 +315,10 @@ class ModelRunner:
             if seq.top_k is not None and seq.top_k > 0:
                 top_ks_is_zero = False
             self._cpu_top_ps[i] = seq.top_p if seq.top_p is not None else 1.0
-            if seq.top_p is not None and seq.top_p == 1.0:
+            if seq.top_p is not None and seq.top_p != 1.0:
                 top_ps_is_one = False
             self._cpu_repetition_penalties[i] = seq.repetition_penalty if seq.repetition_penalty is not None else 1.0
-            if seq.repetition_penalty is not None and seq.repetition_penalty == 1.0:
+            if seq.repetition_penalty is not None and seq.repetition_penalty != 1.0:
                 repetition_penalties_is_one = False
         
         # Transfer to GPU using sliced views (single batched transfer)

@@ -167,7 +167,8 @@ class Scheduler:
                     if seq in self.running:
                         self.running.remove(seq)
                     
-        assert scheduled_seqs
+        if not scheduled_seqs:
+            return [], False
         
         # For CFG batches in decode, ensure conditional sequences come before unconditional
         cfg_cond_seqs = [s for s in scheduled_seqs if s.cfg_scale > 1.0 and not s.is_unconditional]
