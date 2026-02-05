@@ -684,13 +684,14 @@ class _JobStore:
         with self._lock:
             return self._jobs.get(job_id)
 
-    def mark_running(self, job_id: str) -> None:
+    def mark_running(self, job_id: str) -> bool:
         with self._lock:
             rec = self._jobs.get(job_id)
-            if rec is None:
-                return  # Job was cleaned up
+            if rec is None or rec.status != "queued":
+                return False  # Job was cleaned up or cancelled
             rec.status = "running"
             rec.started_at = time.time()
+            return True
 
     def mark_succeeded(self, job_id: str, result: Dict[str, Any]) -> None:
         with self._lock:
@@ -1183,8 +1184,7 @@ def create_app() -> FastAPI:
             executor: ThreadPoolExecutor = app.state.executor
 
             await _ensure_initialized()
-            job_store.mark_running(job_id)
-            
+
             # Select DiT handler based on user's model choice
             # Default: use primary handler
             selected_handler: AceStepHandler = app.state.handler
@@ -1628,6 +1628,9 @@ def create_app() -> FastAPI:
                         except ValueError:
                             pass
 
+                    if not store.mark_running(job_id):
+                        app.state.job_queue.task_done()
+                        continue
                     await _run_one_job(job_id, req)
                 finally:
                     await _cleanup_job_temp_files(job_id)
