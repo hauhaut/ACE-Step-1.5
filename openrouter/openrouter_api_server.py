@@ -17,12 +17,11 @@ import argparse
 import asyncio
 import base64
 import functools
-import hmac
 import json
 import os
+import re
 import sys
 import time
-import traceback
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -48,6 +47,7 @@ from acestep.inference import (
     generate_music,
     format_sample,
 )
+from acestep.api_common import set_api_key, verify_api_key
 
 # =============================================================================
 # Constants
@@ -61,36 +61,6 @@ MODEL_CREATED = 1706688000  # Unix timestamp
 PRICING_PROMPT = "0"
 PRICING_COMPLETION = "0"
 PRICING_REQUEST = "0"
-
-# =============================================================================
-# API Key Authentication
-# =============================================================================
-
-_api_key: Optional[str] = None
-
-
-def set_api_key(key: Optional[str]):
-    """Set the API key for authentication"""
-    global _api_key
-    _api_key = key
-
-
-async def verify_api_key(authorization: Optional[str] = Header(None)):
-    """Verify API key from Authorization header"""
-    if _api_key is None:
-        return  # No auth required
-
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
-    # Support "Bearer <key>" format
-    if authorization.startswith("Bearer "):
-        token = authorization[7:]
-    else:
-        token = authorization
-
-    if not hmac.compare_digest(token, _api_key):
-        raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 # =============================================================================
@@ -673,9 +643,9 @@ def create_app() -> FastAPI:
                         }
                         logger.debug(f"[OpenRouter API] Format mode: {format_result.status_message}")
                     else:
-                        print(f"[OpenRouter API] Warning: format_sample failed: {format_result.error}")
+                        logger.warning(f"[OpenRouter API] format_sample failed: {format_result.error}")
                 except Exception as e:
-                    print(f"[OpenRouter API] Warning: format_sample error: {e}")
+                    logger.warning(f"[OpenRouter API] format_sample error: {e}")
 
             return lm_result
 

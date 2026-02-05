@@ -549,7 +549,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                         invalid_tokens_count += 1
                         if self.debug:
                             logger.debug(f"Skipping audio code token {token_id} with invalid code value {code_value} (max: {MAX_AUDIO_CODE})")
-            except Exception:
+            except (ValueError, KeyError, IndexError):
                 continue
         
         if invalid_tokens_count > 0:
@@ -579,9 +579,9 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             match = audio_code_pattern.match(token_text)
             if match:
                 return int(match.group(1))
-        except Exception:
+        except (ValueError, KeyError, IndexError):
             pass
-        
+
         return None
     
     def _build_audio_code_mask(self):
@@ -1100,8 +1100,8 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     if first_nonspace_char not in self._char_to_tokens:
                         self._char_to_tokens[first_nonspace_char] = set()
                     self._char_to_tokens[first_nonspace_char].add(token_id)
-                    
-            except Exception:
+
+            except (ValueError, KeyError, IndexError):
                 continue
         
         if self.debug:
