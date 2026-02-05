@@ -4,6 +4,7 @@ Handler wrapper connecting model and UI
 """
 import logging
 import os
+import signal
 import sys
 import threading
 
@@ -399,16 +400,24 @@ def main():
             except KeyboardInterrupt:
                 logger.info("Shutting down...")
         else:
-            demo.launch(
-                server_name=args.server_name,
-                server_port=args.port,
-                share=args.share,
-                debug=args.debug,
-                show_error=True,
-                prevent_thread_lock=False,
-                inbrowser=False,
-                auth=auth,
-            )
+            try:
+                demo.launch(
+                    server_name=args.server_name,
+                    server_port=args.port,
+                    share=args.share,
+                    debug=args.debug,
+                    show_error=True,
+                    prevent_thread_lock=False,
+                    inbrowser=False,
+                    auth=auth,
+                )
+            except KeyboardInterrupt:
+                # Suppress additional SIGINT during shutdown to prevent cascade
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
+                logger.info("Shutting down gracefully...")
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        logger.info("Shutdown requested")
     except Exception as e:
         logger.error(f"Error launching Gradio: {e}", exc_info=True)
         sys.exit(1)
