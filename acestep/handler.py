@@ -290,7 +290,7 @@ class AceStepHandler:
     
     def get_lora_status(self) -> Dict[str, Any]:
         """Get current LoRA status.
-        
+
         Returns:
             Dictionary with LoRA status info
         """
@@ -299,7 +299,63 @@ class AceStepHandler:
             "active": self.use_lora,
             "scale": self.lora_scale,
         }
-    
+
+    def is_model_loaded(self) -> bool:
+        """Check if the model is currently loaded in memory."""
+        return self.model is not None
+
+    def unload_model(self) -> str:
+        """Unload all models from memory to free VRAM.
+
+        Returns:
+            Status message
+        """
+        import gc
+
+        if self.model is None:
+            return "⚠️ No model loaded."
+
+        try:
+            # Delete model components
+            del self.model
+            self.model = None
+
+            if self.vae is not None:
+                del self.vae
+                self.vae = None
+
+            if self.text_encoder is not None:
+                del self.text_encoder
+                self.text_encoder = None
+
+            if self.text_tokenizer is not None:
+                del self.text_tokenizer
+                self.text_tokenizer = None
+
+            if self.silence_latent is not None:
+                del self.silence_latent
+                self.silence_latent = None
+
+            # Reset state
+            self.config = None
+            self._base_decoder = None
+            self.lora_loaded = False
+            self.use_lora = False
+
+            # Force garbage collection
+            gc.collect()
+
+            # Clear CUDA cache if available
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            logger.info("Model unloaded, VRAM freed")
+            return "✅ Model unloaded. VRAM freed."
+
+        except Exception as e:
+            logger.exception("Failed to unload model")
+            return f"❌ Failed to unload: {str(e)}"
+
     def initialize_service(
         self, 
         project_root: str,

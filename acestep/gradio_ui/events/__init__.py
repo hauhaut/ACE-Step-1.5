@@ -58,8 +58,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["quantization_checkbox"],
         ],
         outputs=[
-            generation_section["init_status"], 
-            generation_section["generate_btn"], 
+            generation_section["init_status"],
+            generation_section["generate_btn"],
             generation_section["service_config_accordion"],
             # Model type settings (updated based on actual loaded model)
             generation_section["inference_steps"],
@@ -69,6 +69,23 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["cfg_interval_start"],
             generation_section["cfg_interval_end"],
             generation_section["task_type"],
+        ]
+    )
+
+    # Unload model button - frees VRAM and disables generate button
+    def unload_model_handler():
+        status = dit_handler.unload_model()
+        # Also unload LLM if loaded
+        if llm_handler.model is not None:
+            llm_handler.unload()
+            status += "\n✅ LLM unloaded."
+        return status, gr.update(interactive=False)
+
+    generation_section["unload_model_btn"].click(
+        fn=unload_model_handler,
+        outputs=[
+            generation_section["init_status"],
+            generation_section["generate_btn"],
         ]
     )
     

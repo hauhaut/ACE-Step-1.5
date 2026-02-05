@@ -49,10 +49,31 @@ except ImportError:
     from acestep.gpu_config import get_gpu_config, get_gpu_memory_gb, print_gpu_config_info, set_global_gpu_config
 
 
+# Module-level singleton handlers - persist across page refreshes
+_dit_handler_instance = None
+_llm_handler_instance = None
+
+
+def get_dit_handler():
+    """Get or create singleton DiT handler instance"""
+    global _dit_handler_instance
+    if _dit_handler_instance is None:
+        _dit_handler_instance = AceStepHandler()
+    return _dit_handler_instance
+
+
+def get_llm_handler():
+    """Get or create singleton LLM handler instance"""
+    global _llm_handler_instance
+    if _llm_handler_instance is None:
+        _llm_handler_instance = LLMHandler()
+    return _llm_handler_instance
+
+
 def create_demo(init_params=None, language='en'):
     """
     Create Gradio demo interface
-    
+
     Args:
         init_params: Dictionary containing initialization parameters and state.
                     If None, service will not be pre-initialized.
@@ -62,17 +83,18 @@ def create_demo(init_params=None, language='en'):
                           'dit_handler', 'llm_handler' (initialized handlers if pre-initialized),
                           'language' (UI language code)
         language: UI language code ('en', 'zh', 'ja', default: 'en')
-    
+
     Returns:
         Gradio Blocks instance
     """
-    # Use pre-initialized handlers if available, otherwise create new ones
+    # Use pre-initialized handlers if available, otherwise use singletons
     if init_params and init_params.get('pre_initialized') and 'dit_handler' in init_params:
         dit_handler = init_params['dit_handler']
         llm_handler = init_params['llm_handler']
     else:
-        dit_handler = AceStepHandler()  # DiT handler
-        llm_handler = LLMHandler()      # LM handler
+        # Use singleton handlers - persists model state across page refreshes
+        dit_handler = get_dit_handler()
+        llm_handler = get_llm_handler()
     
     dataset_handler = DatasetHandler()  # Dataset handler
     
@@ -189,10 +211,10 @@ def main():
         # If init_service is True, perform initialization before creating UI
         if args.init_service:
             print("Initializing service from command line...")
-            
-            # Create handler instances for initialization
-            dit_handler = AceStepHandler()
-            llm_handler = LLMHandler()
+
+            # Use singleton handler instances for initialization
+            dit_handler = get_dit_handler()
+            llm_handler = get_llm_handler()
             
             # Auto-select config_path if not provided
             if args.config_path is None:

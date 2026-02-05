@@ -172,9 +172,17 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     info=t("service.quantization_info")
                 )
             
-            init_btn = gr.Button(t("service.init_btn"), variant="primary", size="lg")
+            with gr.Row():
+                init_btn = gr.Button(t("service.init_btn"), variant="primary", size="lg", scale=3)
+                unload_model_btn = gr.Button("🗑️ Unload Model", variant="stop", size="lg", scale=1)
             # Set init_status value from init_params if pre-initialized
-            init_status_value = init_params.get('init_status', '') if service_pre_initialized else ''
+            # Also show current model state for singleton handlers
+            if service_pre_initialized:
+                init_status_value = init_params.get('init_status', '')
+            elif dit_handler.is_model_loaded():
+                init_status_value = "✅ Model loaded (from previous session)"
+            else:
+                init_status_value = ''
             init_status = gr.Textbox(label=t("service.status_label"), interactive=False, lines=3, value=init_status_value)
             
             # LoRA Configuration Section
@@ -682,8 +690,11 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                     visible=not service_mode  # Hidden in service mode
                 )
         
-        # Set generate_btn to interactive if service is pre-initialized
-        generate_btn_interactive = init_params.get('enable_generate', False) if service_pre_initialized else False
+        # Set generate_btn to interactive if service is pre-initialized or model is loaded from previous session
+        if service_pre_initialized:
+            generate_btn_interactive = init_params.get('enable_generate', False)
+        else:
+            generate_btn_interactive = dit_handler.is_model_loaded()
         with gr.Row(equal_height=True):
             with gr.Column(scale=1, variant="compact"):
                 think_checkbox = gr.Checkbox(
@@ -719,6 +730,7 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         "config_path": config_path,
         "device": device,
         "init_btn": init_btn,
+        "unload_model_btn": unload_model_btn,
         "init_status": init_status,
         "lm_model_path": lm_model_path,
         "init_llm_checkbox": init_llm_checkbox,
