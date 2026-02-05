@@ -993,7 +993,7 @@ class LLMHandler:
             batch_size: Optional batch size for batch generation. If None or 1, returns single result.
                        If > 1, returns batch results (lists).
             seeds: Optional list of seeds for batch generation (for reproducibility).
-                  Only used when batch_size > 1. TODO: not used yet
+                  Only used when batch_size > 1.
         
         Returns:
             Dictionary containing:
@@ -2093,7 +2093,7 @@ class LLMHandler:
                 try:
                     if hasattr(self.llm, 'reset'):
                         self.llm.reset()
-                except Exception:
+                except (RuntimeError, AttributeError):
                     pass  # Ignore errors during cleanup
             # Clear CUDA or XPU cache to release any corrupted memory
             if torch.cuda.is_available():

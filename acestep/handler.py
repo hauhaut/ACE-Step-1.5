@@ -634,7 +634,7 @@ class AceStepHandler:
                 attr = getattr(module, attr_name, None)
                 if isinstance(attr, torch.nn.Module) and id(attr) not in visited:
                     self._move_module_recursive(attr, target_device, dtype, visited)
-            except Exception:
+            except (AttributeError, RuntimeError):
                 pass
     
     def _recursive_to_device(self, model, device, dtype=None):

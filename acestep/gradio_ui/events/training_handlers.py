@@ -105,7 +105,7 @@ def auto_label_all(
         if progress:
             try:
                 progress(msg)
-            except Exception:
+            except (RuntimeError, TypeError):
                 pass
 
     # Label all samples (skip_metas only skips BPM/Key/TimeSig, still generates caption/genre)
@@ -391,7 +391,7 @@ def preprocess_dataset(
         if progress:
             try:
                 progress(msg)
-            except Exception:
+            except (RuntimeError, TypeError):
                 pass
 
     # Run preprocessing

@@ -550,7 +550,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                         invalid_tokens_count += 1
                         if self.debug:
                             logger.debug(f"Skipping audio code token {token_id} with invalid code value {code_value} (max: {MAX_AUDIO_CODE})")
-            except Exception:
+            except (ValueError, KeyError, IndexError):
                 continue
         
         if invalid_tokens_count > 0:
@@ -580,9 +580,9 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             match = audio_code_pattern.match(token_text)
             if match:
                 return int(match.group(1))
-        except Exception:
+        except (ValueError, KeyError, IndexError):
             pass
-        
+
         return None
     
     def _build_audio_code_mask(self):
@@ -1101,8 +1101,8 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     if first_nonspace_char not in self._char_to_tokens:
                         self._char_to_tokens[first_nonspace_char] = set()
                     self._char_to_tokens[first_nonspace_char].add(token_id)
-                    
-            except Exception:
+
+            except (ValueError, KeyError, IndexError):
                 continue
         
         if self.debug:
@@ -1117,7 +1117,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             mtime = os.path.getmtime(self.genres_vocab_path)
             if mtime > self.genres_vocab_mtime:
                 self._load_genres_vocab()
-        except Exception:
+        except OSError:
             pass  # Ignore errors during hot reload check
     
     def _get_genres_trie_node(self, prefix: str) -> Optional[Dict]:

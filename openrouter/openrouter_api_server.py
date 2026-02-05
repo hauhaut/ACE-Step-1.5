@@ -17,12 +17,10 @@ import argparse
 import asyncio
 import base64
 import functools
-import hmac
-import json
 import os
+import re
 import sys
 import time
-import traceback
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -35,10 +33,11 @@ from dotenv import load_dotenv
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(_project_root, ".env"))
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from loguru import logger
 from acestep.handler import AceStepHandler
 from acestep.llm_inference import LLMHandler
 from acestep.inference import (
@@ -47,6 +46,7 @@ from acestep.inference import (
     generate_music,
     format_sample,
 )
+from acestep.api_common import set_api_key, verify_api_key
 
 # =============================================================================
 # Constants
@@ -60,36 +60,6 @@ MODEL_CREATED = 1706688000  # Unix timestamp
 PRICING_PROMPT = "0"
 PRICING_COMPLETION = "0"
 PRICING_REQUEST = "0"
-
-# =============================================================================
-# API Key Authentication
-# =============================================================================
-
-_api_key: Optional[str] = None
-
-
-def set_api_key(key: Optional[str]):
-    """Set the API key for authentication"""
-    global _api_key
-    _api_key = key
-
-
-async def verify_api_key(authorization: Optional[str] = Header(None)):
-    """Verify API key from Authorization header"""
-    if _api_key is None:
-        return  # No auth required
-
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
-    # Support "Bearer <key>" format
-    if authorization.startswith("Bearer "):
-        token = authorization[7:]
-    else:
-        token = authorization
-
-    if not hmac.compare_digest(token, _api_key):
-        raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 # =============================================================================
@@ -219,9 +189,6 @@ def _env_bool(name: str, default: bool) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-import re
-
-
 def _looks_like_lyrics(text: str) -> bool:
     """
     Heuristic to detect if text looks like song lyrics.
@@ -318,12 +285,6 @@ def _extract_prompt_and_lyrics(messages: List[ChatMessage]) -> tuple[str, str, s
             break
 
     return prompt, lyrics, sample_query
-
-
-def _read_audio_as_base64(file_path: str) -> str:
-    """Read audio file and return Base64 encoded string."""
-    with open(file_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
 
 
 def _audio_to_base64_url(audio_path: str, audio_format: str = "mp3") -> str:
@@ -465,7 +426,7 @@ def create_app() -> FastAPI:
         # =================================================================
         # Initialize models at startup
         # =================================================================
-        print("[OpenRouter API] Initializing models at startup...")
+        logger.info("[OpenRouter API] Initializing models at startup...")
 
         config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
         device = os.getenv("ACESTEP_DEVICE", "auto")
@@ -474,7 +435,7 @@ def create_app() -> FastAPI:
         offload_dit_to_cpu = _env_bool("ACESTEP_OFFLOAD_DIT_TO_CPU", False)
 
         # Initialize DiT model
-        print(f"[OpenRouter API] Loading DiT model: {config_path}")
+        logger.info(f"[OpenRouter API] Loading DiT model: {config_path}")
         status_msg, ok = handler.initialize_service(
             project_root=project_root,
             config_path=config_path,
@@ -487,14 +448,14 @@ def create_app() -> FastAPI:
 
         if not ok:
             app.state._init_error = status_msg
-            print(f"[OpenRouter API] ERROR: DiT model failed: {status_msg}")
+            logger.error(f"[OpenRouter API] DiT model failed: {status_msg}")
             raise RuntimeError(status_msg)
 
         app.state._initialized = True
-        print(f"[OpenRouter API] DiT model loaded successfully")
+        logger.info("[OpenRouter API] DiT model loaded successfully")
 
         # Initialize LLM
-        print("[OpenRouter API] Loading LLM model...")
+        logger.info("[OpenRouter API] Loading LLM model...")
         checkpoint_dir = os.path.join(project_root, "checkpoints")
         lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B")
         backend = os.getenv("ACESTEP_LM_BACKEND", "vllm")
@@ -511,14 +472,14 @@ def create_app() -> FastAPI:
             )
             app.state._llm_initialized = lm_ok
             if lm_ok:
-                print(f"[OpenRouter API] LLM model loaded: {lm_model_path}")
+                logger.info(f"[OpenRouter API] LLM model loaded: {lm_model_path}")
             else:
-                print(f"[OpenRouter API] Warning: LLM failed: {lm_status}")
+                logger.warning(f"[OpenRouter API] LLM failed: {lm_status}")
         except Exception as e:
             app.state._llm_initialized = False
-            print(f"[OpenRouter API] Warning: LLM init error: {e}")
+            logger.warning(f"[OpenRouter API] LLM init error: {e}")
 
-        print("[OpenRouter API] All models initialized!")
+        logger.info("[OpenRouter API] All models initialized!")
 
         try:
             yield
@@ -630,9 +591,9 @@ def create_app() -> FastAPI:
                             "timesignature": sample_result.get("timesignature"),
                             "language": sample_result.get("language") or request.vocal_language,
                         }
-                        print(f"[OpenRouter API] Sample mode: {status_msg}")
+                        logger.debug(f"[OpenRouter API] Sample mode: {status_msg}")
                 except Exception as e:
-                    print(f"[OpenRouter API] Warning: create_sample_from_query failed: {e}")
+                    logger.warning(f"[OpenRouter API] create_sample_from_query failed: {e}")
                     if not prompt:
                         lm_result["prompt"] = sample_query
 
@@ -670,11 +631,11 @@ def create_app() -> FastAPI:
                             "timesignature": format_result.timesignature or None,
                             "language": format_result.language or request.vocal_language,
                         }
-                        print(f"[OpenRouter API] Format mode: {format_result.status_message}")
+                        logger.debug(f"[OpenRouter API] Format mode: {format_result.status_message}")
                     else:
-                        print(f"[OpenRouter API] Warning: format_sample failed: {format_result.error}")
+                        logger.warning(f"[OpenRouter API] format_sample failed: {format_result.error}")
                 except Exception as e:
-                    print(f"[OpenRouter API] Warning: format_sample error: {e}")
+                    logger.warning(f"[OpenRouter API] format_sample error: {e}")
 
             return lm_result
 
@@ -791,11 +752,11 @@ def create_app() -> FastAPI:
                 await asyncio.sleep(0)
 
                 # Step 1: Run LM sample generation
-                print("[OpenRouter API] Stream: Running LM sample...")
+                logger.debug("Stream: Running LM sample...")
                 try:
                     lm_result = await loop.run_in_executor(executor, _run_lm_sample)
                 except Exception as e:
-                    print(f"[OpenRouter API] Stream: LM error: {e}")
+                    logger.warning("Stream: LM error: %s", e)
                     lm_result = {
                         "prompt": prompt or sample_query,
                         "lyrics": lyrics,
@@ -817,10 +778,10 @@ def create_app() -> FastAPI:
                         content=f"\n\n{lm_content}"
                     )
                     await asyncio.sleep(0)
-                    print("[OpenRouter API] Stream: LM content sent")
+                    logger.debug("Stream: LM content sent")
 
                 # Step 2: Run audio generation with heartbeats
-                print("[OpenRouter API] Stream: Starting audio generation...")
+                logger.debug("Stream: Starting audio generation...")
                 audio_future = loop.run_in_executor(
                     executor,
                     functools.partial(_run_audio_generation, lm_result)
@@ -840,14 +801,14 @@ def create_app() -> FastAPI:
                             content="."
                         )
                         await asyncio.sleep(0)
-                        print(f"[OpenRouter API] Stream: Heartbeat {dot_count}")
+                        logger.debug("Stream: Heartbeat %d", dot_count)
 
                 # Get audio result
                 try:
                     audio_result = await audio_future
-                    print(f"[OpenRouter API] Stream: Audio generation completed")
+                    logger.debug("Stream: Audio generation completed")
                 except Exception as e:
-                    print(f"[OpenRouter API] Stream: Audio generation error: {e}")
+                    logger.error("Stream: Audio generation error: %s", e)
                     yield _make_stream_chunk(
                         completion_id, created_timestamp, request.model,
                         content=f"\n\nError: {str(e)}"
@@ -875,7 +836,7 @@ def create_app() -> FastAPI:
                             audio=audio_list
                         )
                         await asyncio.sleep(0)
-                        print("[OpenRouter API] Stream: Audio data sent")
+                        logger.debug("Stream: Audio data sent")
                     else:
                         yield _make_stream_chunk(
                             completion_id, created_timestamp, request.model,
@@ -893,7 +854,7 @@ def create_app() -> FastAPI:
                     finish_reason="stop"
                 )
                 yield "data: [DONE]\n\n"
-                print("[OpenRouter API] Stream: Complete")
+                logger.debug("Stream: Complete")
 
             return StreamingResponse(
                 stream_generator(),

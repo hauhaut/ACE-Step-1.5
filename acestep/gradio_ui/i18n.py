@@ -5,6 +5,7 @@ Supports multiple languages with easy translation management
 import os
 import json
 from typing import Dict, Optional
+from loguru import logger
 
 
 class I18n:
@@ -41,14 +42,14 @@ class I18n:
                     with open(filepath, 'r', encoding='utf-8') as f:
                         self.translations[lang_code] = json.load(f)
                 except Exception as e:
-                    print(f"Error loading translation file {filename}: {e}")
+                    logger.error(f"Error loading translation file {filename}: {e}")
     
     def set_language(self, language: str):
         """Set current language"""
         if language in self.translations:
             self.current_language = language
         else:
-            print(f"Warning: Language '{language}' not found, using default")
+            logger.warning(f"Language '{language}' not found, using default")
     
     def t(self, key: str, **kwargs) -> str:
         """
