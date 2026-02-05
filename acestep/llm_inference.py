@@ -544,6 +544,41 @@ class LLMHandler:
         formatted_prompt_list, is_batch = self._normalize_batch_input(formatted_prompts)
         batch_size = len(formatted_prompt_list)
 
+        # If seeds provided in batch mode, process sequentially for reproducibility
+        if is_batch and seeds:
+            output_texts = []
+            for i, formatted_prompt in enumerate(formatted_prompt_list):
+                if i < len(seeds):
+                    torch.manual_seed(seeds[i])
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(seeds[i])
+                result = self._run_vllm(
+                    formatted_prompts=formatted_prompt,
+                    temperature=temperature,
+                    cfg_scale=cfg_scale,
+                    negative_prompt=negative_prompt,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    use_constrained_decoding=use_constrained_decoding,
+                    constrained_decoding_debug=constrained_decoding_debug,
+                    metadata_temperature=metadata_temperature,
+                    codes_temperature=codes_temperature,
+                    target_duration=target_duration,
+                    user_metadata=user_metadata,
+                    stop_at_reasoning=stop_at_reasoning,
+                    skip_genres=skip_genres,
+                    skip_caption=skip_caption,
+                    skip_language=skip_language,
+                    generation_phase=generation_phase,
+                    caption=caption,
+                    lyrics=lyrics,
+                    cot_text=cot_text,
+                    seeds=None,  # Don't pass seeds in recursive call
+                )
+                output_texts.append(result)
+            return output_texts
+
         # Determine effective temperature for sampler
         # Batch mode doesn't support phase temperatures, so use simple temperature
         # Single mode supports phase temperatures
