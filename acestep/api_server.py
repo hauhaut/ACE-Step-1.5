@@ -535,14 +535,14 @@ class GenerateMusicRequest(BaseModel):
     time_signature: str = ""
     vocal_language: str = "en"
     inference_steps: int = Field(default=8, ge=1, le=200)
-    guidance_scale: float = 7.0
+    guidance_scale: float = Field(default=7.0, ge=1.0, le=15.0)
     use_random_seed: bool = True
     seed: int = -1
 
     reference_audio_path: Optional[str] = None
     src_audio_path: Optional[str] = None
     audio_duration: Optional[float] = Field(default=None, ge=10, le=600)
-    batch_size: Optional[int] = Field(default=None, ge=1, le=16)
+    batch_size: Optional[int] = Field(default=None, ge=1, le=8)
 
     audio_code_string: str = ""
 
