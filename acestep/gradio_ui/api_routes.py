@@ -19,6 +19,7 @@ from acestep.api_common import (
     verify_token_from_request,
     verify_api_key,
 )
+from acestep.constants import get_project_root
 
 
 # Use diskcache to store results
@@ -40,14 +41,9 @@ RESULT_KEY_PREFIX = "ace_step_v1.5_"
 # Example Data for Random Sample
 # =============================================================================
 
-def _get_project_root() -> str:
-    """Get project root directory"""
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
 def _load_all_examples(sample_mode: str = "simple_mode") -> List[Dict[str, Any]]:
     """Load all example JSON files from examples directory"""
-    project_root = _get_project_root()
+    project_root = get_project_root()
     if sample_mode == "simple_mode":
         examples_dir = os.path.join(project_root, "examples", "simple_mode")
     else:
