@@ -47,6 +47,7 @@ from acestep.inference import (
     format_sample,
 )
 from acestep.api_common import set_api_key, verify_api_key
+from acestep.constants import get_project_root
 
 # =============================================================================
 # Constants
@@ -174,12 +175,6 @@ class ModelsResponse(BaseModel):
 # =============================================================================
 # Helper Functions
 # =============================================================================
-
-def _get_project_root() -> str:
-    """Get the project root directory."""
-    current_file = os.path.abspath(__file__)
-    return os.path.dirname(os.path.dirname(current_file))
-
 
 def _env_bool(name: str, default: bool) -> bool:
     """Parse boolean from environment variable."""
@@ -401,7 +396,7 @@ def create_app() -> FastAPI:
         """Application lifespan: initialize and cleanup resources."""
 
         # Setup cache directories
-        project_root = _get_project_root()
+        project_root = get_project_root()
         cache_root = os.path.join(project_root, ".cache", "openrouter")
         tmp_root = os.path.join(cache_root, "tmp")
 

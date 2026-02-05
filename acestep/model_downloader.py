@@ -14,6 +14,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from acestep.constants import get_project_root
+
 
 # =============================================================================
 # Network Detection & Smart Download
@@ -191,17 +193,11 @@ MAIN_MODEL_COMPONENTS = [
 DEFAULT_LM_MODEL = "acestep-5Hz-lm-1.7B"
 
 
-def get_project_root() -> Path:
-    """Get the project root directory."""
-    current_file = Path(__file__).resolve()
-    return current_file.parent.parent
-
-
 def get_checkpoints_dir(custom_dir: Optional[str] = None) -> Path:
     """Get the checkpoints directory path."""
     if custom_dir:
         return Path(custom_dir)
-    return get_project_root() / "checkpoints"
+    return Path(get_project_root()) / "checkpoints"
 
 
 def check_main_model_exists(checkpoints_dir: Optional[Path] = None) -> bool:

@@ -36,6 +36,7 @@ from acestep.constants import (
     TASK_INSTRUCTIONS,
     SFT_GEN_PROMPT,
     DEFAULT_DIT_INSTRUCTION,
+    get_project_root,
 )
 from acestep.dit_alignment_score import MusicStampsAligner, MusicLyricScorer
 from acestep.gpu_config import get_gpu_memory_gb
@@ -87,7 +88,7 @@ class AceStepHandler:
     def get_available_checkpoints(self) -> str:
         """Return project root directory path"""
         # Get project root (handler.py is in acestep/, so go up two levels to project root)
-        project_root = self._get_project_root()
+        project_root = get_project_root()
         # default checkpoints
         checkpoint_dir = os.path.join(project_root, "checkpoints")
         if os.path.exists(checkpoint_dir):
@@ -98,7 +99,7 @@ class AceStepHandler:
     def get_available_acestep_v15_models(self) -> List[str]:
         """Scan and return all model directory names starting with 'acestep-v15-'"""
         # Get project root
-        project_root = self._get_project_root()
+        project_root = get_project_root()
         checkpoint_dir = os.path.join(project_root, "checkpoints")
         
         models = []
@@ -197,6 +198,9 @@ class AceStepHandler:
         if not self.lora_loaded:
             return "⚠️ No LoRA adapter loaded."
         
+        if self.model is None:
+            return "⚠️ No model loaded."
+        
         if self._base_decoder is None:
             return "❌ Base decoder backup not found. Cannot restore."
         
@@ -229,6 +233,9 @@ class AceStepHandler:
         if use_lora and not self.lora_loaded:
             return "❌ No LoRA adapter loaded. Please load a LoRA first."
         
+        if self.model is None:
+            return "⚠️ No model loaded."
+        
         self.use_lora = use_lora
         
         # Use PEFT's enable/disable methods if available
@@ -257,6 +264,9 @@ class AceStepHandler:
         """
         if not self.lora_loaded:
             return "⚠️ No LoRA loaded"
+        
+        if self.model is None:
+            return "⚠️ No model loaded."
         
         # Clamp scale to 0-1 range
         self.lora_scale = max(0.0, min(1.0, scale))
@@ -411,7 +421,7 @@ class AceStepHandler:
                 
 
             # Auto-detect project root (independent of passed project_root parameter)
-            actual_project_root = self._get_project_root()
+            actual_project_root = get_project_root()
             checkpoint_dir = os.path.join(actual_project_root, "checkpoints")
 
             # Auto-download models if not present
@@ -1074,12 +1084,7 @@ class AceStepHandler:
     
     def is_silence(self, audio):
         return torch.all(audio.abs() < 1e-6)
-    
-    def _get_project_root(self) -> str:
-        """Get project root directory path."""
-        current_file = os.path.abspath(__file__)
-        return os.path.dirname(os.path.dirname(current_file))
-    
+
     def _get_vae_dtype(self, device: Optional[str] = None) -> torch.dtype:
         """Get VAE dtype based on device."""
         device = device or self.device

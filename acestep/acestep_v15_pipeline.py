@@ -5,6 +5,7 @@ Handler wrapper connecting model and UI
 import logging
 import os
 import sys
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +56,17 @@ except ImportError:
 # Module-level singleton handlers - persist across page refreshes
 _dit_handler_instance = None
 _llm_handler_instance = None
+_dit_handler_lock = threading.Lock()
+_llm_handler_lock = threading.Lock()
 
 
 def get_dit_handler():
     """Get or create singleton DiT handler instance"""
     global _dit_handler_instance
     if _dit_handler_instance is None:
-        _dit_handler_instance = AceStepHandler()
+        with _dit_handler_lock:
+            if _dit_handler_instance is None:
+                _dit_handler_instance = AceStepHandler()
     return _dit_handler_instance
 
 
@@ -69,7 +74,9 @@ def get_llm_handler():
     """Get or create singleton LLM handler instance"""
     global _llm_handler_instance
     if _llm_handler_instance is None:
-        _llm_handler_instance = LLMHandler()
+        with _llm_handler_lock:
+            if _llm_handler_instance is None:
+                _llm_handler_instance = LLMHandler()
     return _llm_handler_instance
 
 

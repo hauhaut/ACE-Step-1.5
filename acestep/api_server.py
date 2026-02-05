@@ -27,6 +27,8 @@ import traceback
 import tempfile
 import urllib.parse
 
+from acestep.constants import get_project_root
+
 logger = logging.getLogger(__name__)
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -97,7 +99,7 @@ def _validate_input_audio_path(path: str) -> str:
     cache_root = os.path.expanduser("~/.cache/acestep")
     acestep_tmp = (os.getenv("ACESTEP_TMPDIR") or os.path.join(cache_root, "tmp")).strip()
     system_temp = tempfile.gettempdir()
-    project_root = _get_project_root()
+    project_root = get_project_root()
 
     # Normalize input path
     abs_path = os.path.abspath(os.path.normpath(path))
@@ -255,11 +257,6 @@ def _ensure_model_downloaded(model_name: str, checkpoint_dir: str) -> str:
             return _download_from_huggingface(repo_id, checkpoint_dir, model_name)
 
 
-def _get_project_root() -> str:
-    current_file = os.path.abspath(__file__)
-    return os.path.dirname(os.path.dirname(current_file))
-
-
 def _get_int_env(name: str, default: int) -> int:
     val = os.environ.get(name)
     if val is None:
@@ -291,8 +288,8 @@ LM_DEFAULT_TOP_P = 0.9
 # Example Data for Random Sample
 # =============================================================================
 
-SIMPLE_MODE_EXAMPLES_DIR = os.path.join(_get_project_root(), "examples", "simple_mode")
-CUSTOM_MODE_EXAMPLES_DIR = os.path.join(_get_project_root(), "examples", "text2music")
+SIMPLE_MODE_EXAMPLES_DIR = os.path.join(get_project_root(), "examples", "simple_mode")
+CUSTOM_MODE_EXAMPLES_DIR = os.path.join(get_project_root(), "examples", "text2music")
 
 
 def _load_all_examples(sample_mode: str = "simple_mode") -> List[Dict[str, Any]]:
@@ -717,7 +714,7 @@ def _load_project_env() -> None:
     if load_dotenv is None:
         return
     try:
-        project_root = _get_project_root()
+        project_root = get_project_root()
         env_path = os.path.join(project_root, ".env")
         if os.path.exists(env_path):
             load_dotenv(env_path, override=False)
@@ -908,7 +905,7 @@ def create_app() -> FastAPI:
 
         # Ensure compilation/temp caches do not fill up small default /tmp.
         # Triton/Inductor (and the system compiler) can create large temporary files.
-        project_root = _get_project_root()
+        project_root = get_project_root()
         cache_root = os.path.join(project_root, ".cache", "acestep")
         tmp_root = (os.getenv("ACESTEP_TMPDIR") or os.path.join(cache_root, "tmp")).strip()
         triton_cache_root = (os.getenv("TRITON_CACHE_DIR") or os.path.join(cache_root, "triton")).strip()
@@ -993,9 +990,9 @@ def create_app() -> FastAPI:
 
         # Initialize local cache
         try:
-            from acestep.local_cache import get_local_cache
+            from acestep.local_cache import LocalCache
             local_cache_dir = os.path.join(cache_root, "local_redis")
-            app.state.local_cache = get_local_cache(local_cache_dir)
+            app.state.local_cache = LocalCache(local_cache_dir)
         except ImportError:
             app.state.local_cache = None
 
@@ -1146,7 +1143,7 @@ def create_app() -> FastAPI:
                         if initialized or had_error is not None:
                             return
 
-                        project_root = _get_project_root()
+                        project_root = get_project_root()
                         checkpoint_dir = os.path.join(project_root, "checkpoints")
                         lm_model_path = (req.lm_model_path or os.getenv("ACESTEP_LM_MODEL_PATH") or "acestep-5Hz-lm-0.6B").strip()
                         backend = (req.lm_backend or os.getenv("ACESTEP_LM_BACKEND") or "vllm").strip().lower()
@@ -1603,7 +1600,7 @@ def create_app() -> FastAPI:
         else:
             logger.info("No GPU detected, running on CPU")
 
-        project_root = _get_project_root()
+        project_root = get_project_root()
         config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
         device = os.getenv("ACESTEP_DEVICE", "auto")
         use_flash_attention = _env_bool("ACESTEP_USE_FLASH_ATTENTION", True)
@@ -2309,7 +2306,7 @@ def create_app() -> FastAPI:
                 if (err := getattr(app.state, "_llm_init_error", None)):
                     return f"LLM init failed: {err}"
 
-                project_root = _get_project_root()
+                project_root = get_project_root()
                 checkpoint_dir = os.path.join(project_root, "checkpoints")
                 lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B").strip()
                 backend = os.getenv("ACESTEP_LM_BACKEND", "vllm").strip().lower()

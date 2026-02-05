@@ -79,18 +79,3 @@ class LocalCache:
         """Close cache connection"""
         if hasattr(self, '_cache'):
             self._cache.close()
-
-
-# Lazily initialized global instance
-_local_cache: Optional[LocalCache] = None
-_local_cache_lock = Lock()
-
-
-def get_local_cache(cache_dir: Optional[str] = None) -> LocalCache:
-    """Get local cache instance"""
-    global _local_cache
-    if _local_cache is None:
-        with _local_cache_lock:
-            if _local_cache is None:
-                _local_cache = LocalCache(cache_dir)
-    return _local_cache

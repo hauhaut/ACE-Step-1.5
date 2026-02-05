@@ -2588,7 +2588,8 @@ class LLMHandler:
             start_time = time.time()
             if hasattr(model, "to"):
                 model.to("cpu")
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             offload_time = time.time() - start_time
             logger.info(f"Offloaded LLM to CPU in {offload_time:.4f}s")
     
