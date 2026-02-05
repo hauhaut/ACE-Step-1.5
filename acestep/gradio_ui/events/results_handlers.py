@@ -1660,12 +1660,11 @@ def generate_with_batch_management(
     # We must NOT send them again here, otherwise the audio component receives duplicate updates
     # which can cause subtitle flickering. Replace audio updates (indices 0-7) with gr.skip().
     ui_result = result[:-2] if len(result) > 47 else (result[:-1] if len(result) > 46 else result)
-    
-    # Replace audio outputs (0-7) with gr.skip() to avoid duplicate updates
-    ui_result_list = list(ui_result)
-    for i in range(8):
-        ui_result_list[i] = gr.skip()
-    ui_result = tuple(ui_result_list)
+
+    # NOTE: Do NOT replace audio outputs with gr.skip() here.
+    # Gradio's streaming can process the final yield before intermediate yields
+    # complete their frontend render, causing the player to show stale audio.
+    # Keep actual audio paths in the final yield to ensure they render.
     
     yield ui_result + (
         current_batch_index,
