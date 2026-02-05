@@ -2295,11 +2295,14 @@ def create_app() -> FastAPI:
         verify_token_from_request(body, authorization)
         llm: LLMHandler = app.state.llm_handler
 
-        # Initialize LLM if needed
-        with app.state._llm_init_lock:
-            if not getattr(app.state, "_llm_initialized", False):
-                if getattr(app.state, "_llm_init_error", None):
-                    raise HTTPException(status_code=500, detail=f"LLM init failed: {app.state._llm_init_error}")
+        # Initialize LLM if needed (run in executor to avoid blocking event loop)
+        def _init_llm_sync() -> Optional[str]:
+            """Returns error message or None on success."""
+            with app.state._llm_init_lock:
+                if getattr(app.state, "_llm_initialized", False):
+                    return None
+                if (err := getattr(app.state, "_llm_init_error", None)):
+                    return f"LLM init failed: {err}"
 
                 project_root = _get_project_root()
                 checkpoint_dir = os.path.join(project_root, "checkpoints")
@@ -2308,7 +2311,6 @@ def create_app() -> FastAPI:
                 if backend not in {"vllm", "pt"}:
                     backend = "vllm"
 
-                # Auto-download LM model if not present
                 lm_model_name = _get_model_name(lm_model_path)
                 if lm_model_name:
                     try:
@@ -2330,8 +2332,14 @@ def create_app() -> FastAPI:
                 )
                 if not ok:
                     app.state._llm_init_error = status
-                    raise HTTPException(status_code=500, detail=f"LLM init failed: {status}")
+                    return f"LLM init failed: {status}"
                 app.state._llm_initialized = True
+                return None
+
+        loop = asyncio.get_event_loop()
+        init_err = await loop.run_in_executor(None, _init_llm_sync)
+        if init_err:
+            raise HTTPException(status_code=500, detail=init_err)
 
         # Parse parameters
         prompt = body.get("prompt", "") or ""
