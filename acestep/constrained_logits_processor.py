@@ -1789,7 +1789,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "bpm"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -1819,7 +1819,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "caption"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -1884,7 +1884,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "duration"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -1924,7 +1924,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "genres"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -1967,7 +1967,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "keyscale"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -2003,7 +2003,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "language"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -2067,7 +2067,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "timesignature"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -2146,7 +2146,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     logger.warning(f"Expected token {expected_token} but got {generated_token_id} for user-provided field {self.current_user_field}")
             
             # Remove consumed token from queue
-            self.user_field_token_queue.pop(0)
+            self.user_field_token_queue.popleft()
             
             # If queue is empty, field injection is complete, transition to next state
             if not self.user_field_token_queue:
