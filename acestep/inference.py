@@ -709,10 +709,10 @@ def generate_music(
         logger.exception("Music generation failed")
         return GenerationResult(
             audios=[],
-            status_message=f"Error: {str(e)}",
+            status_message="Music generation failed. Check logs for details.",
             extra_outputs={},
             success=False,
-            error=str(e),
+            error="generation_failed",
         )
 
 
