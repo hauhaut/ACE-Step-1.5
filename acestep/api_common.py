@@ -23,11 +23,6 @@ def set_api_key(key: Optional[str]):
     _api_key = key
 
 
-def get_api_key() -> Optional[str]:
-    """Get the current API key (for testing/introspection)."""
-    return _api_key
-
-
 def wrap_response(
     data: Any, code: int = 200, error: Optional[str] = None
 ) -> Dict[str, Any]:

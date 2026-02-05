@@ -17,7 +17,6 @@ import argparse
 import asyncio
 import base64
 import functools
-import json
 import os
 import re
 import sys
@@ -34,8 +33,8 @@ from dotenv import load_dotenv
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(_project_root, ".env"))
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from loguru import logger
@@ -190,9 +189,6 @@ def _env_bool(name: str, default: bool) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-import re
-
-
 def _looks_like_lyrics(text: str) -> bool:
     """
     Heuristic to detect if text looks like song lyrics.
@@ -289,12 +285,6 @@ def _extract_prompt_and_lyrics(messages: List[ChatMessage]) -> tuple[str, str, s
             break
 
     return prompt, lyrics, sample_query
-
-
-def _read_audio_as_base64(file_path: str) -> str:
-    """Read audio file and return Base64 encoded string."""
-    with open(file_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
 
 
 def _audio_to_base64_url(audio_path: str, audio_format: str = "mp3") -> str:
@@ -762,11 +752,11 @@ def create_app() -> FastAPI:
                 await asyncio.sleep(0)
 
                 # Step 1: Run LM sample generation
-                print("[OpenRouter API] Stream: Running LM sample...")
+                logger.debug("Stream: Running LM sample...")
                 try:
                     lm_result = await loop.run_in_executor(executor, _run_lm_sample)
                 except Exception as e:
-                    print(f"[OpenRouter API] Stream: LM error: {e}")
+                    logger.warning("Stream: LM error: %s", e)
                     lm_result = {
                         "prompt": prompt or sample_query,
                         "lyrics": lyrics,
@@ -788,10 +778,10 @@ def create_app() -> FastAPI:
                         content=f"\n\n{lm_content}"
                     )
                     await asyncio.sleep(0)
-                    print("[OpenRouter API] Stream: LM content sent")
+                    logger.debug("Stream: LM content sent")
 
                 # Step 2: Run audio generation with heartbeats
-                print("[OpenRouter API] Stream: Starting audio generation...")
+                logger.debug("Stream: Starting audio generation...")
                 audio_future = loop.run_in_executor(
                     executor,
                     functools.partial(_run_audio_generation, lm_result)
@@ -811,14 +801,14 @@ def create_app() -> FastAPI:
                             content="."
                         )
                         await asyncio.sleep(0)
-                        print(f"[OpenRouter API] Stream: Heartbeat {dot_count}")
+                        logger.debug("Stream: Heartbeat %d", dot_count)
 
                 # Get audio result
                 try:
                     audio_result = await audio_future
-                    print(f"[OpenRouter API] Stream: Audio generation completed")
+                    logger.debug("Stream: Audio generation completed")
                 except Exception as e:
-                    print(f"[OpenRouter API] Stream: Audio generation error: {e}")
+                    logger.error("Stream: Audio generation error: %s", e)
                     yield _make_stream_chunk(
                         completion_id, created_timestamp, request.model,
                         content=f"\n\nError: {str(e)}"
@@ -846,7 +836,7 @@ def create_app() -> FastAPI:
                             audio=audio_list
                         )
                         await asyncio.sleep(0)
-                        print("[OpenRouter API] Stream: Audio data sent")
+                        logger.debug("Stream: Audio data sent")
                     else:
                         yield _make_stream_chunk(
                             completion_id, created_timestamp, request.model,
@@ -864,7 +854,7 @@ def create_app() -> FastAPI:
                     finish_reason="stop"
                 )
                 yield "data: [DONE]\n\n"
-                print("[OpenRouter API] Stream: Complete")
+                logger.debug("Stream: Complete")
 
             return StreamingResponse(
                 stream_generator(),
