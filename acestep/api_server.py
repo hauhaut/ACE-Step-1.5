@@ -2040,6 +2040,35 @@ def create_app() -> FastAPI:
                     ),
                 )
 
+        # Early GPU tier validation - reject before queuing
+        gpu_config: GPUConfig = getattr(app.state, "gpu_config", None)
+        if gpu_config:
+            lm_active = getattr(app.state, "_llm_initialized", False)
+            if lm_active:
+                max_batch = gpu_config.max_batch_size_with_lm
+                max_dur = gpu_config.max_duration_with_lm
+            else:
+                max_batch = gpu_config.max_batch_size_without_lm
+                max_dur = gpu_config.max_duration_without_lm
+            batch_size = req.batch_size if req.batch_size is not None else 2
+            if batch_size > max_batch:
+                for p in temp_files:
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+                msg = f"batch_size {batch_size} > {max_batch} ({gpu_config.tier})"
+                raise HTTPException(status_code=400, detail=msg)
+            if req.audio_duration and req.audio_duration > max_dur:
+                for p in temp_files:
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+                dur = req.audio_duration
+                msg = f"audio_duration {dur}s > {max_dur}s ({gpu_config.tier})"
+                raise HTTPException(status_code=400, detail=msg)
+
         rec = store.create()
 
         q: asyncio.Queue = app.state.job_queue
