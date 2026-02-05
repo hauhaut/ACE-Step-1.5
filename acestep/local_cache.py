@@ -119,11 +119,14 @@ class LocalCache:
 
 # Lazily initialized global instance
 _local_cache: Optional[LocalCache] = None
+_local_cache_lock = Lock()
 
 
 def get_local_cache(cache_dir: Optional[str] = None) -> LocalCache:
     """Get local cache instance"""
     global _local_cache
     if _local_cache is None:
-        _local_cache = LocalCache(cache_dir)
+        with _local_cache_lock:
+            if _local_cache is None:
+                _local_cache = LocalCache(cache_dir)
     return _local_cache

@@ -1,6 +1,7 @@
 
+from collections import deque
 from enum import Enum, auto
-from typing import Optional, Dict, Any, Tuple, List, Callable, Set
+from typing import Optional, Dict, Any, Tuple, List, Callable, Set, Deque
 from loguru import logger
 from transformers import AutoTokenizer
 from transformers.generation.logits_process import LogitsProcessor
@@ -156,7 +157,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.pending_field_name = ""  # Accumulate field name tokens when caption is ending
         
         # Token queue for user-provided fields (injected directly without generation)
-        self.user_field_token_queue: List[int] = []
+        self.user_field_token_queue: Deque[int] = deque()
         self.current_user_field: Optional[str] = None  # Current field being injected
         
         # Pre-compute token IDs for efficiency
@@ -1254,7 +1255,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.accumulated_value = ""  # Legacy, kept for compatibility
         self.accumulated_token_ids = []  # Reset token ID sequence
         self.codes_count = 0  # Reset codes counter
-        self.user_field_token_queue = []  # Reset user field token queue
+        self.user_field_token_queue = deque()  # Reset user field token queue
         self.current_user_field = None  # Reset current user field
         self.caption_after_newline = False  # Reset caption newline tracking
         self.caption_token_count = 0  # Reset caption token count
