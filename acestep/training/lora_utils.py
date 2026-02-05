@@ -212,7 +212,6 @@ def load_lora_weights(
             raise ImportError("PEFT library is required to load adapter. Install with: pip install peft")
         
         # Load PEFT adapter
-        peft_config = PeftConfig.from_pretrained(lora_path)
         model.decoder = PeftModel.from_pretrained(model.decoder, lora_path)
         logger.info(f"LoRA adapter loaded from {lora_path}")
     

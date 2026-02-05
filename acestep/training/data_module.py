@@ -37,7 +37,7 @@ class PreprocessedTensorDataset(Dataset):
     - target_latents: VAE-encoded audio [T, 64]
     - encoder_hidden_states: Condition encoder output [L, D]
     - encoder_attention_mask: Condition mask [L]
-    - context_latents: Source context [T, 65]
+    - context_latents: Source context [T, 128]
     - attention_mask: Audio latent mask [T]
     
     No VAE/text encoder needed during training - just load tensors directly!
@@ -89,7 +89,7 @@ class PreprocessedTensorDataset(Dataset):
             "attention_mask": data["attention_mask"],  # [T]
             "encoder_hidden_states": data["encoder_hidden_states"],  # [L, D]
             "encoder_attention_mask": data["encoder_attention_mask"],  # [L]
-            "context_latents": data["context_latents"],  # [T, 65]
+            "context_latents": data["context_latents"],  # [T, 128]
             "metadata": data.get("metadata", {}),
         }
 
@@ -131,7 +131,7 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
             am = torch.cat([am, pad], dim=0)
         attention_masks.append(am)
         
-        # Pad context_latents [T, 65] -> [max_T, 65]
+        # Pad context_latents [T, 128] -> [max_T, 128]
         cl = sample["context_latents"]
         if cl.shape[0] < max_latent_len:
             pad = torch.zeros(max_latent_len - cl.shape[0], cl.shape[1])
@@ -157,7 +157,7 @@ def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         "attention_mask": torch.stack(attention_masks),  # [B, T]
         "encoder_hidden_states": torch.stack(encoder_hidden_states),  # [B, L, D]
         "encoder_attention_mask": torch.stack(encoder_attention_masks),  # [B, L]
-        "context_latents": torch.stack(context_latents),  # [B, T, 65]
+        "context_latents": torch.stack(context_latents),  # [B, T, 128]
         "metadata": [s["metadata"] for s in batch],
     }
 

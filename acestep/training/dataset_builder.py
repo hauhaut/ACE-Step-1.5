@@ -1099,7 +1099,7 @@ class DatasetBuilder:
                     "attention_mask": attention_mask.squeeze(0).cpu(),  # [T]
                     "encoder_hidden_states": encoder_hidden_states.squeeze(0).cpu(),  # [L, D]
                     "encoder_attention_mask": encoder_attention_mask.squeeze(0).cpu(),  # [L]
-                    "context_latents": context_latents.squeeze(0).cpu(),  # [T, 65]
+                    "context_latents": context_latents.squeeze(0).cpu(),  # [T, 128]
                     "metadata": {
                         "audio_path": sample.audio_path,
                         "filename": sample.filename,
