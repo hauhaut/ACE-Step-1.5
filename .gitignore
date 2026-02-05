@@ -236,6 +236,8 @@ PROJECT-BRIEF.md
 REAPER-LOG.md
 CLAUDE.md
 .claude/
+.mcp.json
+.serena/
 
 # Language-specific tutorials (keep generic version public)
 ROMANIAN_LORA_TUTORIAL.md

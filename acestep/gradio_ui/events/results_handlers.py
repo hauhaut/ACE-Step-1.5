@@ -910,6 +910,14 @@ def generate_with_progress(
     # lrc_display.change() event will automatically update the audio subtitles.
     # This decouples audio value updates from subtitle updates, avoiding flickering.
     # NOTE: gr.update(playback_position=0) not supported in all Gradio versions - use gr.skip()
+
+    # Build LRC updates - use gr.skip() for empty slots to avoid triggering .change() on
+    # audio components that have no audio loaded (prevents Svelte reconcile errors on 2nd gen)
+    final_lrc_updates = [
+        final_lrcs_list[i] if final_lrcs_list[i] else gr.skip()
+        for i in range(8)
+    ]
+
     yield (
         # Audio - skip updates, subtitles are updated via lrc_display.change()
         gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(),
@@ -925,9 +933,9 @@ def generate_with_progress(
         # Details accordion visibility
         final_accordion_updates[0], final_accordion_updates[1], final_accordion_updates[2], final_accordion_updates[3],
         final_accordion_updates[4], final_accordion_updates[5], final_accordion_updates[6], final_accordion_updates[7],
-        # LRC display
-        final_lrcs_list[0], final_lrcs_list[1], final_lrcs_list[2], final_lrcs_list[3],
-        final_lrcs_list[4], final_lrcs_list[5], final_lrcs_list[6], final_lrcs_list[7],
+        # LRC display - use gr.skip() for empty slots to avoid .change() trigger
+        final_lrc_updates[0], final_lrc_updates[1], final_lrc_updates[2], final_lrc_updates[3],
+        final_lrc_updates[4], final_lrc_updates[5], final_lrc_updates[6], final_lrc_updates[7],
         lm_generated_metadata,
         is_format_caption,
         {
@@ -1364,21 +1372,22 @@ def generate_lrc_handler(dit_handler, sample_idx, current_batch_index, batch_que
 def update_audio_subtitles_from_lrc(lrc_text: str, audio_duration: float = None):
     """
     Update Audio component's subtitles based on LRC text content.
-    
+
     This function generates a VTT file from LRC text and passes the file path
     to Gradio, which renders it as a native <track src="..."> element.
     This is more stable than JS-based subtitle injection.
-    
+
     Args:
         lrc_text: LRC format lyrics string from lrc_display textbox
         audio_duration: Optional audio duration for calculating last line's end time
-        
+
     Returns:
-        gr.update for the Audio component with subtitles file path
+        gr.update for the Audio component with subtitles file path, or gr.skip() if empty
     """
-    # If LRC text is empty, clear subtitles
+    # If LRC text is empty, skip the update instead of setting subtitles=None
+    # This prevents Svelte reconcile errors when the audio component has no value
     if not lrc_text or not lrc_text.strip():
-        return gr.update(subtitles=None)
+        return gr.skip()
     
     # Convert LRC to VTT file and get file path
     vtt_path = lrc_to_vtt_file(lrc_text, total_duration=audio_duration)
@@ -2011,23 +2020,31 @@ def navigate_to_previous_batch(current_batch_index, batch_queue):
     
     codes_display_updates = []
     lrc_display_updates = []
-    lrc_clear_updates = []  # For first yield - clear LRC
+    lrc_clear_updates = []  # For first yield - clear LRC (only for slots with audio)
     details_accordion_updates = []
     for i in range(8):
         if stored_allow_lm_batch and isinstance(stored_codes, list):
             code_str = stored_codes[i] if i < len(stored_codes) else ""
         else:
             code_str = stored_codes if isinstance(stored_codes, str) and i == 0 else ""
-        
+
         lrc_str = lrc_displays[i] if i < len(lrc_displays) else ""
         score_str = score_displays[i] if i < len(score_displays) else ""
-        
+
+        # Check if this slot has audio
+        has_audio = i < len(real_audio_paths)
+
         # Keep visible=True to ensure .change() event is properly triggered
         codes_display_updates.append(gr.update(value=code_str, visible=True))
-        lrc_display_updates.append(gr.update(value=lrc_str, visible=True))
-        lrc_clear_updates.append(gr.update(value="", visible=True))  # Clear first
+        # Use gr.skip() for empty LRC slots without audio to avoid Svelte reconcile errors
+        if has_audio:
+            lrc_display_updates.append(gr.update(value=lrc_str, visible=True) if lrc_str else gr.skip())
+            lrc_clear_updates.append(gr.update(value="", visible=True))  # Clear first
+        else:
+            lrc_display_updates.append(gr.skip())  # Skip empty slots
+            lrc_clear_updates.append(gr.skip())  # Skip clearing empty slots
         details_accordion_updates.append(gr.skip())  # Don't change accordion visibility
-    
+
     # ============== STEP 1: Yield audio + CLEAR LRC ==============
     yield (
         audio_updates[0], audio_updates[1], audio_updates[2], audio_updates[3],
@@ -2039,23 +2056,23 @@ def navigate_to_previous_batch(current_batch_index, batch_queue):
         score_displays[4], score_displays[5], score_displays[6], score_displays[7],
         codes_display_updates[0], codes_display_updates[1], codes_display_updates[2], codes_display_updates[3],
         codes_display_updates[4], codes_display_updates[5], codes_display_updates[6], codes_display_updates[7],
-        # LRC display - CLEAR first (triggers .change() to clear subtitles)
+        # LRC display - CLEAR first (triggers .change() to clear subtitles) - only for slots with audio
         lrc_clear_updates[0], lrc_clear_updates[1], lrc_clear_updates[2], lrc_clear_updates[3],
         lrc_clear_updates[4], lrc_clear_updates[5], lrc_clear_updates[6], lrc_clear_updates[7],
         details_accordion_updates[0], details_accordion_updates[1], details_accordion_updates[2], details_accordion_updates[3],
         details_accordion_updates[4], details_accordion_updates[5], details_accordion_updates[6], details_accordion_updates[7],
         gr.update(interactive=True),
     )
-    
+
     # Wait for audio to load before setting subtitles
     time_module.sleep(0.05)
-    
+
     # ============== STEP 2: Yield skip audio + SET actual LRC ==============
     skip_audio = [gr.skip() for _ in range(8)]
     skip_scores = [gr.skip() for _ in range(8)]
     skip_codes = [gr.skip() for _ in range(8)]
     skip_accordions = [gr.skip() for _ in range(8)]
-    
+
     yield (
         skip_audio[0], skip_audio[1], skip_audio[2], skip_audio[3],
         skip_audio[4], skip_audio[5], skip_audio[6], skip_audio[7],
@@ -2066,7 +2083,7 @@ def navigate_to_previous_batch(current_batch_index, batch_queue):
         skip_scores[4], skip_scores[5], skip_scores[6], skip_scores[7],
         skip_codes[0], skip_codes[1], skip_codes[2], skip_codes[3],
         skip_codes[4], skip_codes[5], skip_codes[6], skip_codes[7],
-        # LRC display - SET actual content (triggers .change() to set subtitles)
+        # LRC display - SET actual content (triggers .change() to set subtitles) - only for slots with audio
         lrc_display_updates[0], lrc_display_updates[1], lrc_display_updates[2], lrc_display_updates[3],
         lrc_display_updates[4], lrc_display_updates[5], lrc_display_updates[6], lrc_display_updates[7],
         skip_accordions[0], skip_accordions[1], skip_accordions[2], skip_accordions[3],
@@ -2139,22 +2156,30 @@ def navigate_to_next_batch(autogen_enabled, current_batch_index, total_batches, 
     
     codes_display_updates = []
     lrc_display_updates = []
-    lrc_clear_updates = []  # For first yield - clear LRC
+    lrc_clear_updates = []  # For first yield - clear LRC (only for slots with audio)
     details_accordion_updates = []
     for i in range(8):
         if stored_allow_lm_batch and isinstance(stored_codes, list):
             code_str = stored_codes[i] if i < len(stored_codes) else ""
         else:
             code_str = stored_codes if isinstance(stored_codes, str) and i == 0 else ""
-        
+
         lrc_str = lrc_displays[i] if i < len(lrc_displays) else ""
-        
+
+        # Check if this slot has audio
+        has_audio = i < len(real_audio_paths)
+
         # Keep visible=True to ensure .change() event is properly triggered
         codes_display_updates.append(gr.update(value=code_str, visible=True))
-        lrc_display_updates.append(gr.update(value=lrc_str, visible=True))
-        lrc_clear_updates.append(gr.update(value="", visible=True))  # Clear first
+        # Use gr.skip() for empty LRC slots without audio to avoid Svelte reconcile errors
+        if has_audio:
+            lrc_display_updates.append(gr.update(value=lrc_str, visible=True) if lrc_str else gr.skip())
+            lrc_clear_updates.append(gr.update(value="", visible=True))  # Clear first
+        else:
+            lrc_display_updates.append(gr.skip())  # Skip empty slots
+            lrc_clear_updates.append(gr.skip())  # Skip clearing empty slots
         details_accordion_updates.append(gr.skip())  # Don't change accordion visibility
-    
+
     # ============== STEP 1: Yield audio + CLEAR LRC ==============
     yield (
         audio_updates[0], audio_updates[1], audio_updates[2], audio_updates[3],
@@ -2166,23 +2191,23 @@ def navigate_to_next_batch(autogen_enabled, current_batch_index, total_batches, 
         score_displays[4], score_displays[5], score_displays[6], score_displays[7],
         codes_display_updates[0], codes_display_updates[1], codes_display_updates[2], codes_display_updates[3],
         codes_display_updates[4], codes_display_updates[5], codes_display_updates[6], codes_display_updates[7],
-        # LRC display - CLEAR first (triggers .change() to clear subtitles)
+        # LRC display - CLEAR first (triggers .change() to clear subtitles) - only for slots with audio
         lrc_clear_updates[0], lrc_clear_updates[1], lrc_clear_updates[2], lrc_clear_updates[3],
         lrc_clear_updates[4], lrc_clear_updates[5], lrc_clear_updates[6], lrc_clear_updates[7],
         details_accordion_updates[0], details_accordion_updates[1], details_accordion_updates[2], details_accordion_updates[3],
         details_accordion_updates[4], details_accordion_updates[5], details_accordion_updates[6], details_accordion_updates[7],
         gr.update(interactive=True),
     )
-    
+
     # Wait for audio to load before setting subtitles
     time_module.sleep(0.05)
-    
+
     # ============== STEP 2: Yield skip audio + SET actual LRC ==============
     skip_audio = [gr.skip() for _ in range(8)]
     skip_scores = [gr.skip() for _ in range(8)]
     skip_codes = [gr.skip() for _ in range(8)]
     skip_accordions = [gr.skip() for _ in range(8)]
-    
+
     yield (
         skip_audio[0], skip_audio[1], skip_audio[2], skip_audio[3],
         skip_audio[4], skip_audio[5], skip_audio[6], skip_audio[7],
@@ -2193,7 +2218,7 @@ def navigate_to_next_batch(autogen_enabled, current_batch_index, total_batches, 
         skip_scores[4], skip_scores[5], skip_scores[6], skip_scores[7],
         skip_codes[0], skip_codes[1], skip_codes[2], skip_codes[3],
         skip_codes[4], skip_codes[5], skip_codes[6], skip_codes[7],
-        # LRC display - SET actual content (triggers .change() to set subtitles)
+        # LRC display - SET actual content (triggers .change() to set subtitles) - only for slots with audio
         lrc_display_updates[0], lrc_display_updates[1], lrc_display_updates[2], lrc_display_updates[3],
         lrc_display_updates[4], lrc_display_updates[5], lrc_display_updates[6], lrc_display_updates[7],
         skip_accordions[0], skip_accordions[1], skip_accordions[2], skip_accordions[3],
