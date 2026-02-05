@@ -12,6 +12,7 @@ from acestep.constants import (
 )
 from acestep.gradio_ui.i18n import t
 from acestep.gpu_config import get_global_gpu_config, GPUConfig
+from acestep.gradio_ui.events.generation_handlers import get_preset_choices
 
 
 def create_generation_section(dit_handler, llm_handler, init_params=None, language='en') -> dict:
@@ -268,7 +269,30 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
                                 variant="secondary",
                                 size="sm",
                             )
-                    
+
+                    # Preset save/load row
+                    with gr.Row():
+                        preset_name_input = gr.Textbox(
+                            label=t("generation.preset_name_label"),
+                            placeholder="my_preset",
+                            scale=2
+                        )
+                        save_preset_btn = gr.Button(
+                            t("generation.save_preset_btn"),
+                            variant="secondary",
+                            scale=1
+                        )
+                        preset_dropdown = gr.Dropdown(
+                            label=t("generation.load_preset_label"),
+                            choices=get_preset_choices(),
+                            scale=2
+                        )
+                        preset_status = gr.Textbox(
+                            label=t("generation.preset_status_label"),
+                            scale=1,
+                            interactive=False
+                        )
+
                     track_name = gr.Dropdown(
                         choices=TRACK_NAMES,
                         value=None,
@@ -797,6 +821,11 @@ def create_generation_section(dit_handler, llm_handler, init_params=None, langua
         "captions": captions,
         "sample_btn": sample_btn,
         "load_file": load_file,
+        # Preset components
+        "preset_name_input": preset_name_input,
+        "save_preset_btn": save_preset_btn,
+        "preset_dropdown": preset_dropdown,
+        "preset_status": preset_status,
         "lyrics": lyrics,
         "vocal_language": vocal_language,
         "bpm": bpm,

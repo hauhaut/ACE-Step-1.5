@@ -6,6 +6,7 @@ import os
 import json
 import random
 import glob
+from pathlib import Path
 import gradio as gr
 from typing import Optional, List, Tuple
 from acestep.constants import (
@@ -194,6 +195,71 @@ def load_metadata(file_obj, llm_handler=None):
     except Exception as e:
         gr.Warning(t("messages.load_error", error=str(e)))
         return [None] * 36 + [False]
+
+
+
+def get_preset_choices():
+    """Get list of available presets from ./presets directory"""
+    presets_dir = Path("./presets")
+    if not presets_dir.exists():
+        return []
+    return sorted([f.stem for f in presets_dir.glob("*.json")])
+
+
+def save_preset(preset_name, task_type, captions, lyrics, vocal_language, bpm, key_scale, 
+                time_signature, audio_duration, batch_size, inference_steps, guidance_scale,
+                seed, use_adg, cfg_interval_start, cfg_interval_end, shift, infer_method,
+                custom_timesteps, audio_format, lm_temperature, lm_cfg_scale, lm_top_k, 
+                lm_top_p, lm_negative_prompt, use_cot_metas, use_cot_caption, use_cot_language,
+                audio_cover_strength, think, audio_codes, repainting_start, repainting_end,
+                track_name, complete_track_classes, instrumental):
+    """Save current parameters as preset JSON"""
+    if not preset_name or not preset_name.strip():
+        return gr.Dropdown(choices=get_preset_choices()), t("messages.preset_name_required")
+    
+    preset_name = preset_name.strip().replace(" ", "_")
+    presets_dir = Path("./presets")
+    presets_dir.mkdir(exist_ok=True)
+    
+    preset = {
+        "task_type": task_type, "caption": captions, "lyrics": lyrics,
+        "vocal_language": vocal_language, "bpm": bpm, "keyscale": key_scale,
+        "timesignature": time_signature, "duration": audio_duration,
+        "batch_size": batch_size, "inference_steps": inference_steps,
+        "guidance_scale": guidance_scale, "seed": str(seed) if seed else "-1",
+        "use_adg": use_adg, "cfg_interval_start": cfg_interval_start,
+        "cfg_interval_end": cfg_interval_end, "shift": shift,
+        "infer_method": infer_method, "timesteps": custom_timesteps or "",
+        "audio_format": audio_format, "lm_temperature": lm_temperature,
+        "lm_cfg_scale": lm_cfg_scale, "lm_top_k": lm_top_k, "lm_top_p": lm_top_p,
+        "lm_negative_prompt": lm_negative_prompt, "use_cot_metas": use_cot_metas,
+        "use_cot_caption": use_cot_caption, "use_cot_language": use_cot_language,
+        "audio_cover_strength": audio_cover_strength, "thinking": think,
+        "audio_codes": audio_codes or "", "repainting_start": repainting_start,
+        "repainting_end": repainting_end, "track_name": track_name,
+        "complete_track_classes": complete_track_classes or [], "instrumental": instrumental
+    }
+    
+    filepath = presets_dir / f"{preset_name}.json"
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(preset, f, indent=2, ensure_ascii=False)
+    
+    gr.Info(t("messages.preset_saved", name=preset_name))
+    return gr.Dropdown(choices=get_preset_choices(), value=preset_name), f"Saved: {filepath}"
+
+
+def load_preset(preset_name, llm_handler=None):
+    """Load a preset by name - returns same outputs as load_metadata"""
+    if not preset_name:
+        return [None] * 36 + [False]
+    
+    filepath = Path("./presets") / f"{preset_name}.json"
+    if not filepath.exists():
+        gr.Warning(t("messages.preset_not_found", name=preset_name))
+        return [None] * 36 + [False]
+    
+    # Reuse load_metadata logic with the preset file path
+    return load_metadata(str(filepath), llm_handler)
 
 
 def load_random_example(task_type: str, llm_handler=None):
