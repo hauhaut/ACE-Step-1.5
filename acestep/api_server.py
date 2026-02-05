@@ -271,6 +271,17 @@ def _get_int_env(name: str, default: int) -> int:
         return default
 
 
+def _get_float_env(name: str, default: float) -> float:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        logger.warning("Invalid value for %s: %r, using default %g", name, val, default)
+        return default
+
+
 # =============================================================================
 # Constants
 # =============================================================================
@@ -721,9 +732,9 @@ def _load_project_env() -> None:
         env_path = os.path.join(project_root, ".env")
         if os.path.exists(env_path):
             load_dotenv(env_path, override=False)
-    except Exception:
+    except Exception as e:
         # Optional best-effort: continue even if .env loading fails.
-        pass
+        logger.warning("Failed to load .env file: %s", e)
 
 
 _load_project_env()
@@ -885,11 +896,11 @@ def create_app() -> FastAPI:
     api_key = os.getenv("ACESTEP_API_KEY", None)
     set_api_key(api_key)
 
-    QUEUE_MAXSIZE = int(os.getenv("ACESTEP_QUEUE_MAXSIZE", "200"))
-    WORKER_COUNT = int(os.getenv("ACESTEP_QUEUE_WORKERS", "1"))  # Single GPU recommended
+    QUEUE_MAXSIZE = _get_int_env("ACESTEP_QUEUE_MAXSIZE", 200)
+    WORKER_COUNT = _get_int_env("ACESTEP_QUEUE_WORKERS", 1)  # Single GPU recommended
 
-    INITIAL_AVG_JOB_SECONDS = float(os.getenv("ACESTEP_AVG_JOB_SECONDS", "5.0"))
-    AVG_WINDOW = int(os.getenv("ACESTEP_AVG_WINDOW", "50"))
+    INITIAL_AVG_JOB_SECONDS = _get_float_env("ACESTEP_AVG_JOB_SECONDS", 5.0)
+    AVG_WINDOW = _get_int_env("ACESTEP_AVG_WINDOW", 50)
 
     def _path_to_audio_url(path: str) -> str:
         """Convert local file path to downloadable relative URL"""
@@ -1545,7 +1556,6 @@ def create_app() -> FastAPI:
                             pass
 
                     if not store.mark_running(job_id):
-                        app.state.job_queue.task_done()
                         continue
                     await _run_one_job(job_id, req)
                 finally:

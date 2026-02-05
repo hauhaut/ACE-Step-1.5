@@ -576,7 +576,7 @@ class AceStepHandler:
             
         except Exception as e:
             logger.exception("[initialize_service] Error initializing model")
-            return "Model initialization failed", False
+            return "Model initialization failed. Check server logs for details.", False
     
     def _is_on_target_device(self, tensor, target_device):
         """Check if tensor is on the target device (handles cuda vs cuda:0 comparison)."""
