@@ -75,42 +75,6 @@ class LocalCache:
         """Get value"""
         return self._cache.get(name)
 
-    def delete(self, name: str) -> int:
-        """Delete key, returns number of deleted items"""
-        return 1 if self._cache.delete(name) else 0
-
-    def exists(self, name: str) -> bool:
-        """Check if key exists"""
-        return name in self._cache
-
-    def keys(self, pattern: str = "*") -> list:
-        """
-        Get list of matching keys
-        Note: Simplified implementation, only supports prefix and full matching
-        """
-        if pattern == "*":
-            return list(self._cache.iterkeys())
-
-        prefix = pattern.rstrip("*")
-        return [k for k in self._cache.iterkeys() if k.startswith(prefix)]
-
-    def expire(self, name: str, seconds: int) -> bool:
-        """Set key expiration time"""
-        value = self._cache.get(name)
-        if value is not None:
-            self._cache.set(name, value, expire=seconds)
-            return True
-        return False
-
-    def ttl(self, name: str) -> int:
-        """
-        Get remaining time to live (seconds)
-        Note: diskcache does not directly support TTL queries
-        """
-        if name in self._cache:
-            return -1  # Exists but TTL unknown
-        return -2  # Key does not exist
-
     def close(self):
         """Close cache connection"""
         if hasattr(self, '_cache'):
