@@ -848,7 +848,11 @@ class AceStepHandler:
             "- keyscale: N/A\n"
             "- duration: 30 seconds\n"
         )
-    
+
+    def _create_fallback_vocal_languages(self, batch_size: int) -> List[str]:
+        """Create default vocal languages for batch."""
+        return ["en"] * batch_size
+
     def _dict_to_meta_string(self, meta_dict: Dict[str, Any]) -> str:
         """Convert metadata dict to formatted string."""
         bpm = meta_dict.get('bpm', meta_dict.get('tempo', 'N/A'))
