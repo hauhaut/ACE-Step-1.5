@@ -529,20 +529,20 @@ class GenerateMusicRequest(BaseModel):
     # Model name for multi-model support (select which DiT model to use)
     model: Optional[str] = Field(default=None, description="Model name to use (e.g., 'acestep-v15-turbo')")
 
-    bpm: Optional[int] = None
+    bpm: Optional[int] = Field(default=None, ge=30, le=300)
     # Accept common client keys via manual parsing (see RequestParser).
     key_scale: str = ""
     time_signature: str = ""
     vocal_language: str = "en"
-    inference_steps: int = 8
+    inference_steps: int = Field(default=8, ge=1, le=200)
     guidance_scale: float = 7.0
     use_random_seed: bool = True
     seed: int = -1
 
     reference_audio_path: Optional[str] = None
     src_audio_path: Optional[str] = None
-    audio_duration: Optional[float] = None
-    batch_size: Optional[int] = None
+    audio_duration: Optional[float] = Field(default=None, ge=10, le=600)
+    batch_size: Optional[int] = Field(default=None, ge=1, le=16)
 
     audio_code_string: str = ""
 
@@ -558,7 +558,7 @@ class GenerateMusicRequest(BaseModel):
     cfg_interval_end: float = 1.0
     infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
     shift: float = Field(
-        default=3.0,
+        default=3.0, ge=1.0, le=5.0,
         description="Timestep shift factor (range 1.0~5.0, default 3.0). Only effective for base models, not turbo models."
     )
     timesteps: Optional[str] = Field(
