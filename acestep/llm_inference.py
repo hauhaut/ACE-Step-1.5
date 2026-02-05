@@ -7,6 +7,8 @@ import re
 import traceback
 import time
 import random
+import pickle
+from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Optional, Dict, Any, Tuple, List, Union
 from contextlib import contextmanager
 
@@ -24,6 +26,36 @@ from acestep.constrained_logits_processor import MetadataConstrainedLogitsProces
 from acestep.constants import DEFAULT_LM_INSTRUCTION, DEFAULT_LM_UNDERSTAND_INSTRUCTION, DEFAULT_LM_INSPIRED_INSTRUCTION, DEFAULT_LM_REWRITE_INSTRUCTION
 from acestep.gpu_config import get_lm_gpu_memory_ratio, get_global_gpu_config
 
+
+
+# Background tokenizer preloading
+_tokenizer_future: Optional[Future] = None
+_tokenizer_executor: Optional[ThreadPoolExecutor] = None
+
+
+def _load_tokenizer_cached(model_path: str):
+    """Load tokenizer from pickle cache or create and cache it."""
+    cache_path = os.path.join(model_path, "tokenizer_cache.pkl")
+    if os.path.exists(cache_path):
+        with open(cache_path, "rb") as f:
+            return pickle.load(f)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
+    with open(cache_path, "wb") as f:
+        pickle.dump(tokenizer, f)
+    return tokenizer
+
+
+def start_tokenizer_preload(model_path: str) -> None:
+    """Start background tokenizer loading. Call early during app init."""
+    global _tokenizer_future, _tokenizer_executor
+    _tokenizer_executor = ThreadPoolExecutor(max_workers=1)
+    _tokenizer_future = _tokenizer_executor.submit(_load_tokenizer_cached, model_path)
+
+
+def get_preloaded_tokenizer():
+    """Get preloaded tokenizer if available, else None."""
+    global _tokenizer_future
+    return _tokenizer_future.result() if _tokenizer_future else None
 
 class LLMHandler:
     """5Hz LM Handler for audio code generation"""
@@ -413,11 +445,15 @@ class LLMHandler:
             if not os.path.exists(full_lm_model_path):
                 return f"❌ 5Hz LM model not found at {full_lm_model_path}", False
             
-            logger.info("loading 5Hz LM tokenizer... it may take 80~90s")
             start_time = time.time()
-            # TODO: load tokenizer too slow, not found solution yet
-            llm_tokenizer = AutoTokenizer.from_pretrained(full_lm_model_path, use_fast=True)
-            logger.info(f"5Hz LM tokenizer loaded successfully in {time.time() - start_time:.2f} seconds")
+            preloaded = get_preloaded_tokenizer()
+            if preloaded:
+                logger.info("Using preloaded tokenizer from background thread")
+                llm_tokenizer = preloaded
+            else:
+                logger.info("loading 5Hz LM tokenizer (no preload available)...")
+                llm_tokenizer = _load_tokenizer_cached(full_lm_model_path)
+            logger.info(f"5Hz LM tokenizer ready in {time.time() - start_time:.2f} seconds")
             self.llm_tokenizer = llm_tokenizer
             
             # Initialize shared constrained decoding processor (one-time initialization)
@@ -941,6 +977,12 @@ class LLMHandler:
         if 'bpm' in user_metadata and 'keyscale' in user_metadata and 'timesignature' in user_metadata and 'duration' in user_metadata:
             return True
         return False
+
+    def _get_cot_cache_key(self, caption: str, lyrics: str, use_cot_caption: bool,
+                          use_cot_language: bool, use_cot_metas: bool) -> str:
+        """Generate cache key for CoT metadata (only valid for temperature=0)."""
+        key_data = f"{caption}|{lyrics}|{use_cot_caption}|{use_cot_language}|{use_cot_metas}"
+        return f"cot:{hashlib.sha256(key_data.encode()).hexdigest()[:32]}"
     
     def _format_metadata_as_cot(self, metadata: Dict[str, Any]) -> str:
         """
