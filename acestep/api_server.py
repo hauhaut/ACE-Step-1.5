@@ -892,7 +892,7 @@ def create_app() -> FastAPI:
         for p in [cache_root, tmp_root, triton_cache_root, inductor_cache_root]:
             try:
                 os.makedirs(p, exist_ok=True)
-            except Exception:
+            except OSError:
                 # Best-effort: do not block startup if directory creation fails.
                 pass
 
@@ -987,7 +987,7 @@ def create_app() -> FastAPI:
             for p in paths:
                 try:
                     os.remove(p)
-                except Exception:
+                except OSError:
                     pass
 
         def _update_local_cache(job_id: str, result: Optional[Dict], status: str) -> None:
@@ -1947,7 +1947,7 @@ def create_app() -> FastAPI:
             for p in temp_files:
                 try:
                     os.remove(p)
-                except Exception:
+                except OSError:
                     pass
             raise HTTPException(status_code=429, detail="Server busy: queue is full")
 

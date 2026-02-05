@@ -1116,7 +1116,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             mtime = os.path.getmtime(self.genres_vocab_path)
             if mtime > self.genres_vocab_mtime:
                 self._load_genres_vocab()
-        except Exception:
+        except OSError:
             pass  # Ignore errors during hot reload check
     
     def _get_genres_trie_node(self, prefix: str) -> Optional[Dict]:
