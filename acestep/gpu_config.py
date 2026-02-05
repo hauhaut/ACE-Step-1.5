@@ -11,6 +11,7 @@ Debug Mode:
 
 import os
 from dataclasses import dataclass
+from threading import Lock
 from typing import Optional, List, Dict, Tuple
 from loguru import logger
 
@@ -382,13 +383,16 @@ def print_gpu_config_info(gpu_config: GPUConfig):
 
 # Global GPU config instance (initialized lazily)
 _global_gpu_config: Optional[GPUConfig] = None
+_global_gpu_config_lock = Lock()
 
 
 def get_global_gpu_config() -> GPUConfig:
     """Get the global GPU configuration, initializing if necessary."""
     global _global_gpu_config
     if _global_gpu_config is None:
-        _global_gpu_config = get_gpu_config()
+        with _global_gpu_config_lock:
+            if _global_gpu_config is None:
+                _global_gpu_config = get_gpu_config()
     return _global_gpu_config
 
 

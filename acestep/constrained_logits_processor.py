@@ -1,6 +1,7 @@
 
+from collections import deque
 from enum import Enum, auto
-from typing import Optional, Dict, Any, Tuple, List, Callable, Set
+from typing import Optional, Dict, Any, Tuple, List, Callable, Set, Deque
 from loguru import logger
 from transformers import AutoTokenizer
 from transformers.generation.logits_process import LogitsProcessor
@@ -156,7 +157,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.pending_field_name = ""  # Accumulate field name tokens when caption is ending
         
         # Token queue for user-provided fields (injected directly without generation)
-        self.user_field_token_queue: List[int] = []
+        self.user_field_token_queue: Deque[int] = deque()
         self.current_user_field: Optional[str] = None  # Current field being injected
         
         # Pre-compute token IDs for efficiency
@@ -1160,7 +1161,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         4. For each candidate token, verify the full decoded text forms a valid trie prefix
         """
         if not self.genres_vocab:
-            # No vocab loaded, allow all except newline if empty
+            # No vocab loaded, caller handles fallback to probability-based ending
             return []
         
         # Use the full accumulated value (don't split by comma - treat as single entry)
@@ -1254,7 +1255,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.accumulated_value = ""  # Legacy, kept for compatibility
         self.accumulated_token_ids = []  # Reset token ID sequence
         self.codes_count = 0  # Reset codes counter
-        self.user_field_token_queue = []  # Reset user field token queue
+        self.user_field_token_queue = deque()  # Reset user field token queue
         self.current_user_field = None  # Reset current user field
         self.caption_after_newline = False  # Reset caption newline tracking
         self.caption_token_count = 0  # Reset caption token count
@@ -1788,7 +1789,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "bpm"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -1802,8 +1803,12 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             if token_prefix in self.bpm_prefix_tree and self.newline_token in self.bpm_prefix_tree[token_prefix]:
                 allowed = allowed + [self.newline_token]
             
-            self._apply_whitelist_inplace(scores, allowed)
-        
+            if allowed:
+                self._apply_whitelist_inplace(scores, allowed)
+            elif self.newline_token:
+                # No valid continuation, force newline to end field
+                self._apply_whitelist_inplace(scores, [self.newline_token])
+
         elif self.state == FSMState.CAPTION_VALUE:
             # Caption field generation with YAML format support:
             # - Allow newlines and spaces (YAML multi-line formatting)
@@ -1818,7 +1823,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "caption"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -1883,7 +1888,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "duration"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -1907,13 +1912,17 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 # Normal duration generation with range constraint
                 # Allow valid numeric tokens using prefix tree (supports multi-digit tokens like "60", "120")
                 allowed = self._get_allowed_numeric_tokens(self.duration_prefix_tree)
-                
+
                 # Also allow newline if current token sequence prefix allows it
                 token_prefix = tuple(self.accumulated_token_ids)
                 if token_prefix in self.duration_prefix_tree and self.newline_token in self.duration_prefix_tree[token_prefix]:
                     allowed = allowed + [self.newline_token]
-                
-                self._apply_whitelist_inplace(scores, allowed)
+
+                if allowed:
+                    self._apply_whitelist_inplace(scores, allowed)
+                elif self.newline_token:
+                    # No valid continuation, force newline to end field
+                    self._apply_whitelist_inplace(scores, [self.newline_token])
         
         elif self.state == FSMState.GENRES_VALUE:
             # Check if field is user-provided and we haven't started injecting yet
@@ -1923,7 +1932,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "genres"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -1966,7 +1975,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "keyscale"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -2002,7 +2011,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "language"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -2066,7 +2075,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 value_text = f" {value}\n"
                 value_tokens = self.tokenizer.encode(value_text, add_special_tokens=False)
                 if value_tokens:
-                    self.user_field_token_queue = value_tokens
+                    self.user_field_token_queue = deque(value_tokens)
                     self.current_user_field = "timesignature"
                     # Inject first token
                     self._apply_whitelist_inplace(scores, [value_tokens[0]])
@@ -2081,7 +2090,11 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             else:
                 # Not complete, allow valid continuation tokens
                 allowed = self._get_allowed_timesig_tokens()
-                self._apply_whitelist_inplace(scores, allowed)
+                if allowed:
+                    self._apply_whitelist_inplace(scores, allowed)
+                elif self.newline_token:
+                    # No valid continuation, force newline to end field
+                    self._apply_whitelist_inplace(scores, [self.newline_token])
         
         return scores
     
@@ -2145,7 +2158,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     logger.warning(f"Expected token {expected_token} but got {generated_token_id} for user-provided field {self.current_user_field}")
             
             # Remove consumed token from queue
-            self.user_field_token_queue.pop(0)
+            self.user_field_token_queue.popleft()
             
             # If queue is empty, field injection is complete, transition to next state
             if not self.user_field_token_queue:
