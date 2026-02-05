@@ -254,6 +254,7 @@ def load_preset(preset_name, llm_handler=None):
     if not preset_name:
         return [None] * 36 + [False]
     
+    preset_name = os.path.basename(preset_name)
     filepath = Path("./presets") / f"{preset_name}.json"
     if not filepath.exists():
         gr.Warning(t("messages.preset_not_found", name=preset_name))

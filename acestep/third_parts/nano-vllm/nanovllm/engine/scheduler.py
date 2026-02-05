@@ -189,29 +189,32 @@ class Scheduler:
         is_cfg_batch = False
         if len(seqs) > 0 and seqs[0].cfg_scale > 1.0 and seqs[0].paired_seq is not None:
             num_cond = len(seqs) // 2
-            is_cfg_batch = (num_cond > 0 and 
-                           not seqs[0].is_unconditional and 
+            is_cfg_batch = (num_cond > 0 and
+                           not seqs[0].is_unconditional and
                            seqs[num_cond].is_unconditional)
-        
+
+        finished = []
         if is_cfg_batch:
             # CFG batch: seqs = [cond_seq1, cond_seq2, ..., uncond_seq1, uncond_seq2, ...]
             # token_ids correspond to conditional sequences only (sampled from CFG logits)
             num_cond = len(seqs) // 2
             cond_seqs = seqs[:num_cond]
             uncond_seqs = seqs[num_cond:]
-            
+
             # Apply the same sampled token to both conditional and unconditional sequences
             for i, (cond_seq, uncond_seq, token_id) in enumerate(zip(cond_seqs, uncond_seqs, token_ids)):
                 cond_seq.append_token(token_id)
                 uncond_seq.append_token(token_id)  # Same token for unconditional
-                
+
                 # Check if either sequence is finished
-                cond_finished = ((not cond_seq.ignore_eos and token_id == self.eos) or 
+                cond_finished = ((not cond_seq.ignore_eos and token_id == self.eos) or
                                 cond_seq.num_completion_tokens == cond_seq.max_tokens)
-                uncond_finished = ((not uncond_seq.ignore_eos and token_id == self.eos) or 
+                uncond_finished = ((not uncond_seq.ignore_eos and token_id == self.eos) or
                                   uncond_seq.num_completion_tokens == uncond_seq.max_tokens)
-                
-                if cond_finished or uncond_finished:
+
+                is_finished = cond_finished or uncond_finished
+                finished.append(is_finished)
+                if is_finished:
                     # Mark both as finished
                     cond_seq.status = SequenceStatus.FINISHED
                     uncond_seq.status = SequenceStatus.FINISHED
@@ -225,7 +228,10 @@ class Scheduler:
             # Normal batch
             for seq, token_id in zip(seqs, token_ids):
                 seq.append_token(token_id)
-                if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+                is_finished = (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens
+                finished.append(is_finished)
+                if is_finished:
                     seq.status = SequenceStatus.FINISHED
                     self.block_manager.deallocate(seq)
                     self.running.remove(seq)
+        return finished
