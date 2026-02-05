@@ -260,14 +260,25 @@ def _get_project_root() -> str:
     return os.path.dirname(os.path.dirname(current_file))
 
 
+def _get_int_env(name: str, default: int) -> int:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        logger.warning("Invalid value for %s: %r, using default %d", name, val, default)
+        return default
+
+
 # =============================================================================
 # Constants
 # =============================================================================
 
 RESULT_KEY_PREFIX = "ace_step_v1.5_"
-RESULT_EXPIRE_SECONDS = int(os.environ.get("ACESTEP_RESULT_EXPIRE_SECONDS", 604800))
-TASK_TIMEOUT_SECONDS = int(os.environ.get("ACESTEP_TASK_TIMEOUT_SECONDS", 3600))
-JOB_STORE_CLEANUP_INTERVAL = int(os.environ.get("ACESTEP_JOB_CLEANUP_INTERVAL", 300))
+RESULT_EXPIRE_SECONDS = _get_int_env("ACESTEP_RESULT_EXPIRE_SECONDS", 604800)
+TASK_TIMEOUT_SECONDS = _get_int_env("ACESTEP_TASK_TIMEOUT_SECONDS", 3600)
+JOB_STORE_CLEANUP_INTERVAL = _get_int_env("ACESTEP_JOB_CLEANUP_INTERVAL", 300)
 JOB_STORE_MAX_AGE_SECONDS = 86400  # 24 hours - completed jobs older than this will be cleaned
 STATUS_MAP = {"queued": 0, "running": 0, "succeeded": 1, "failed": 2, "cancelled": 3}
 
