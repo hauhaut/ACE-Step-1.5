@@ -407,7 +407,98 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             results_section["is_format_caption_state"]
         ]
     )
-    
+
+    # ========== Preset Save/Load ==========
+    generation_section["save_preset_btn"].click(
+        fn=gen_h.save_preset,
+        inputs=[
+            generation_section["preset_name_input"],
+            generation_section["task_type"],
+            generation_section["captions"],
+            generation_section["lyrics"],
+            generation_section["vocal_language"],
+            generation_section["bpm"],
+            generation_section["key_scale"],
+            generation_section["time_signature"],
+            generation_section["audio_duration"],
+            generation_section["batch_size_input"],
+            generation_section["inference_steps"],
+            generation_section["guidance_scale"],
+            generation_section["seed"],
+            generation_section["use_adg"],
+            generation_section["cfg_interval_start"],
+            generation_section["cfg_interval_end"],
+            generation_section["shift"],
+            generation_section["infer_method"],
+            generation_section["custom_timesteps"],
+            generation_section["audio_format"],
+            generation_section["lm_temperature"],
+            generation_section["lm_cfg_scale"],
+            generation_section["lm_top_k"],
+            generation_section["lm_top_p"],
+            generation_section["lm_negative_prompt"],
+            generation_section["use_cot_metas"],
+            generation_section["use_cot_caption"],
+            generation_section["use_cot_language"],
+            generation_section["audio_cover_strength"],
+            generation_section["think_checkbox"],
+            generation_section["text2music_audio_code_string"],
+            generation_section["repainting_start"],
+            generation_section["repainting_end"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
+            generation_section["instrumental_checkbox"],
+        ],
+        outputs=[
+            generation_section["preset_dropdown"],
+            generation_section["preset_status"],
+        ]
+    )
+
+    generation_section["preset_dropdown"].change(
+        fn=lambda name: gen_h.load_preset(name, llm_handler),
+        inputs=[generation_section["preset_dropdown"]],
+        outputs=[
+            generation_section["task_type"],
+            generation_section["captions"],
+            generation_section["lyrics"],
+            generation_section["vocal_language"],
+            generation_section["bpm"],
+            generation_section["key_scale"],
+            generation_section["time_signature"],
+            generation_section["audio_duration"],
+            generation_section["batch_size_input"],
+            generation_section["inference_steps"],
+            generation_section["guidance_scale"],
+            generation_section["seed"],
+            generation_section["random_seed_checkbox"],
+            generation_section["use_adg"],
+            generation_section["cfg_interval_start"],
+            generation_section["cfg_interval_end"],
+            generation_section["shift"],
+            generation_section["infer_method"],
+            generation_section["custom_timesteps"],
+            generation_section["audio_format"],
+            generation_section["lm_temperature"],
+            generation_section["lm_cfg_scale"],
+            generation_section["lm_top_k"],
+            generation_section["lm_top_p"],
+            generation_section["lm_negative_prompt"],
+            generation_section["use_cot_metas"],
+            generation_section["use_cot_caption"],
+            generation_section["use_cot_language"],
+            generation_section["audio_cover_strength"],
+            generation_section["think_checkbox"],
+            generation_section["text2music_audio_code_string"],
+            generation_section["repainting_start"],
+            generation_section["repainting_end"],
+            generation_section["track_name"],
+            generation_section["complete_track_classes"],
+            generation_section["instrumental_checkbox"],
+            results_section["is_format_caption_state"]
+        ]
+    )
+
     # Save buttons for all 8 audio outputs
     download_existing_js = """(current_audio, batch_files) => {
     // Debug: print what the input actually is
