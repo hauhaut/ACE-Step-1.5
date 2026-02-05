@@ -1161,7 +1161,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         4. For each candidate token, verify the full decoded text forms a valid trie prefix
         """
         if not self.genres_vocab:
-            # No vocab loaded, allow all except newline if empty
+            # No vocab loaded, caller handles fallback to probability-based ending
             return []
         
         # Use the full accumulated value (don't split by comma - treat as single entry)
@@ -1908,13 +1908,17 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 # Normal duration generation with range constraint
                 # Allow valid numeric tokens using prefix tree (supports multi-digit tokens like "60", "120")
                 allowed = self._get_allowed_numeric_tokens(self.duration_prefix_tree)
-                
+
                 # Also allow newline if current token sequence prefix allows it
                 token_prefix = tuple(self.accumulated_token_ids)
                 if token_prefix in self.duration_prefix_tree and self.newline_token in self.duration_prefix_tree[token_prefix]:
                     allowed = allowed + [self.newline_token]
-                
-                self._apply_whitelist_inplace(scores, allowed)
+
+                if allowed:
+                    self._apply_whitelist_inplace(scores, allowed)
+                elif self.newline_token:
+                    # No valid continuation, force newline to end field
+                    self._apply_whitelist_inplace(scores, [self.newline_token])
         
         elif self.state == FSMState.GENRES_VALUE:
             # Check if field is user-provided and we haven't started injecting yet
@@ -2082,7 +2086,11 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             else:
                 # Not complete, allow valid continuation tokens
                 allowed = self._get_allowed_timesig_tokens()
-                self._apply_whitelist_inplace(scores, allowed)
+                if allowed:
+                    self._apply_whitelist_inplace(scores, allowed)
+                elif self.newline_token:
+                    # No valid continuation, force newline to end field
+                    self._apply_whitelist_inplace(scores, [self.newline_token])
         
         return scores
     
