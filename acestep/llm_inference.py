@@ -206,6 +206,9 @@ class LLMHandler:
         if not use_constrained_decoding and not use_phase_temperatures:
             return None
         
+        if self.constrained_processor is None:
+            raise RuntimeError("Constrained processor not initialized. Call initialize_5hz_lm with init_constrained_processor=True first.")
+        
         # Reset processor state for new generation
         self.constrained_processor.reset()
         

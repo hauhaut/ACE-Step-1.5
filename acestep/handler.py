@@ -582,7 +582,7 @@ class AceStepHandler:
         """Check if tensor is on the target device (handles cuda vs cuda:0 comparison)."""
         if tensor is None:
             return True
-        target_type = "cpu" if target_device == "cpu" else "cuda"
+        target_type = target_device.split(":")[0]
         return tensor.device.type == target_type
     
     def _ensure_silence_latent_on_device(self):
@@ -2051,8 +2051,8 @@ class AceStepHandler:
         for k, v in batch.items():
             if isinstance(v, torch.Tensor):
                 batch[k] = v.to(self.device)
-                if torch.is_floating_point(v):
-                    batch[k] = v.to(self.dtype)
+                if torch.is_floating_point(batch[k]):
+                    batch[k] = batch[k].to(self.dtype)
         return batch
     
     def infer_refer_latent(self, refer_audioss):
