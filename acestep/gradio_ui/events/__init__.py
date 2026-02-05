@@ -2,8 +2,12 @@
 Gradio UI Event Handlers Module
 Main entry point for setting up all event handlers
 """
+import logging
+from functools import partial
 import gradio as gr
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Import handler modules
 from . import generation_handlers as gen_h
@@ -43,7 +47,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     )
     
     generation_section["init_btn"].click(
-        fn=lambda *args: gen_h.init_service_wrapper(dit_handler, llm_handler, *args),
+        fn=partial(gen_h.init_service_wrapper, dit_handler, llm_handler),
         inputs=[
             generation_section["checkpoint_dropdown"],
             generation_section["config_path"],
@@ -102,7 +106,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     generation_section["load_lora_btn"].click(
         fn=load_lora_with_checkbox_update,
         inputs=[generation_section["lora_path"]],
-        outputs=[generation_section["lora_status"], generation_section["use_lora_checkbox"]]
+        outputs=[generation_section["lora_status"], generation_section["use_lora_checkbox"]],
+        show_progress="minimal"
     )
 
     def unload_lora_with_checkbox_update():
@@ -116,7 +121,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
 
     generation_section["unload_lora_btn"].click(
         fn=unload_lora_with_checkbox_update,
-        outputs=[generation_section["lora_status"], generation_section["use_lora_checkbox"]]
+        outputs=[generation_section["lora_status"], generation_section["use_lora_checkbox"]],
+        show_progress="minimal"
     )
     
     generation_section["use_lora_checkbox"].change(
@@ -168,7 +174,7 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     
     # ========== Audio Conversion ==========
     generation_section["convert_src_to_codes_btn"].click(
-        fn=lambda src: gen_h.convert_src_audio_to_codes_wrapper(dit_handler, src),
+        fn=partial(gen_h.convert_src_audio_to_codes_wrapper, dit_handler),
         inputs=[generation_section["src_audio"]],
         outputs=[generation_section["text2music_audio_code_string"]]
     )
