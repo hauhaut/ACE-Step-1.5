@@ -1,7 +1,8 @@
-from typing import Callable, Dict, Any, List
+from typing import Callable, Dict, Any, List, Optional
 from dataclasses import dataclass
 from enum import Enum
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +27,16 @@ HookCallback = Callable[[HookContext], None]
 
 
 class HookRegistry:
-    _instance = None
+    _instance: Optional["HookRegistry"] = None
+    _creation_lock = threading.Lock()
+    _hooks: Dict[HookPoint, List[HookCallback]]
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._hooks: Dict[HookPoint, List[HookCallback]] = {p: [] for p in HookPoint}
-        return cls._instance
+    def __new__(cls) -> "HookRegistry":
+        with cls._creation_lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._hooks = {p: [] for p in HookPoint}
+            return cls._instance
 
     def register(self, hook_point: HookPoint, callback: HookCallback) -> None:
         self._hooks[hook_point].append(callback)
@@ -41,15 +45,15 @@ class HookRegistry:
         if callback in self._hooks[hook_point]:
             self._hooks[hook_point].remove(callback)
 
-    def clear(self, hook_point: HookPoint = None) -> None:
+    def clear(self, hook_point: Optional[HookPoint] = None) -> None:
         if hook_point:
             self._hooks[hook_point] = []
         else:
             self._hooks = {p: [] for p in HookPoint}
 
-    def fire(self, hook_point: HookPoint, data: Dict[str, Any] = None) -> None:
+    def fire(self, hook_point: HookPoint, data: Optional[Dict[str, Any]] = None) -> None:
         ctx = HookContext(hook_point=hook_point, data=data or {})
-        for cb in self._hooks[hook_point]:
+        for cb in list(self._hooks[hook_point]):
             try:
                 cb(ctx)
             except Exception as e:
