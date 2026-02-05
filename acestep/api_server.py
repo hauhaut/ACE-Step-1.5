@@ -147,8 +147,8 @@ def _can_access_google(timeout: float = 3.0) -> bool:
     """Check if Google is accessible (to determine HuggingFace vs ModelScope)."""
     import socket
     try:
-        socket.setdefaulttimeout(timeout)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
             s.connect(("www.google.com", 443))
         return True
     except (socket.timeout, socket.error, OSError):
