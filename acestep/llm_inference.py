@@ -2,6 +2,7 @@
 5Hz LM (Language Model) Handler
 Handles all LM-related operations including initialization and generation
 """
+import hashlib
 import os
 import re
 import traceback
@@ -25,6 +26,7 @@ from transformers.generation.logits_process import (
 from acestep.constrained_logits_processor import MetadataConstrainedLogitsProcessor
 from acestep.constants import DEFAULT_LM_INSTRUCTION, DEFAULT_LM_UNDERSTAND_INSTRUCTION, DEFAULT_LM_INSPIRED_INSTRUCTION, DEFAULT_LM_REWRITE_INSTRUCTION
 from acestep.gpu_config import get_lm_gpu_memory_ratio, get_global_gpu_config
+from acestep.local_cache import get_local_cache
 
 
 
@@ -36,12 +38,32 @@ _tokenizer_executor: Optional[ThreadPoolExecutor] = None
 def _load_tokenizer_cached(model_path: str):
     """Load tokenizer from pickle cache or create and cache it."""
     cache_path = os.path.join(model_path, "tokenizer_cache.pkl")
+    
+    # Try to load from cache
     if os.path.exists(cache_path):
-        with open(cache_path, "rb") as f:
-            return pickle.load(f)
+        try:
+            with open(cache_path, "rb") as f:
+                return pickle.load(f)
+        except Exception as e:
+            logger.warning(f"Corrupt tokenizer cache, regenerating: {e}")
+            try:
+                os.unlink(cache_path)
+            except OSError:
+                pass
+    
+    # Create tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
-    with open(cache_path, "wb") as f:
-        pickle.dump(tokenizer, f)
+    
+    # Atomic write to prevent corruption
+    try:
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(dir=model_path, suffix='.pkl.tmp')
+        with os.fdopen(fd, 'wb') as f:
+            pickle.dump(tokenizer, f)
+        os.replace(tmp_path, cache_path)
+    except Exception as e:
+        logger.warning(f"Failed to cache tokenizer: {e}")
+    
     return tokenizer
 
 
@@ -52,10 +74,16 @@ def start_tokenizer_preload(model_path: str) -> None:
     _tokenizer_future = _tokenizer_executor.submit(_load_tokenizer_cached, model_path)
 
 
-def get_preloaded_tokenizer():
+def get_preloaded_tokenizer(timeout: float = 300.0):
     """Get preloaded tokenizer if available, else None."""
     global _tokenizer_future
-    return _tokenizer_future.result() if _tokenizer_future else None
+    if _tokenizer_future:
+        try:
+            return _tokenizer_future.result(timeout=timeout)
+        except Exception as e:
+            logger.warning(f"Tokenizer preload failed or timed out: {e}")
+            return None
+    return None
 
 class LLMHandler:
     """5Hz LM Handler for audio code generation"""
