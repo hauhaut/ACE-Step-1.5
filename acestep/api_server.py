@@ -47,6 +47,9 @@ from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100MB
+ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac"}
+
 from acestep.handler import AceStepHandler
 from acestep.llm_inference import LLMHandler
 from acestep.constants import (
@@ -595,6 +598,14 @@ class CreateJobResponse(BaseModel):
     queue_position: int = 0  # 1-based best-effort position when queued
 
 
+class ValidationError(Exception):
+    """Exception for validation errors in background threads (not HTTPException)."""
+    def __init__(self, status_code: int, detail: str):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(detail)
+
+
 class JobResult(BaseModel):
     first_audio_path: Optional[str] = None
     second_audio_path: Optional[str] = None
@@ -707,6 +718,7 @@ class _JobStore:
 
         Only removes jobs with status 'succeeded' or 'failed'.
         Jobs that are 'queued' or 'running' are never removed.
+        Also deletes associated audio files.
 
         Returns the number of jobs removed.
         """
@@ -721,9 +733,17 @@ class _JobStore:
                     finish_time = rec.finished_at or rec.created_at
                     age = now - finish_time
                     if age > max_age:
-                        to_remove.append(job_id)
+                        to_remove.append((job_id, rec))
 
-            for job_id in to_remove:
+            for job_id, rec in to_remove:
+                # Delete audio files before removing job record
+                if rec.result and isinstance(rec.result, dict):
+                    for path in rec.result.get("_raw_audio_paths", []):
+                        try:
+                            if path and os.path.isfile(path):
+                                os.remove(path)
+                        except OSError:
+                            pass
                 del self._jobs[job_id]
                 removed += 1
 
@@ -904,15 +924,20 @@ class RequestParser:
 
 
 async def _save_upload_to_temp(upload: StarletteUploadFile, *, prefix: str) -> str:
-    suffix = Path(upload.filename or "").suffix
+    suffix = Path(upload.filename or "").suffix.lower()
+    if suffix not in ALLOWED_AUDIO_EXTENSIONS:
+        raise HTTPException(400, f"Invalid file type. Allowed: {', '.join(sorted(ALLOWED_AUDIO_EXTENSIONS))}")
     fd, path = tempfile.mkstemp(prefix=f"{prefix}_", suffix=suffix)
-    os.close(fd)
     try:
-        with open(path, "wb") as f:
+        written = 0
+        with os.fdopen(fd, "wb") as f:
             while True:
                 chunk = await upload.read(1024 * 1024)
                 if not chunk:
                     break
+                written += len(chunk)
+                if written > MAX_UPLOAD_SIZE:
+                    raise HTTPException(413, f"File too large. Max size: {MAX_UPLOAD_SIZE // (1024*1024)}MB")
                 f.write(chunk)
     except Exception:
         try:
@@ -1434,12 +1459,12 @@ def create_app() -> FastAPI:
                     max_dur = gpu_config.max_duration_with_lm if lm_active else gpu_config.max_duration_without_lm
 
                     if batch_size > max_batch:
-                        raise HTTPException(
+                        raise ValidationError(
                             status_code=400,
                             detail=f"batch_size {batch_size} exceeds limit {max_batch} for GPU tier {gpu_config.tier}"
                         )
                     if audio_duration and audio_duration > max_dur:
-                        raise HTTPException(
+                        raise ValidationError(
                             status_code=400,
                             detail=f"audio_duration {audio_duration}s exceeds limit {max_dur}s for GPU tier {gpu_config.tier}"
                         )
@@ -1540,6 +1565,7 @@ def create_app() -> FastAPI:
                     "first_audio_path": _path_to_audio_url(first_audio) if first_audio else None,
                     "second_audio_path": _path_to_audio_url(second_audio) if second_audio else None,
                     "audio_paths": [_path_to_audio_url(p) for p in audio_paths],
+                    "_raw_audio_paths": audio_paths,  # For cleanup
                     "generation_info": generation_info,
                     "status_message": result.status_message,
                     "seed_value": seed_value,
@@ -1565,6 +1591,10 @@ def create_app() -> FastAPI:
 
                 # Update local cache
                 _update_local_cache(job_id, result, "succeeded")
+            except ValidationError as ve:
+                # Validation errors get stored with status_code for proper 400 response
+                job_store.mark_failed(job_id, f"[{ve.status_code}] {ve.detail}")
+                _update_local_cache(job_id, None, "failed")
             except Exception:
                 job_store.mark_failed(job_id, traceback.format_exc())
 

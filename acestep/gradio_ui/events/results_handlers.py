@@ -238,13 +238,11 @@ def lrc_to_vtt_file(lrc_text: str, total_duration: float = None) -> Optional[str
     
     vtt_content = "\n".join(vtt_lines)
     
-    # Create temp directory and save VTT file
+    # Create temp VTT file (no extra directory needed)
     try:
-        temp_dir = tempfile.mkdtemp(prefix="acestep_vtt_")
-        vtt_path = os.path.join(temp_dir, "subtitles.vtt")
-        with open(vtt_path, "w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".vtt", prefix="acestep_", delete=False, encoding="utf-8") as f:
             f.write(vtt_content)
-        return vtt_path
+            return f.name
     except Exception as e:
         logger.error(f"[lrc_to_vtt_file] Failed to create VTT file: {e}")
         return None
@@ -676,17 +674,18 @@ def generate_with_progress(
         None,  # raw_codes placeholder
     )
     time_module.sleep(0.1)
-    
+
+    # Create single temp dir for this batch (not per-audio)
+    batch_temp_dir = tempfile.mkdtemp(prefix="acestep_gradio_results_")
+
     for i in range(8):
         if i < len(audios):
             key = audios[i]["key"]
             audio_tensor = audios[i]["tensor"]
             sample_rate = audios[i]["sample_rate"]
             audio_params = audios[i]["params"]
-            temp_dir = tempfile.mkdtemp(f"acestep_gradio_results/")
-            os.makedirs(temp_dir, exist_ok=True)
-            json_path = os.path.join(temp_dir, f"{key}.json")
-            audio_path = os.path.join(temp_dir, f"{key}.{audio_format}")
+            json_path = os.path.join(batch_temp_dir, f"{key}.json")
+            audio_path = os.path.join(batch_temp_dir, f"{key}.{audio_format}")
             save_audio(audio_data=audio_tensor, output_path=audio_path, sample_rate=sample_rate, format=audio_format, channels_first=True)
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(audio_params, f, indent=2, ensure_ascii=False)

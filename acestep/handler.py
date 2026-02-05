@@ -3069,6 +3069,8 @@ class AceStepHandler:
         except Exception as e:
             error_msg = f"❌ Error: {str(e)}\n{traceback.format_exc()}"
             logger.exception("[generate_music] Generation failed")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             return {
                 "audios": [],
                 "status_message": error_msg,
