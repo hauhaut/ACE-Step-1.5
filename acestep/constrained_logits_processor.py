@@ -1803,8 +1803,12 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             if token_prefix in self.bpm_prefix_tree and self.newline_token in self.bpm_prefix_tree[token_prefix]:
                 allowed = allowed + [self.newline_token]
             
-            self._apply_whitelist_inplace(scores, allowed)
-        
+            if allowed:
+                self._apply_whitelist_inplace(scores, allowed)
+            elif self.newline_token:
+                # No valid continuation, force newline to end field
+                self._apply_whitelist_inplace(scores, [self.newline_token])
+
         elif self.state == FSMState.CAPTION_VALUE:
             # Caption field generation with YAML format support:
             # - Allow newlines and spaces (YAML multi-line formatting)

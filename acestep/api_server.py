@@ -2336,7 +2336,7 @@ def create_app() -> FastAPI:
                 app.state._llm_initialized = True
                 return None
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         init_err = await loop.run_in_executor(None, _init_llm_sync)
         if init_err:
             raise HTTPException(status_code=500, detail=init_err)
