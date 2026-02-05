@@ -1545,7 +1545,6 @@ def create_app() -> FastAPI:
                             pass
 
                     if not store.mark_running(job_id):
-                        app.state.job_queue.task_done()
                         continue
                     await _run_one_job(job_id, req)
                 finally:
