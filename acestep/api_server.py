@@ -260,14 +260,25 @@ def _get_project_root() -> str:
     return os.path.dirname(os.path.dirname(current_file))
 
 
+def _get_int_env(name: str, default: int) -> int:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        logger.warning("Invalid value for %s: %r, using default %d", name, val, default)
+        return default
+
+
 # =============================================================================
 # Constants
 # =============================================================================
 
 RESULT_KEY_PREFIX = "ace_step_v1.5_"
-RESULT_EXPIRE_SECONDS = 7 * 24 * 60 * 60  # 7 days
-TASK_TIMEOUT_SECONDS = 3600  # 1 hour
-JOB_STORE_CLEANUP_INTERVAL = 300  # 5 minutes - interval for cleaning up old jobs
+RESULT_EXPIRE_SECONDS = _get_int_env("ACESTEP_RESULT_EXPIRE_SECONDS", 604800)
+TASK_TIMEOUT_SECONDS = _get_int_env("ACESTEP_TASK_TIMEOUT_SECONDS", 3600)
+JOB_STORE_CLEANUP_INTERVAL = _get_int_env("ACESTEP_JOB_CLEANUP_INTERVAL", 300)
 JOB_STORE_MAX_AGE_SECONDS = 86400  # 24 hours - completed jobs older than this will be cleaned
 STATUS_MAP = {"queued": 0, "running": 0, "succeeded": 1, "failed": 2, "cancelled": 3}
 
@@ -452,6 +463,8 @@ class GenerateMusicRequest(BaseModel):
     instruction: str = DEFAULT_DIT_INSTRUCTION
     audio_cover_strength: float = 1.0
     task_type: str = "text2music"
+    track_name: Optional[str] = Field(default=None, description="Track name for lego/extract tasks (e.g., 'vocals', 'drums')")
+    complete_track_classes: Optional[List[str]] = Field(default=None, description="Track classes for complete task (e.g., ['vocals', 'drums'])")
 
     use_adg: bool = False
     cfg_interval_start: float = 0.0
@@ -1308,10 +1321,12 @@ def create_app() -> FastAPI:
                 actual_inference_steps = len(parsed_timesteps) if parsed_timesteps else req.inference_steps
 
                 # Auto-select instruction based on task_type if user didn't provide custom instruction
-                # This matches gradio behavior which uses TASK_INSTRUCTIONS for each task type
+                # Uses handler.generate_instruction() to support track_name/complete_track_classes
                 instruction_to_use = req.instruction
-                if instruction_to_use == DEFAULT_DIT_INSTRUCTION and req.task_type in TASK_INSTRUCTIONS:
-                    instruction_to_use = TASK_INSTRUCTIONS[req.task_type]
+                if instruction_to_use == DEFAULT_DIT_INSTRUCTION:
+                    instruction_to_use = h.generate_instruction(
+                        req.task_type, req.track_name, req.complete_track_classes
+                    )
 
                 # Build GenerationParams using unified interface
                 # Note: thinking controls LM code generation, sample_mode only affects CoT metas
@@ -2163,6 +2178,40 @@ def create_app() -> FastAPI:
         if rec is None:
             raise HTTPException(status_code=404, detail="Job not found")
         raise HTTPException(status_code=400, detail=f"Cannot cancel job in '{rec.status}' state")
+
+    @app.get("/v1/jobs/{job_id}")
+    async def get_job(job_id: str, _: None = Depends(verify_api_key)):
+        """Get status of a single job."""
+        rec = store.get(job_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        status_int = _map_status(rec.status)
+        queue_pos = 0
+        eta_secs = None
+        if rec.status == "queued":
+            queue_pos = await _queue_position(job_id)
+            if queue_pos > 0:
+                eta_secs = await _eta_seconds_for_position(queue_pos)
+        
+        response = {
+            "job_id": job_id,
+            "status": rec.status,
+            "status_code": status_int,
+            "created_at": rec.created_at,
+            "queue_position": queue_pos,
+            "eta_seconds": eta_secs,
+        }
+        if rec.started_at:
+            response["started_at"] = rec.started_at
+        if rec.finished_at:
+            response["finished_at"] = rec.finished_at
+        if rec.result and rec.status == "succeeded":
+            response["result"] = rec.result
+        if rec.error and rec.status == "failed":
+            response["error"] = rec.error
+        
+        return _wrap_response(response)
 
     @app.get("/v1/models")
     async def list_models(_: None = Depends(verify_api_key)):

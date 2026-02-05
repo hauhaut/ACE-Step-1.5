@@ -527,6 +527,7 @@ class LLMHandler:
         skip_genres: bool = True,
         skip_caption: bool = False,
         skip_language: bool = False,
+        skip_lyrics: bool = False,
         generation_phase: str = "cot",
         caption: str = "",
         lyrics: str = "",
@@ -570,6 +571,7 @@ class LLMHandler:
                     skip_genres=skip_genres,
                     skip_caption=skip_caption,
                     skip_language=skip_language,
+                    skip_lyrics=skip_lyrics,
                     generation_phase=generation_phase,
                     caption=caption,
                     lyrics=lyrics,
@@ -974,6 +976,7 @@ class LLMHandler:
         use_cot_metas: bool = True,
         use_cot_caption: bool = True,
         use_cot_language: bool = True,
+        use_cot_lyrics: bool = False,
         batch_size: Optional[int] = None,
         seeds: Optional[List[int]] = None,
         progress=None,
@@ -1066,6 +1069,7 @@ class LLMHandler:
                     "user_metadata": user_metadata,
                     "skip_caption": not use_cot_caption,
                     "skip_language": not use_cot_language,
+                    "skip_lyrics": not use_cot_lyrics,
                     "skip_genres": True,  # Generate genres
                     "generation_phase": "cot",
                     # Pass context for building unconditional prompt in CoT phase
@@ -2023,6 +2027,7 @@ class LLMHandler:
         user_metadata = cfg.get("user_metadata")  # User-provided metadata fields
         skip_caption = cfg.get("skip_caption", False)  # Skip caption generation in CoT
         skip_language = cfg.get("skip_language", False)  # Skip language generation in CoT
+        skip_lyrics = cfg.get("skip_lyrics", False)  # Skip lyrics generation in CoT
         skip_genres = cfg.get("skip_genres", False)  # Skip genres generation in CoT
         generation_phase = cfg.get("generation_phase", "cot")  # "cot" or "codes"
         # Additional context for codes phase unconditional prompt building
@@ -2048,6 +2053,7 @@ class LLMHandler:
                     skip_genres=skip_genres,
                     skip_caption=skip_caption,
                     skip_language=skip_language,
+                    skip_lyrics=skip_lyrics,
                     generation_phase=generation_phase,
                     caption=caption,
                     lyrics=lyrics,
@@ -2072,6 +2078,7 @@ class LLMHandler:
                 skip_genres=skip_genres,
                 skip_caption=skip_caption,
                 skip_language=skip_language,
+                skip_lyrics=skip_lyrics,
                 generation_phase=generation_phase,
                 caption=caption,
                 lyrics=lyrics,

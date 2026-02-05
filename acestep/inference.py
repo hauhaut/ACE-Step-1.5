@@ -14,6 +14,7 @@ from loguru import logger
 
 from acestep.audio_utils import AudioSaver, generate_uuid_from_params
 from acestep.hooks import hooks, HookPoint
+from acestep.constants import BPM_MIN, BPM_MAX, DURATION_MIN, DURATION_MAX
 
 # HuggingFace Space environment detection
 IS_HUGGINGFACE_SPACE = os.environ.get("SPACE_ID") is not None
@@ -142,6 +143,14 @@ class GenerationParams:
     cot_vocal_language: str = "unknown"
     cot_caption: str = ""
     cot_lyrics: str = ""
+
+
+    def __post_init__(self):
+        """Validate bpm and duration constraints."""
+        if self.bpm is not None and not (BPM_MIN <= self.bpm <= BPM_MAX):
+            raise ValueError(f"bpm must be between {BPM_MIN} and {BPM_MAX}, got {self.bpm}")
+        if self.duration > 0 and not (DURATION_MIN <= self.duration <= DURATION_MAX):
+            raise ValueError(f"duration must be between {DURATION_MIN} and {DURATION_MAX}, got {self.duration}")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for JSON serialization."""
@@ -379,7 +388,7 @@ def generate_music(
         # 2. use_cot_caption=True: enhance/generate caption via CoT
         # 3. use_cot_language=True: detect vocal language via CoT
         # 4. use_cot_metas=True: fill missing metadata via CoT
-        need_lm_for_cot = params.use_cot_caption or params.use_cot_language or params.use_cot_metas
+        need_lm_for_cot = params.use_cot_caption or params.use_cot_language or params.use_cot_metas or params.use_cot_lyrics
         use_lm = (params.thinking or need_lm_for_cot) and llm_handler is not None and llm_handler.llm_initialized and params.task_type not in skip_lm_tasks
         lm_status = []
         
@@ -388,8 +397,8 @@ def generate_music(
         
         logger.info(f"[generate_music] LLM usage decision: thinking={params.thinking}, "
                    f"use_cot_caption={params.use_cot_caption}, use_cot_language={params.use_cot_language}, "
-                   f"use_cot_metas={params.use_cot_metas}, need_lm_for_cot={need_lm_for_cot}, "
-                   f"llm_initialized={llm_handler.llm_initialized if llm_handler else False}, use_lm={use_lm}")
+                   f"use_cot_lyrics={params.use_cot_lyrics}, use_cot_metas={params.use_cot_metas}, "
+                   f"need_lm_for_cot={need_lm_for_cot}, llm_initialized={llm_handler.llm_initialized if llm_handler else False}, use_lm={use_lm}")
         
         if use_lm:
             hooks.fire(HookPoint.LM_PHASE_START, {"params": params.to_dict()})
@@ -464,6 +473,7 @@ def generate_music(
                     user_metadata=user_metadata_to_pass,
                     use_cot_caption=params.use_cot_caption,
                     use_cot_language=params.use_cot_language,
+                    use_cot_lyrics=params.use_cot_lyrics,
                     use_cot_metas=params.use_cot_metas,
                     use_constrained_decoding=params.use_constrained_decoding,
                     constrained_decoding_debug=config.constrained_decoding_debug,

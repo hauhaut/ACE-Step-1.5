@@ -6,6 +6,8 @@ from loguru import logger
 from transformers import AutoTokenizer
 from transformers.generation.logits_process import LogitsProcessor
 import os
+import pickle
+import hashlib
 import torch
 from acestep.constants import (
     VALID_LANGUAGES,
@@ -25,6 +27,57 @@ from acestep.constants import (
 # Audio Code Constants
 # ==============================================================================
 MAX_AUDIO_CODE = 63999  # Maximum valid audio code value (codebook size = 64000)
+
+
+# ==============================================================================
+# Token Mapping Cache
+# ==============================================================================
+_TOKEN_CACHE_VERSION = 1
+
+def _get_tokenizer_cache_key(tokenizer: AutoTokenizer) -> str:
+    """Generate cache key from tokenizer identity."""
+    name = getattr(tokenizer, 'name_or_path', '') or ''
+    vocab_size = len(tokenizer)
+    return hashlib.md5(f"{name}:{vocab_size}:v{_TOKEN_CACHE_VERSION}".encode()).hexdigest()[:16]
+
+def _get_cache_path(tokenizer: AutoTokenizer) -> str:
+    """Get cache file path. Uses XDG cache dir or fallback."""
+    cache_dir = os.environ.get('XDG_CACHE_HOME', os.path.expanduser('~/.cache'))
+    cache_dir = os.path.join(cache_dir, 'acestep')
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, f"tokenmap_{_get_tokenizer_cache_key(tokenizer)}.pkl")
+
+def _load_token_cache(tokenizer: AutoTokenizer) -> Optional[Dict]:
+    """Load cached token mappings. Returns None on miss/error."""
+    try:
+        path = _get_cache_path(tokenizer)
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            # Validate cache has expected keys and vocab size matches
+            if (data.get('vocab_size') == len(tokenizer) and
+                'char_to_tokens' in data and 'token_to_text' in data and 'audio_codes' in data):
+                logger.info(f"Loaded token mapping cache from {path}")
+                return data
+    except Exception as e:
+        logger.debug(f"Cache load failed: {e}")
+    return None
+
+def _save_token_cache(tokenizer: AutoTokenizer, char_to_tokens: Dict, token_to_text: Dict, audio_codes: Set) -> None:
+    """Save token mappings to cache."""
+    try:
+        path = _get_cache_path(tokenizer)
+        data = {
+            'vocab_size': len(tokenizer),
+            'char_to_tokens': char_to_tokens,
+            'token_to_text': token_to_text,
+            'audio_codes': audio_codes,
+        }
+        with open(path, 'wb') as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        logger.info(f"Saved token mapping cache to {path}")
+    except Exception as e:
+        logger.warning(f"Cache save failed: {e}")
 
 
 # ==============================================================================
@@ -160,8 +213,9 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.user_field_token_queue: Deque[int] = deque()
         self.current_user_field: Optional[str] = None  # Current field being injected
         
-        # Pre-compute token IDs for efficiency
-        self._precompute_tokens()
+        # Pre-compute token IDs for efficiency (with caching for expensive vocab iteration)
+        cached = _load_token_cache(tokenizer)
+        self._precompute_tokens(skip_audio_codes=cached is not None)
 
         # Genres vocabulary for constrained decoding
         self.genres_vocab_path = genres_vocab_path or os.path.join(
@@ -172,11 +226,17 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.genres_trie: Dict = {}  # Trie for full vocab (fallback)
         self.caption_genres_trie: Dict = {}  # Trie for caption-matched genres (priority)
         self.caption_matched_genres: List[str] = []  # Genres matched from caption
-        
-        self._char_to_tokens: Dict[str, set] = {}  # Precomputed char -> token IDs mapping
-        
-        # Precompute token mappings once (O(vocab_size), runs once at init)
-        self._precompute_char_token_mapping()
+
+        # Load from cache or compute token mappings (O(vocab_size))
+        if cached:
+            self._char_to_tokens = cached['char_to_tokens']
+            self._token_to_text = cached['token_to_text']
+            self.audio_code_token_ids = cached['audio_codes']
+            self._build_audio_code_mask()  # Rebuild mask from cached token ids
+        else:
+            self._char_to_tokens: Dict[str, set] = {}
+            self._precompute_char_token_mapping()
+            _save_token_cache(tokenizer, self._char_to_tokens, self._token_to_text, self.audio_code_token_ids)
         
         # Field definitions (needed before building prefix trees)
         # Note: duration max uses self.max_duration which can be dynamically updated based on GPU config
@@ -438,7 +498,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
             else:
                 logger.debug("No user-provided metadata, all fields will be generated")
     
-    def _precompute_tokens(self):
+    def _precompute_tokens(self, skip_audio_codes: bool = False):
         """Pre-compute commonly used token IDs for efficiency."""
         # Digit tokens (0-9)
         self.digit_tokens = {}
@@ -509,14 +569,16 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         # Precompute audio code token IDs (tokens matching <|audio_code_\d+|>)
         # These should be blocked during caption generation
         self.audio_code_token_ids: Set[int] = set()
-        self._precompute_audio_code_tokens()
+        if not skip_audio_codes:
+            self._precompute_audio_code_tokens()
         
         # Precompute audio code mask for efficient blocking (O(1) instead of O(n))
         # This mask will be added to scores during caption generation
         self.audio_code_mask: Optional[torch.Tensor] = None
         # Inverse mask: block all non-audio-code tokens (for CODES_GENERATION state)
         self.non_audio_code_mask: Optional[torch.Tensor] = None
-        self._build_audio_code_mask()
+        if not skip_audio_codes:
+            self._build_audio_code_mask()
         
         # Build valid keyscales set (prefix tree will be built after _char_to_tokens is initialized)
         # 7 notes × 5 accidentals (none, #, b, ♯, ♭) × 2 modes = 70 valid combinations
