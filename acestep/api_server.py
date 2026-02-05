@@ -19,6 +19,7 @@ import asyncio
 import glob
 import hmac
 import json
+import logging
 import os
 import random
 import sys
@@ -26,6 +27,8 @@ import time
 import traceback
 import tempfile
 import urllib.parse
+
+logger = logging.getLogger(__name__)
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -184,11 +187,11 @@ def _download_from_huggingface(repo_id: str, local_dir: str, model_name: str) ->
 
     if is_unified_repo:
         download_dir = local_dir
-        print(f"[Model Download] Downloading unified repo {repo_id} to {download_dir}...")
+        logger.info("Downloading unified repo %s to %s", repo_id, download_dir)
     else:
         download_dir = os.path.join(local_dir, model_name)
         os.makedirs(download_dir, exist_ok=True)
-        print(f"[Model Download] Downloading {model_name} from {repo_id} to {download_dir}...")
+        logger.info("Downloading %s from %s to %s", model_name, repo_id, download_dir)
 
     snapshot_download(
         repo_id=repo_id,
@@ -207,11 +210,11 @@ def _download_from_modelscope(repo_id: str, local_dir: str, model_name: str) -> 
 
     if is_unified_repo:
         download_dir = local_dir
-        print(f"[Model Download] Downloading unified repo {repo_id} from ModelScope to {download_dir}...")
+        logger.info("Downloading unified repo %s from ModelScope to %s", repo_id, download_dir)
     else:
         download_dir = os.path.join(local_dir, model_name)
         os.makedirs(download_dir, exist_ok=True)
-        print(f"[Model Download] Downloading {model_name} from ModelScope {repo_id} to {download_dir}...")
+        logger.info("Downloading %s from ModelScope %s to %s", model_name, repo_id, download_dir)
 
     snapshot_download(
         model_id=repo_id,
@@ -236,13 +239,13 @@ def _ensure_model_downloaded(model_name: str, checkpoint_dir: str) -> str:
 
     # Check if model already exists
     if os.path.exists(model_path) and os.listdir(model_path):
-        print(f"[Model Download] Model {model_name} already exists at {model_path}")
+        logger.info("Model %s already exists at %s", model_name, model_path)
         return model_path
 
     # Get repository ID
     repo_id = MODEL_REPO_MAPPING.get(model_name, DEFAULT_REPO_ID)
 
-    print(f"[Model Download] Model {model_name} not found, checking network...")
+    logger.info("Model %s not found, checking network...", model_name)
 
     # Check for user preference
     prefer_source = os.environ.get("ACESTEP_DOWNLOAD_SOURCE", "").lower()
@@ -250,29 +253,29 @@ def _ensure_model_downloaded(model_name: str, checkpoint_dir: str) -> str:
     # Determine download source
     if prefer_source == "huggingface":
         use_huggingface = True
-        print("[Model Download] User preference: HuggingFace Hub")
+        logger.info("User preference: HuggingFace Hub")
     elif prefer_source == "modelscope":
         use_huggingface = False
-        print("[Model Download] User preference: ModelScope")
+        logger.info("User preference: ModelScope")
     else:
         use_huggingface = _can_access_google()
-        print(f"[Model Download] Auto-detected: {'HuggingFace Hub' if use_huggingface else 'ModelScope'}")
+        logger.info("Auto-detected: %s", "HuggingFace Hub" if use_huggingface else "ModelScope")
 
     if use_huggingface:
-        print("[Model Download] Using HuggingFace Hub...")
+        logger.info("Using HuggingFace Hub...")
         try:
             return _download_from_huggingface(repo_id, checkpoint_dir, model_name)
         except Exception as e:
-            print(f"[Model Download] HuggingFace download failed: {e}")
-            print("[Model Download] Falling back to ModelScope...")
+            logger.warning("HuggingFace download failed: %s", e)
+            logger.info("Falling back to ModelScope...")
             return _download_from_modelscope(repo_id, checkpoint_dir, model_name)
     else:
-        print("[Model Download] Using ModelScope...")
+        logger.info("Using ModelScope...")
         try:
             return _download_from_modelscope(repo_id, checkpoint_dir, model_name)
         except Exception as e:
-            print(f"[Model Download] ModelScope download failed: {e}")
-            print("[Model Download] Trying HuggingFace as fallback...")
+            logger.warning("ModelScope download failed: %s", e)
+            logger.info("Trying HuggingFace as fallback...")
             return _download_from_huggingface(repo_id, checkpoint_dir, model_name)
 
 
@@ -328,7 +331,7 @@ def _load_all_examples(sample_mode: str = "simple_mode") -> List[Dict[str, Any]]
                 data = json.load(f)
                 examples.append(data)
         except Exception as e:
-            print(f"[API Server] Failed to load example file {filepath}: {e}")
+            logger.warning("Failed to load example file %s: %s", filepath, e)
 
     return examples
 

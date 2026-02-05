@@ -435,10 +435,12 @@ def update_model_type_settings(config_path):
     return get_model_type_ui_settings(is_turbo)
 
 
-def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, device, init_llm, lm_model_path, backend, use_flash_attention, offload_to_cpu, offload_dit_to_cpu, compile_model, quantization):
+def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, device, init_llm, lm_model_path, backend, use_flash_attention, offload_to_cpu, offload_dit_to_cpu, compile_model, quantization, progress=gr.Progress()):
     """Wrapper for service initialization, returns status, button state, accordion state, and model type settings"""
     # Convert quantization checkbox to value (int8_weight_only if checked, None if not)
     quant_value = "int8_weight_only" if quantization else None
+    
+    progress(0, desc="Loading DiT model...")
     
     # Initialize DiT handler
     status, enable = dit_handler.initialize_service(
@@ -450,6 +452,8 @@ def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, devi
     
     # Initialize LM handler if requested
     if init_llm:
+        progress(0.5, desc="Loading LLM...")
+        
         # Get checkpoint directory
         current_file = os.path.abspath(__file__)
         # This file is in acestep/gradio_ui/events/, need 4 levels up to reach project root
@@ -471,6 +475,8 @@ def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, devi
             status += f"\n{lm_status}"
             # Don't fail the entire initialization if LM fails, but log it
             # Keep enable as is (DiT initialization result) even if LM fails
+    
+    progress(1.0, desc="Complete")
     
     # Check if model is initialized - if so, collapse the accordion
     is_model_initialized = dit_handler.model is not None
@@ -534,9 +540,11 @@ def update_audio_cover_strength_visibility(task_type_value, init_llm_checked):
     return gr.update(visible=is_visible, label=label, info=info)
 
 
-def convert_src_audio_to_codes_wrapper(dit_handler, src_audio):
+def convert_src_audio_to_codes_wrapper(dit_handler, src_audio, progress=gr.Progress()):
     """Wrapper for converting src audio to codes"""
+    progress(0.5, desc="Converting audio to codes...")
     codes_string = dit_handler.convert_src_audio_to_codes(src_audio)
+    progress(1.0)
     return codes_string
 
 

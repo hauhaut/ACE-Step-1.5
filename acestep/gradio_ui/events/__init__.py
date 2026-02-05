@@ -102,7 +102,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
     generation_section["load_lora_btn"].click(
         fn=load_lora_with_checkbox_update,
         inputs=[generation_section["lora_path"]],
-        outputs=[generation_section["lora_status"], generation_section["use_lora_checkbox"]]
+        outputs=[generation_section["lora_status"], generation_section["use_lora_checkbox"]],
+        show_progress="minimal"
     )
 
     def unload_lora_with_checkbox_update():
@@ -116,7 +117,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
 
     generation_section["unload_lora_btn"].click(
         fn=unload_lora_with_checkbox_update,
-        outputs=[generation_section["lora_status"], generation_section["use_lora_checkbox"]]
+        outputs=[generation_section["lora_status"], generation_section["use_lora_checkbox"]],
+        show_progress="minimal"
     )
     
     generation_section["use_lora_checkbox"].change(
