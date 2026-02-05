@@ -575,9 +575,8 @@ class AceStepHandler:
             return status_msg, True
             
         except Exception as e:
-            error_msg = f"❌ Error initializing model: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             logger.exception("[initialize_service] Error initializing model")
-            return error_msg, False
+            return "Model initialization failed. Check logs for details.", False
     
     def _is_on_target_device(self, tensor, target_device):
         """Check if tensor is on the target device (handles cuda vs cuda:0 comparison)."""
@@ -1431,9 +1430,8 @@ class AceStepHandler:
                     return codes_string
                     
         except Exception as e:
-            error_msg = f"❌ Error converting audio to codes: {str(e)}\n{traceback.format_exc()}"
             logger.exception("[convert_src_audio_to_codes] Error converting audio to codes")
-            return error_msg
+            return "❌ Audio conversion failed. Check logs for details."
         
     def prepare_batch_data(
         self,
@@ -3067,16 +3065,15 @@ class AceStepHandler:
             }
 
         except Exception as e:
-            error_msg = f"❌ Error: {str(e)}\n{traceback.format_exc()}"
             logger.exception("[generate_music] Generation failed")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             return {
                 "audios": [],
-                "status_message": error_msg,
+                "status_message": "❌ Generation failed. Check logs for details.",
                 "extra_outputs": {},
                 "success": False,
-                "error": str(e),
+                "error": "generation_failed",
             }
 
     @torch.no_grad()

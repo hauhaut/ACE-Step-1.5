@@ -529,20 +529,20 @@ class GenerateMusicRequest(BaseModel):
     # Model name for multi-model support (select which DiT model to use)
     model: Optional[str] = Field(default=None, description="Model name to use (e.g., 'acestep-v15-turbo')")
 
-    bpm: Optional[int] = None
+    bpm: Optional[int] = Field(default=None, ge=30, le=300)
     # Accept common client keys via manual parsing (see RequestParser).
     key_scale: str = ""
     time_signature: str = ""
     vocal_language: str = "en"
-    inference_steps: int = 8
-    guidance_scale: float = 7.0
+    inference_steps: int = Field(default=8, ge=1, le=200)
+    guidance_scale: float = Field(default=7.0, ge=1.0, le=15.0)
     use_random_seed: bool = True
     seed: int = -1
 
     reference_audio_path: Optional[str] = None
     src_audio_path: Optional[str] = None
-    audio_duration: Optional[float] = None
-    batch_size: Optional[int] = None
+    audio_duration: Optional[float] = Field(default=None, ge=10, le=600)
+    batch_size: Optional[int] = Field(default=None, ge=1, le=8)
 
     audio_code_string: str = ""
 
@@ -558,7 +558,7 @@ class GenerateMusicRequest(BaseModel):
     cfg_interval_end: float = 1.0
     infer_method: str = "ode"  # "ode" or "sde" - diffusion inference method
     shift: float = Field(
-        default=3.0,
+        default=3.0, ge=1.0, le=5.0,
         description="Timestep shift factor (range 1.0~5.0, default 3.0). Only effective for base models, not turbo models."
     )
     timesteps: Optional[str] = Field(
@@ -2039,6 +2039,35 @@ def create_app() -> FastAPI:
                         "use application/json, application/x-www-form-urlencoded, or multipart/form-data"
                     ),
                 )
+
+        # Early GPU tier validation - reject before queuing
+        gpu_config: GPUConfig = getattr(app.state, "gpu_config", None)
+        if gpu_config:
+            lm_active = getattr(app.state, "_llm_initialized", False)
+            if lm_active:
+                max_batch = gpu_config.max_batch_size_with_lm
+                max_dur = gpu_config.max_duration_with_lm
+            else:
+                max_batch = gpu_config.max_batch_size_without_lm
+                max_dur = gpu_config.max_duration_without_lm
+            batch_size = req.batch_size if req.batch_size is not None else 2
+            if batch_size > max_batch:
+                for p in temp_files:
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+                msg = f"batch_size {batch_size} > {max_batch} ({gpu_config.tier})"
+                raise HTTPException(status_code=400, detail=msg)
+            if req.audio_duration and req.audio_duration > max_dur:
+                for p in temp_files:
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+                dur = req.audio_duration
+                msg = f"audio_duration {dur}s > {max_dur}s ({gpu_config.tier})"
+                raise HTTPException(status_code=400, detail=msg)
 
         rec = store.create()
 
