@@ -26,7 +26,7 @@ from transformers.generation.logits_process import (
 from acestep.constrained_logits_processor import MetadataConstrainedLogitsProcessor
 from acestep.constants import DEFAULT_LM_INSTRUCTION, DEFAULT_LM_UNDERSTAND_INSTRUCTION, DEFAULT_LM_INSPIRED_INSTRUCTION, DEFAULT_LM_REWRITE_INSTRUCTION
 from acestep.gpu_config import get_lm_gpu_memory_ratio, get_global_gpu_config
-from acestep.local_cache import get_local_cache
+from acestep.local_cache import LocalCache
 
 
 
@@ -1134,7 +1134,7 @@ class LLMHandler:
         cached_metadata = None
         if is_cacheable:
             try:
-                cached_raw = get_local_cache().get(cot_cache_key)
+                cached_raw = LocalCache().get(cot_cache_key)
                 if cached_raw:
                     import json
                     cached_metadata = json.loads(cached_raw)
@@ -1199,7 +1199,7 @@ class LLMHandler:
             if is_cacheable and metadata:
                 try:
                     import json
-                    get_local_cache().set(cot_cache_key, json.dumps(metadata), ex=604800)
+                    LocalCache().set(cot_cache_key, json.dumps(metadata), ex=604800)
                     logger.debug(f"Phase 1: Cached CoT metadata (key={cot_cache_key[:16]}...)")
                 except Exception as e:
                     logger.debug(f"CoT cache write error: {e}")
