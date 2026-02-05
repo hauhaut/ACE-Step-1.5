@@ -1959,7 +1959,6 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                 if self._should_end_text_field(scores):
                     if self.newline_token:
                         self._apply_whitelist_inplace(scores, [self.newline_token])
-                        self._transition_to_next_state()
                 else:
                     # Allow any token except newline if we don't have content yet
                     if not self.accumulated_value.strip():

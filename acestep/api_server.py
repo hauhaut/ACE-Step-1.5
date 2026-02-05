@@ -1984,8 +1984,6 @@ def create_app() -> FastAPI:
                 msg = f"audio_duration {dur}s > {max_dur}s ({gpu_config.tier})"
                 raise HTTPException(status_code=400, detail=msg)
 
-        rec = store.create()
-
         q: asyncio.Queue = app.state.job_queue
         if q.full():
             for p in temp_files:
@@ -1994,6 +1992,8 @@ def create_app() -> FastAPI:
                 except OSError:
                     pass
             raise HTTPException(status_code=429, detail="Server busy: queue is full")
+
+        rec = store.create()
 
         if temp_files:
             async with app.state.job_temp_files_lock:
