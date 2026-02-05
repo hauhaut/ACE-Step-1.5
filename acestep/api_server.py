@@ -993,9 +993,9 @@ def create_app() -> FastAPI:
 
         # Initialize local cache
         try:
-            from acestep.local_cache import get_local_cache
+            from acestep.local_cache import LocalCache
             local_cache_dir = os.path.join(cache_root, "local_redis")
-            app.state.local_cache = get_local_cache(local_cache_dir)
+            app.state.local_cache = LocalCache(local_cache_dir)
         except ImportError:
             app.state.local_cache = None
 

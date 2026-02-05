@@ -2,6 +2,19 @@
 Constants for ACE-Step
 Centralized constants used across the codebase
 """
+import os
+
+# ==============================================================================
+# Path Constants
+# ==============================================================================
+
+# Project root - computed once at import time
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def get_project_root() -> str:
+    return PROJECT_ROOT
+
 
 # ==============================================================================
 # Language Constants

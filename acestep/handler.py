@@ -197,6 +197,9 @@ class AceStepHandler:
         if not self.lora_loaded:
             return "⚠️ No LoRA adapter loaded."
         
+        if self.model is None:
+            return "⚠️ No model loaded."
+        
         if self._base_decoder is None:
             return "❌ Base decoder backup not found. Cannot restore."
         
@@ -257,6 +260,9 @@ class AceStepHandler:
         """
         if not self.lora_loaded:
             return "⚠️ No LoRA loaded"
+        
+        if self.model is None:
+            return "⚠️ No model loaded."
         
         # Clamp scale to 0-1 range
         self.lora_scale = max(0.0, min(1.0, scale))
