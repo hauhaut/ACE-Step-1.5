@@ -296,7 +296,7 @@ RESULT_EXPIRE_SECONDS = 7 * 24 * 60 * 60  # 7 days
 TASK_TIMEOUT_SECONDS = 3600  # 1 hour
 JOB_STORE_CLEANUP_INTERVAL = 300  # 5 minutes - interval for cleaning up old jobs
 JOB_STORE_MAX_AGE_SECONDS = 86400  # 24 hours - completed jobs older than this will be cleaned
-STATUS_MAP = {"queued": 0, "running": 0, "succeeded": 1, "failed": 2}
+STATUS_MAP = {"queued": 0, "running": 0, "succeeded": 1, "failed": 2, "cancelled": 3}
 
 LM_DEFAULT_TEMPERATURE = 0.85
 LM_DEFAULT_CFG_SCALE = 2.5
@@ -508,7 +508,7 @@ def _parse_description_hints(description: str) -> tuple[Optional[str], bool]:
     return detected_language, is_instrumental
 
 
-JobStatus = Literal["queued", "running", "succeeded", "failed"]
+JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 
 
 class GenerateMusicRequest(BaseModel):
@@ -712,11 +712,21 @@ class _JobStore:
             rec.result = None
             rec.error = error
 
+    def cancel(self, job_id: str) -> bool:
+        """Cancel a queued job. Returns True if cancelled, False if not cancellable."""
+        with self._lock:
+            rec = self._jobs.get(job_id)
+            if rec is None or rec.status != "queued":
+                return False
+            rec.status = "cancelled"
+            rec.finished_at = time.time()
+            return True
+
     def cleanup_old_jobs(self, max_age_seconds: Optional[int] = None) -> int:
         """
         Clean up completed jobs older than max_age_seconds.
 
-        Only removes jobs with status 'succeeded' or 'failed'.
+        Only removes jobs with status 'succeeded', 'failed', or 'cancelled'.
         Jobs that are 'queued' or 'running' are never removed.
         Also deletes associated audio files.
 
@@ -729,7 +739,7 @@ class _JobStore:
         with self._lock:
             to_remove = []
             for job_id, rec in self._jobs.items():
-                if rec.status in ("succeeded", "failed"):
+                if rec.status in ("succeeded", "failed", "cancelled"):
                     finish_time = rec.finished_at or rec.created_at
                     age = now - finish_time
                     if age > max_age:
@@ -758,6 +768,7 @@ class _JobStore:
                 "running": 0,
                 "succeeded": 0,
                 "failed": 0,
+                "cancelled": 0,
             }
             for rec in self._jobs.values():
                 if rec.status in stats:
@@ -2209,6 +2220,16 @@ def create_app() -> FastAPI:
             "queue_maxsize": QUEUE_MAXSIZE,
             "avg_job_seconds": avg_job_seconds,
         })
+
+    @app.delete("/v1/jobs/{job_id}")
+    async def cancel_job(job_id: str, _: None = Depends(verify_api_key)):
+        """Cancel a queued job."""
+        if store.cancel(job_id):
+            return _wrap_response({"job_id": job_id, "status": "cancelled"})
+        rec = store.get(job_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=400, detail=f"Cannot cancel job in '{rec.status}' state")
 
     @app.get("/v1/models")
     async def list_models(_: None = Depends(verify_api_key)):
