@@ -2281,17 +2281,36 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
                     }
                     
                     if field_name in field_name_to_value_state:
-                        # Transition directly to the field's VALUE state
-                        old_state = self.state
-                        self.state = field_name_to_value_state[field_name]
-                        self.position_in_state = 0
-                        self.accumulated_value = ""
-                        self.accumulated_token_ids = []
-                        self.caption_ending = False
-                        self.pending_field_name = ""
-                        
-                        if self.debug:
-                            logger.debug(f"FSM transition (caption ending): {old_state.name} -> {self.state.name}")
+                        should_skip = (
+                            (field_name == "genres" and self.skip_genres) or
+                            (field_name == "language" and self.skip_language)
+                        )
+
+                        if should_skip:
+                            self.caption_ending = False
+                            self.pending_field_name = ""
+                            next_state = self._get_next_field_state(field_name)
+                            if next_state:
+                                old_state = self.state
+                                self.state = next_state
+                                self.position_in_state = 0
+                                self.accumulated_value = ""
+                                self.accumulated_token_ids = []
+                                if self.debug:
+                                    logger.debug(f"FSM transition (caption ending, skipped {field_name}): {old_state.name} -> {self.state.name}")
+                            else:
+                                self._transition_to_next_state()
+                        else:
+                            old_state = self.state
+                            self.state = field_name_to_value_state[field_name]
+                            self.position_in_state = 0
+                            self.accumulated_value = ""
+                            self.accumulated_token_ids = []
+                            self.caption_ending = False
+                            self.pending_field_name = ""
+
+                            if self.debug:
+                                logger.debug(f"FSM transition (caption ending): {old_state.name} -> {self.state.name}")
                     else:
                         # Unknown field name, force transition to next field
                         if self.debug:
