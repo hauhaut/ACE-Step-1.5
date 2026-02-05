@@ -163,6 +163,7 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         self.max_duration = max_duration if max_duration is not None else DURATION_MAX
         self.skip_caption = False  # Set to True to skip caption field generation
         self.skip_language = False  # Set to True to skip language field generation
+        self.skip_lyrics = False  # Set to True to skip lyrics field generation
         self.caption: Optional[str] = None  # Set via update_caption() before each generation
         
         # User-provided metadata fields (optional)
@@ -403,7 +404,11 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         """Set whether to skip language generation and rebuild state transitions."""
         self.skip_language = skip
         self._build_state_transitions()
-    
+
+    def set_skip_lyrics(self, skip: bool):
+        """Set whether to skip lyrics field generation."""
+        self.skip_lyrics = skip
+
     @staticmethod
     def postprocess_caption(caption: str) -> str:
         """

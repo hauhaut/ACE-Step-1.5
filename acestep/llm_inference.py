@@ -195,6 +195,7 @@ class LLMHandler:
         skip_genres: bool,
         skip_caption: bool,
         skip_language: bool,
+        skip_lyrics: bool,
         generation_phase: str,
         is_batch: bool = False,
         metadata_temperature: Optional[float] = None,
@@ -233,6 +234,7 @@ class LLMHandler:
             self.constrained_processor.set_skip_genres(True)
             self.constrained_processor.set_skip_caption(True)
             self.constrained_processor.set_skip_language(True)
+            self.constrained_processor.set_skip_lyrics(True)
         else:
             # Single mode uses provided settings
             self.constrained_processor.set_user_metadata(user_metadata)
@@ -240,7 +242,8 @@ class LLMHandler:
             self.constrained_processor.set_skip_genres(skip_genres)
             self.constrained_processor.set_skip_caption(skip_caption)
             self.constrained_processor.set_skip_language(skip_language)
-        
+            self.constrained_processor.set_skip_lyrics(skip_lyrics)
+
         # Set generation phase for phase-aware processing
         self.constrained_processor.set_generation_phase(generation_phase)
         
@@ -600,6 +603,7 @@ class LLMHandler:
             skip_genres=skip_genres,
             skip_caption=skip_caption,
             skip_language=skip_language,
+            skip_lyrics=skip_lyrics,
             generation_phase=generation_phase,
             is_batch=is_batch,
             metadata_temperature=metadata_temperature,
@@ -681,6 +685,7 @@ class LLMHandler:
         skip_genres: bool,
         skip_caption: bool,
         skip_language: bool,
+        skip_lyrics: bool,
         generation_phase: str,
         caption: str,
         lyrics: str,
@@ -704,6 +709,7 @@ class LLMHandler:
             skip_genres=skip_genres,
             skip_caption=skip_caption,
             skip_language=skip_language,
+            skip_lyrics=skip_lyrics,
             generation_phase=generation_phase,
             is_batch=False,
         )
@@ -847,6 +853,7 @@ class LLMHandler:
         skip_genres: bool = True,
         skip_caption: bool = False,
         skip_language: bool = False,
+        skip_lyrics: bool = False,
         generation_phase: str = "cot",
         caption: str = "",
         lyrics: str = "",
@@ -889,6 +896,7 @@ class LLMHandler:
                     skip_genres=True,
                     skip_caption=True,
                     skip_language=True,
+                    skip_lyrics=True,
                     generation_phase=generation_phase,
                     caption=caption,
                     lyrics=lyrics,
@@ -918,6 +926,7 @@ class LLMHandler:
             skip_genres=skip_genres,
             skip_caption=skip_caption,
             skip_language=skip_language,
+            skip_lyrics=skip_lyrics,
             generation_phase=generation_phase,
             caption=caption,
             lyrics=lyrics,
