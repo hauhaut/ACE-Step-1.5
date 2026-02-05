@@ -3,6 +3,7 @@
 Handles all LM-related operations including initialization and generation
 """
 import os
+import re
 import traceback
 import time
 import random
@@ -26,8 +27,6 @@ from acestep.gpu_config import get_lm_gpu_memory_ratio, get_global_gpu_config
 
 class LLMHandler:
     """5Hz LM Handler for audio code generation"""
-
-    STOP_REASONING_TAG = "</think>"
 
     # HuggingFace Space environment detection
     IS_HUGGINGFACE_SPACE = os.environ.get("SPACE_ID") is not None
@@ -1487,7 +1486,7 @@ class LLMHandler:
         
         # Build formatted prompt for understanding
         formatted_prompt = self.build_formatted_prompt_for_understanding(audio_codes)
-        print(f"formatted_prompt: {formatted_prompt}")
+        logger.debug(f"formatted_prompt: {formatted_prompt}")
         # Generate using constrained decoding (understand phase)
         # We want to generate metadata first (CoT), then lyrics (natural text)
         # Note: cfg_scale and negative_prompt are not used in understand mode
@@ -1545,8 +1544,6 @@ class LLMHandler:
         Returns:
             Extracted lyrics string, or empty string if no lyrics found
         """
-        import re
-        
         # Find the </think> tag
         think_end_pattern = r'</think>'
         match = re.search(think_end_pattern, output_text)
@@ -1694,7 +1691,6 @@ class LLMHandler:
         if vocal_language and vocal_language.strip() and vocal_language.strip().lower() != "unknown":
             # Use the specified language for constrained decoding
             user_metadata = {"language": vocal_language.strip()}
-            # skip_language = True  # Skip language generation since we're injecting it
             logger.info(f"Using user-specified language: {vocal_language.strip()}")
         
         # Generate using constrained decoding (inspiration phase)
@@ -2309,9 +2305,7 @@ class LLMHandler:
         logger.debug(f"Debug output text: {debug_output_text}")
         metadata = {}
         audio_codes = ""
-        
-        import re
-        
+
         # Extract audio codes - find all <|audio_code_XXX|> patterns
         code_pattern = r'<\|audio_code_\d+\|>'
         code_matches = re.findall(code_pattern, output_text)

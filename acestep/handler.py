@@ -159,7 +159,6 @@ class AceStepHandler:
             return "❌ PEFT library not installed. Please install with: pip install peft"
         
         try:
-            import copy
             # Backup base decoder if not already backed up
             if self._base_decoder is None:
                 self._base_decoder = copy.deepcopy(self.model.decoder)
@@ -202,7 +201,6 @@ class AceStepHandler:
             return "❌ Base decoder backup not found. Cannot restore."
         
         try:
-            import copy
             # Restore base decoder
             self.model.decoder = copy.deepcopy(self._base_decoder)
             self.model.decoder = self.model.decoder.to(self.device).to(self.dtype)
@@ -1574,7 +1572,6 @@ class AceStepHandler:
                 if audio_duration is not None and float(audio_duration) > 0:
                     batch_target_wavs = self.create_target_wavs(float(audio_duration))
                 else:
-                    import random
                     random_duration = random.uniform(10.0, 120.0)
                     batch_target_wavs = self.create_target_wavs(random_duration)
             target_wavs_batch.append(batch_target_wavs)
@@ -2302,7 +2299,6 @@ class AceStepHandler:
             # Ensure we have enough seeds for batch size
             if len(seed_list) < batch_size:
                 # Pad with last seed or random seeds
-                import random
                 while len(seed_list) < batch_size:
                     seed_list.append(random.randint(0, 2**32 - 1))
             elif len(seed_list) > batch_size:
