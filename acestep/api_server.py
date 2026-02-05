@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import glob
-import hmac
 import json
 import logging
 import os
@@ -71,44 +70,18 @@ from acestep.gpu_config import (
     is_lm_model_supported,
     GPUConfig,
 )
+from acestep.api_common import (
+    set_api_key,
+    validate_audio_path as _validate_audio_path,
+    wrap_response as _wrap_response,
+    verify_token_from_request,
+    verify_api_key,
+)
 
 
 # =============================================================================
 # Security: Path Validation
 # =============================================================================
-
-def _validate_audio_path(path: str) -> str:
-    """Validate audio file path to prevent path traversal attacks.
-
-    Only allows access to files in the system temp directory.
-    Raises HTTPException if path is outside allowed directory.
-    """
-    # Get the temp directory (same logic as used for audio file creation)
-    cache_root = os.path.expanduser("~/.cache/acestep")
-    allowed_dir = (os.getenv("ACESTEP_TMPDIR") or os.path.join(cache_root, "tmp")).strip()
-    # Also allow system temp directory
-    system_temp = tempfile.gettempdir()
-
-    # Normalize paths to absolute form
-    abs_path = os.path.abspath(os.path.normpath(path))
-    abs_allowed = os.path.abspath(os.path.normpath(allowed_dir))
-    abs_system_temp = os.path.abspath(os.path.normpath(system_temp))
-
-    # Check if path is within allowed directories
-    is_in_allowed = abs_path.startswith(abs_allowed + os.sep) or abs_path == abs_allowed
-    is_in_system_temp = abs_path.startswith(abs_system_temp + os.sep) or abs_path == abs_system_temp
-
-    if not (is_in_allowed or is_in_system_temp):
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied: path outside allowed directory"
-        )
-
-    if not os.path.isfile(abs_path):
-        raise HTTPException(status_code=404, detail="File not found")
-
-    return abs_path
-
 
 def _validate_input_audio_path(path: str) -> str:
     """Validate user-provided audio input paths (ref_audio_path, src_audio_path).
@@ -303,17 +276,6 @@ LM_DEFAULT_CFG_SCALE = 2.5
 LM_DEFAULT_TOP_P = 0.9
 
 
-def _wrap_response(data: Any, code: int = 200, error: Optional[str] = None) -> Dict[str, Any]:
-    """Wrap response data in standard format."""
-    return {
-        "data": data,
-        "code": code,
-        "error": error,
-        "timestamp": int(time.time() * 1000),
-        "extra": None,
-    }
-
-
 # =============================================================================
 # Example Data for Random Sample
 # =============================================================================
@@ -342,68 +304,6 @@ def _load_all_examples(sample_mode: str = "simple_mode") -> List[Dict[str, Any]]
 # Pre-load example data at module load time
 SIMPLE_EXAMPLE_DATA: List[Dict[str, Any]] = _load_all_examples(sample_mode="simple_mode")
 CUSTOM_EXAMPLE_DATA: List[Dict[str, Any]] = _load_all_examples(sample_mode="custom_mode")
-
-# =============================================================================
-# API Key Authentication
-# =============================================================================
-
-_api_key: Optional[str] = None
-
-
-def set_api_key(key: Optional[str]):
-    """Set the API key for authentication"""
-    global _api_key
-    _api_key = key
-
-
-def verify_token_from_request(body: dict, authorization: Optional[str] = None) -> Optional[str]:
-    """
-    Verify API key from request body (ai_token) or Authorization header.
-    Returns the token if valid, None if no auth required.
-    Uses timing-safe comparison to prevent timing attacks.
-    """
-    if _api_key is None:
-        return None  # No auth required
-
-    # Try ai_token from body first
-    ai_token = body.get("ai_token") if body else None
-    if ai_token:
-        if hmac.compare_digest(ai_token, _api_key):
-            return ai_token
-        raise HTTPException(status_code=401, detail="Invalid ai_token")
-
-    # Fallback to Authorization header
-    if authorization:
-        if authorization.startswith("Bearer "):
-            token = authorization[7:]
-        else:
-            token = authorization
-        if hmac.compare_digest(token, _api_key):
-            return token
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    # No token provided but auth is required
-    raise HTTPException(status_code=401, detail="Missing ai_token or Authorization header")
-
-
-async def verify_api_key(authorization: Optional[str] = Header(None)):
-    """Verify API key from Authorization header (legacy, for non-body endpoints).
-    Uses timing-safe comparison to prevent timing attacks.
-    """
-    if _api_key is None:
-        return  # No auth required
-
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
-    # Support "Bearer <key>" format
-    if authorization.startswith("Bearer "):
-        token = authorization[7:]
-    else:
-        token = authorization
-
-    if not hmac.compare_digest(token, _api_key):
-        raise HTTPException(status_code=401, detail="Invalid API key")
 
 # Parameter aliases for request parsing
 PARAM_ALIASES = {
@@ -814,7 +714,7 @@ def _to_int(v: Any, default: Optional[int] = None) -> Optional[int]:
         return default
     try:
         return int(s)
-    except Exception:
+    except (ValueError, TypeError):
         return default
 
 
@@ -828,7 +728,7 @@ def _to_float(v: Any, default: Optional[float] = None) -> Optional[float]:
         return default
     try:
         return float(s)
-    except Exception:
+    except (ValueError, TypeError):
         return default
 
 
@@ -888,7 +788,7 @@ class RequestParser:
         if isinstance(v, str) and v.strip():
             try:
                 return json.loads(v)
-            except Exception:
+            except json.JSONDecodeError:
                 pass
         return {}
 
@@ -942,13 +842,13 @@ async def _save_upload_to_temp(upload: StarletteUploadFile, *, prefix: str) -> s
     except Exception:
         try:
             os.remove(path)
-        except Exception:
+        except OSError:
             pass
         raise
     finally:
         try:
             await upload.close()
-        except Exception:
+        except OSError:
             pass
     return path
 
@@ -2082,7 +1982,7 @@ def create_app() -> FastAPI:
         else:
             try:
                 task_id_list = json.loads(task_id_list_str)
-            except Exception:
+            except json.JSONDecodeError:
                 task_id_list = []
 
         local_cache = getattr(app.state, 'local_cache', None)
@@ -2098,7 +1998,7 @@ def create_app() -> FastAPI:
                 if data:
                     try:
                         data_json = json.loads(data)
-                    except Exception:
+                    except json.JSONDecodeError:
                         data_json = []
 
                     if len(data_json) <= 0:

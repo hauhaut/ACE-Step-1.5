@@ -39,6 +39,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from loguru import logger
 from acestep.handler import AceStepHandler
 from acestep.llm_inference import LLMHandler
 from acestep.inference import (
@@ -465,7 +466,7 @@ def create_app() -> FastAPI:
         # =================================================================
         # Initialize models at startup
         # =================================================================
-        print("[OpenRouter API] Initializing models at startup...")
+        logger.info("[OpenRouter API] Initializing models at startup...")
 
         config_path = os.getenv("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
         device = os.getenv("ACESTEP_DEVICE", "auto")
@@ -474,7 +475,7 @@ def create_app() -> FastAPI:
         offload_dit_to_cpu = _env_bool("ACESTEP_OFFLOAD_DIT_TO_CPU", False)
 
         # Initialize DiT model
-        print(f"[OpenRouter API] Loading DiT model: {config_path}")
+        logger.info(f"[OpenRouter API] Loading DiT model: {config_path}")
         status_msg, ok = handler.initialize_service(
             project_root=project_root,
             config_path=config_path,
@@ -487,14 +488,14 @@ def create_app() -> FastAPI:
 
         if not ok:
             app.state._init_error = status_msg
-            print(f"[OpenRouter API] ERROR: DiT model failed: {status_msg}")
+            logger.error(f"[OpenRouter API] DiT model failed: {status_msg}")
             raise RuntimeError(status_msg)
 
         app.state._initialized = True
-        print(f"[OpenRouter API] DiT model loaded successfully")
+        logger.info("[OpenRouter API] DiT model loaded successfully")
 
         # Initialize LLM
-        print("[OpenRouter API] Loading LLM model...")
+        logger.info("[OpenRouter API] Loading LLM model...")
         checkpoint_dir = os.path.join(project_root, "checkpoints")
         lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B")
         backend = os.getenv("ACESTEP_LM_BACKEND", "vllm")
@@ -511,14 +512,14 @@ def create_app() -> FastAPI:
             )
             app.state._llm_initialized = lm_ok
             if lm_ok:
-                print(f"[OpenRouter API] LLM model loaded: {lm_model_path}")
+                logger.info(f"[OpenRouter API] LLM model loaded: {lm_model_path}")
             else:
-                print(f"[OpenRouter API] Warning: LLM failed: {lm_status}")
+                logger.warning(f"[OpenRouter API] LLM failed: {lm_status}")
         except Exception as e:
             app.state._llm_initialized = False
-            print(f"[OpenRouter API] Warning: LLM init error: {e}")
+            logger.warning(f"[OpenRouter API] LLM init error: {e}")
 
-        print("[OpenRouter API] All models initialized!")
+        logger.info("[OpenRouter API] All models initialized!")
 
         try:
             yield
@@ -630,9 +631,9 @@ def create_app() -> FastAPI:
                             "timesignature": sample_result.get("timesignature"),
                             "language": sample_result.get("language") or request.vocal_language,
                         }
-                        print(f"[OpenRouter API] Sample mode: {status_msg}")
+                        logger.debug(f"[OpenRouter API] Sample mode: {status_msg}")
                 except Exception as e:
-                    print(f"[OpenRouter API] Warning: create_sample_from_query failed: {e}")
+                    logger.warning(f"[OpenRouter API] create_sample_from_query failed: {e}")
                     if not prompt:
                         lm_result["prompt"] = sample_query
 
@@ -670,7 +671,7 @@ def create_app() -> FastAPI:
                             "timesignature": format_result.timesignature or None,
                             "language": format_result.language or request.vocal_language,
                         }
-                        print(f"[OpenRouter API] Format mode: {format_result.status_message}")
+                        logger.debug(f"[OpenRouter API] Format mode: {format_result.status_message}")
                     else:
                         print(f"[OpenRouter API] Warning: format_sample failed: {format_result.error}")
                 except Exception as e:

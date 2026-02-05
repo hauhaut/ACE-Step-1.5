@@ -2,11 +2,9 @@
 Gradio API Routes Module
 Add API endpoints compatible with api_server.py and CustomAceStep to Gradio application
 """
-import hmac
 import json
 import os
 import random
-import tempfile
 import time
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -14,107 +12,13 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request, Depends, Header
 from fastapi.responses import FileResponse
 
-
-def _validate_audio_path(path: str) -> str:
-    """Validate audio file path to prevent path traversal attacks.
-
-    Only allows access to files in the system temp directory.
-    Raises HTTPException if path is outside allowed directory.
-    """
-    # Get the temp directory
-    cache_root = os.path.expanduser("~/.cache/acestep")
-    allowed_dir = (os.getenv("ACESTEP_TMPDIR") or os.path.join(cache_root, "tmp")).strip()
-    system_temp = tempfile.gettempdir()
-
-    # Normalize paths to absolute form
-    abs_path = os.path.abspath(os.path.normpath(path))
-    abs_allowed = os.path.abspath(os.path.normpath(allowed_dir))
-    abs_system_temp = os.path.abspath(os.path.normpath(system_temp))
-
-    # Check if path is within allowed directories
-    is_in_allowed = abs_path.startswith(abs_allowed + os.sep) or abs_path == abs_allowed
-    is_in_system_temp = abs_path.startswith(abs_system_temp + os.sep) or abs_path == abs_system_temp
-
-    if not (is_in_allowed or is_in_system_temp):
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied: path outside allowed directory"
-        )
-
-    if not os.path.isfile(abs_path):
-        raise HTTPException(status_code=404, detail="File not found")
-
-    return abs_path
-
-# API Key storage (set via setup_api_routes)
-_api_key: Optional[str] = None
-
-
-def set_api_key(key: Optional[str]):
-    """Set the API key for authentication"""
-    global _api_key
-    _api_key = key
-
-
-def _wrap_response(data: Any, code: int = 200, error: Optional[str] = None) -> Dict[str, Any]:
-    """Wrap response data in standard format compatible with CustomAceStep."""
-    return {
-        "data": data,
-        "code": code,
-        "error": error,
-        "timestamp": int(time.time() * 1000),
-        "extra": None,
-    }
-
-
-def verify_token_from_request(body: dict, authorization: Optional[str] = None) -> Optional[str]:
-    """
-    Verify API key from request body (ai_token) or Authorization header.
-    Returns the token if valid, None if no auth required.
-    Uses timing-safe comparison to prevent timing attacks.
-    """
-    if _api_key is None:
-        return None  # No auth required
-
-    # Try ai_token from body first
-    ai_token = body.get("ai_token") if body else None
-    if ai_token:
-        if hmac.compare_digest(ai_token, _api_key):
-            return ai_token
-        raise HTTPException(status_code=401, detail="Invalid ai_token")
-
-    # Fallback to Authorization header
-    if authorization:
-        if authorization.startswith("Bearer "):
-            token = authorization[7:]
-        else:
-            token = authorization
-        if hmac.compare_digest(token, _api_key):
-            return token
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    # No token provided but auth is required
-    raise HTTPException(status_code=401, detail="Missing ai_token or Authorization header")
-
-
-async def verify_api_key(authorization: Optional[str] = Header(None)):
-    """Verify API key from Authorization header (legacy, for non-body endpoints).
-    Uses timing-safe comparison to prevent timing attacks.
-    """
-    if _api_key is None:
-        return  # No auth required
-
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
-    # Support "Bearer <key>" format
-    if authorization.startswith("Bearer "):
-        token = authorization[7:]
-    else:
-        token = authorization
-
-    if not hmac.compare_digest(token, _api_key):
-        raise HTTPException(status_code=401, detail="Invalid API key")
+from acestep.api_common import (
+    set_api_key,
+    validate_audio_path,
+    wrap_response,
+    verify_token_from_request,
+    verify_api_key,
+)
 
 
 # Use diskcache to store results
@@ -162,7 +66,7 @@ def _load_all_examples(sample_mode: str = "simple_mode") -> List[Dict[str, Any]]
                         all_examples.extend(data)
                     elif isinstance(data, dict):
                         all_examples.append(data)
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
     return all_examples
 
@@ -201,7 +105,7 @@ router = APIRouter()
 @router.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return _wrap_response({
+    return wrap_response({
         "status": "ok",
         "service": "ACE-Step Gradio API",
         "version": "1.0",
@@ -223,7 +127,7 @@ async def list_models(request: Request, _: None = Depends(verify_api_key)):
             "is_default": True,
         })
 
-    return _wrap_response({
+    return wrap_response({
         "models": models,
         "default_model": models[0]["name"] if models else None,
     })
@@ -233,7 +137,7 @@ async def list_models(request: Request, _: None = Depends(verify_api_key)):
 async def get_audio(path: str, _: None = Depends(verify_api_key)):
     """Download audio file (restricted to temp directories for security)"""
     # Security: validate path to prevent path traversal attacks
-    validated_path = _validate_audio_path(path)
+    validated_path = validate_audio_path(path)
 
     ext = os.path.splitext(validated_path)[1].lower()
     media_types = {
@@ -267,10 +171,10 @@ async def create_random_sample(request: Request, authorization: Optional[str] = 
         example_data = CUSTOM_EXAMPLE_DATA
 
     if not example_data:
-        return _wrap_response(None, code=500, error="No example data available")
+        return wrap_response(None, code=500, error="No example data available")
 
     random_example = random.choice(example_data)
-    return _wrap_response(random_example)
+    return wrap_response(random_example)
 
 
 @router.post("/query_result")
@@ -290,7 +194,7 @@ async def query_result(request: Request, authorization: Optional[str] = Header(N
     if isinstance(task_ids, str):
         try:
             task_ids = json.loads(task_ids)
-        except Exception:
+        except json.JSONDecodeError:
             task_ids = []
 
     results = []
@@ -309,7 +213,7 @@ async def query_result(request: Request, authorization: Optional[str] = Header(N
                 "result": "[]"
             })
 
-    return _wrap_response(results)
+    return wrap_response(results)
 
 
 @router.post("/format_input")
@@ -318,7 +222,7 @@ async def format_input(request: Request, authorization: Optional[str] = Header(N
     llm_handler = request.app.state.llm_handler
 
     if not llm_handler or not llm_handler.llm_initialized:
-        return _wrap_response(None, code=500, error="LLM not initialized")
+        return wrap_response(None, code=500, error="LLM not initialized")
 
     content_type = (request.headers.get("content-type") or "").lower()
     if "json" in content_type:
@@ -345,9 +249,9 @@ async def format_input(request: Request, authorization: Optional[str] = Header(N
         )
 
         if not result.success:
-            return _wrap_response(None, code=500, error=result.status_message)
+            return wrap_response(None, code=500, error=result.status_message)
 
-        return _wrap_response({
+        return wrap_response({
             "caption": result.caption or caption,
             "lyrics": result.lyrics or lyrics,
             "bpm": result.bpm,
@@ -357,7 +261,7 @@ async def format_input(request: Request, authorization: Optional[str] = Header(N
             "vocal_language": result.language or "unknown",
         })
     except Exception as e:
-        return _wrap_response(None, code=500, error=str(e))
+        return wrap_response(None, code=500, error=str(e))
 
 
 @router.post("/release_task")
@@ -386,7 +290,7 @@ async def release_task(request: Request, authorization: Optional[str] = Header(N
     if isinstance(param_obj, str):
         try:
             param_obj = json.loads(param_obj)
-        except Exception:
+        except json.JSONDecodeError:
             param_obj = {}
 
     # Helper to get param with aliases
@@ -531,7 +435,7 @@ async def release_task(request: Request, authorization: Optional[str] = Header(N
         # Store result
         store_result(task_id, result_data)
 
-        return _wrap_response({"task_id": task_id, "status": "succeeded"})
+        return wrap_response({"task_id": task_id, "status": "succeeded"})
 
     except HTTPException:
         raise

@@ -727,7 +727,7 @@ def generate_with_progress(
                             sample_tensor_data = None
 
                 except Exception as e:
-                    print(f"[Auto Score] Failed to prepare tensor data for sample {i}: {e}")
+                    logger.error(f"[Auto Score] Failed to prepare tensor data for sample {i}: {e}")
                     sample_tensor_data = None
 
                 score_str = calculate_score_handler(llm_handler, code_str, captions, lyrics, lm_generated_metadata, bpm, key_scale, time_signature, audio_duration, vocal_language, score_scale, dit_handler, sample_tensor_data, inference_steps)
@@ -1221,7 +1221,7 @@ def calculate_score_handler_with_selection(
                     if any(v is None for v in extra_tensor_data.values()):
                         extra_tensor_data = None
                 except Exception as e:
-                    print(f"Error slicing tensor data for score: {e}")
+                    logger.error(f"Error slicing tensor data for score: {e}")
                     extra_tensor_data = None
 
     # Calculate score using historical parameters
