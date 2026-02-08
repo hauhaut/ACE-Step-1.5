@@ -14,6 +14,7 @@ import traceback
 import re
 import random
 from contextlib import contextmanager
+from functools import lru_cache
 from typing import Optional, Dict, Any, Tuple, List, Union
 
 import torch
@@ -43,6 +44,16 @@ from acestep.gpu_config import get_gpu_memory_gb
 
 
 warnings.filterwarnings("ignore")
+
+# Pre-compiled regex patterns for performance (avoid recompilation on each call)
+_AUDIO_CODE_RE = re.compile(r"<\|audio_code_(\d+)\|>")
+_SFT_CAPTION_RE = re.compile(r'#\s*Caption\s*\n(.*?)(?:\n\s*#\s*Metas|$)', re.DOTALL)
+
+
+@lru_cache(maxsize=16)
+def _get_resampler(orig_sr: int, target_sr: int):
+    """Return a cached Resample transform for the given sample-rate pair."""
+    return torchaudio.transforms.Resample(orig_sr, target_sr)
 
 
 class AceStepHandler:
@@ -797,7 +808,7 @@ class AceStepHandler:
             MAX_AUDIO_CODE = 63999  # Maximum valid audio code value (codebook size = 64000)
             codes = []
             clamped_count = 0
-            for x in re.findall(r"<\|audio_code_(\d+)\|>", code_str):
+            for x in _AUDIO_CODE_RE.findall(code_str):
                 code_value = int(x)
                 # Clamp code value to valid range [0, MAX_AUDIO_CODE]
                 clamped_value = max(0, min(code_value, MAX_AUDIO_CODE))
@@ -1007,8 +1018,7 @@ class AceStepHandler:
     def extract_caption_from_sft_format(self, caption: str) -> str:
         try:
             if "# Instruction" in caption and "# Caption" in caption:
-                pattern = r'#\s*Caption\s*\n(.*?)(?:\n\s*#\s*Metas|$)'
-                match = re.search(pattern, caption, re.DOTALL)
+                match = _SFT_CAPTION_RE.search(caption)
                 if match:
                     return match.group(1).strip()
             return caption
@@ -1109,14 +1119,14 @@ class AceStepHandler:
         """
         # Convert to stereo (duplicate channel if mono)
         if audio.shape[0] == 1:
-            audio = torch.cat([audio, audio], dim=0)
+            audio = audio.expand(2, -1).contiguous()
         
         # Keep only first 2 channels
         audio = audio[:2]
         
-        # Resample to 48kHz if needed
+        # Resample to 48kHz if needed (uses cached Resample transform)
         if sr != 48000:
-            audio = torchaudio.transforms.Resample(sr, 48000)(audio)
+            audio = _get_resampler(sr, 48000)(audio)
         
         # Clamp values to [-1.0, 1.0]
         audio = torch.clamp(audio, -1.0, 1.0)

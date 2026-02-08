@@ -29,6 +29,16 @@ from acestep.gpu_config import get_lm_gpu_memory_ratio, get_global_gpu_config
 from acestep.local_cache import LocalCache
 
 
+# Pre-compiled regex patterns for performance (avoids re-compilation per call)
+_THINK_END_RE = re.compile(r'</think>')
+_LYRIC_HEADER_RE = re.compile(r'^#\s*Lyri[c|cs]?\s*\n', re.IGNORECASE)
+_IM_END_RE = re.compile(r'<\|im_end\|>\s*$')
+_AUDIO_CODE_RE = re.compile(r'<\|audio_code_\d+\|>')
+_REASONING_PATTERNS = [
+    re.compile(r'<think>(.*?)</think>', re.DOTALL),
+    re.compile(r'<think>(.*?)</think>', re.DOTALL),
+    re.compile(r'<reasoning>(.*?)</reasoning>', re.DOTALL),
+]
 
 # Background tokenizer preloading
 _tokenizer_future: Optional[Future] = None
@@ -1695,8 +1705,7 @@ class LLMHandler:
             Extracted lyrics string, or empty string if no lyrics found
         """
         # Find the </think> tag
-        think_end_pattern = r'</think>'
-        match = re.search(think_end_pattern, output_text)
+        match = _THINK_END_RE.search(output_text)
         
         if not match:
             # No </think> tag found, no lyrics
@@ -1709,11 +1718,10 @@ class LLMHandler:
             return ""
         
         # Remove "# Lyric" header if present
-        lyric_header_pattern = r'^#\s*Lyri[c|cs]?\s*\n'
-        after_think = re.sub(lyric_header_pattern, '', after_think, flags=re.IGNORECASE)
+        after_think = _LYRIC_HEADER_RE.sub('', after_think)
         
         # Remove <|im_end|> tag at the end if present
-        after_think = re.sub(r'<\|im_end\|>\s*$', '', after_think)
+        after_think = _IM_END_RE.sub('', after_think)
         
         return after_think.strip()
     
@@ -2460,22 +2468,15 @@ class LLMHandler:
         audio_codes = ""
 
         # Extract audio codes - find all <|audio_code_XXX|> patterns
-        code_pattern = r'<\|audio_code_\d+\|>'
-        code_matches = re.findall(code_pattern, output_text)
+        code_matches = _AUDIO_CODE_RE.findall(output_text)
         if code_matches:
             audio_codes = "".join(code_matches)
         
         # Extract metadata from reasoning section
         # Try different reasoning tag patterns
-        reasoning_patterns = [
-            r'<think>(.*?)</think>',
-            r'<think>(.*?)</think>',
-            r'<reasoning>(.*?)</reasoning>',
-        ]
-        
         reasoning_text = None
-        for pattern in reasoning_patterns:
-            match = re.search(pattern, output_text, re.DOTALL)
+        for compiled_pattern in _REASONING_PATTERNS:
+            match = compiled_pattern.search(output_text)
             if match:
                 reasoning_text = match.group(1).strip()
                 break
