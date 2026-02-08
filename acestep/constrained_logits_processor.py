@@ -8,6 +8,7 @@ from transformers.generation.logits_process import LogitsProcessor
 import os
 import pickle
 import hashlib
+import re
 import torch
 from acestep.constants import (
     VALID_LANGUAGES,
@@ -27,6 +28,9 @@ from acestep.constants import (
 # Audio Code Constants
 # ==============================================================================
 MAX_AUDIO_CODE = 63999  # Maximum valid audio code value (codebook size = 64000)
+
+# Pre-compiled regex for audio code token matching (avoids re-compilation per call)
+_AUDIO_CODE_TOKEN_RE = re.compile(r'^<\|audio_code_(\d+)\|>$')
 
 
 # ==============================================================================
@@ -598,15 +602,13 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         These tokens should be blocked during caption generation.
         Only tokens with code values in range [0, MAX_AUDIO_CODE] are included.
         """
-        import re
-        audio_code_pattern = re.compile(r'^<\|audio_code_(\d+)\|>$')
         invalid_tokens_count = 0
         
         # Iterate through vocabulary to find audio code tokens
         for token_id in range(self.vocab_size):
             try:
                 token_text = self.tokenizer.decode([token_id])
-                match = audio_code_pattern.match(token_text)
+                match = _AUDIO_CODE_TOKEN_RE.match(token_text)
                 if match:
                     # Extract code value from token text
                     code_value = int(match.group(1))
@@ -639,12 +641,9 @@ class MetadataConstrainedLogitsProcessor(LogitsProcessor):
         Returns:
             Code value if token is a valid audio code token, None otherwise
         """
-        import re
-        audio_code_pattern = re.compile(r'^<\|audio_code_(\d+)\|>$')
-        
         try:
             token_text = self.tokenizer.decode([token_id])
-            match = audio_code_pattern.match(token_text)
+            match = _AUDIO_CODE_TOKEN_RE.match(token_text)
             if match:
                 return int(match.group(1))
         except (ValueError, KeyError, IndexError):
